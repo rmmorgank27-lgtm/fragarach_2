@@ -6,6 +6,8 @@
 
 **Status:** Blocked before network access
 
+**Historical note:** This report records the original credential-gate stop. The blocker was later resolved through an explicitly authorized non-legacy credential bridge; see `SPEC-004_LIVE_ACCEPTANCE_REPORT.md` for the completed bounded proof.
+
 ## Outcome
 
 Live Twelve Data acceptance was not performed. `TWELVE_DATA_API_KEY` was absent, and no operator-approved live proof range was supplied. The acquisition command stopped at its credential gate with:

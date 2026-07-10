@@ -10,7 +10,7 @@
 
 SPEC-004 is implemented and structurally proven against controlled, secret-free provider responses. The Twelve Data boundary adapter performs bounded HTTPS acquisition, preserves an eligible response byte-for-byte, converts it to the common staging contract, and invokes the same canonical ingestion pipeline as manual CSV evidence.
 
-No schema migration or table was added. No legacy Fragarach runtime was accessed. Live provider acceptance is not complete because the required operator credential and an operator-approved proof range are absent.
+No schema migration or table was added. No legacy Fragarach runtime was accessed. The subsequently authorized bounded live proof is recorded in `SPEC-004_LIVE_ACCEPTANCE_REPORT.md`.
 
 Fragarach II remains a **CANDIDATE AUTHORITY**. No consumer migration is authorized.
 
@@ -95,4 +95,4 @@ These fixtures contain fabricated evidence and no credential.
 
 The implementation does not prove live provider behavior, service availability, entitlement, symbol coverage, historical depth, rate-limit behavior, or operational trust. Paging is not implemented. Acquisition is operator-invoked only; no scheduler, service, provider fallback, repair path, consumer interface, or migration was added.
 
-The separate live-acceptance report records the current factual stop condition. **Operations is King.**
+The final live-acceptance report records the later bounded runtime proof and its limitations. **Operations is King.**

@@ -4,7 +4,7 @@
 
 **Dependencies:** SPEC-001 through SPEC-003
 
-**Status:** Implemented; live acceptance blocked pending credential
+**Status:** Implemented; bounded live acceptance completed 2026-07-11
 
 ## Contract
 
@@ -44,6 +44,6 @@ No pre-ingestion failure creates a raw block, run, bar, provenance event, lane c
 
 No fallback, repair, deletion, calendar mutation, scheduling, service, sidecar, additional table, legacy access, or consumer interpretation is authorized.
 
-Passing automated SPEC-004 tests proves deterministic adapter and storage mechanics against controlled responses. Live provider acceptance requires an operator credential and separate factual proof.
+Passing automated SPEC-004 tests proves deterministic adapter and storage mechanics against controlled responses. The bounded live acceptance recorded in `docs/reports/SPEC-004_LIVE_ACCEPTANCE_REPORT.md` proves the specified request, preservation, merge, replay, and verification path for the observed provider responses only. It does not certify provider correctness, completeness, entitlement beyond the tested range, or production readiness.
 
 Fragarach II remains a candidate authority. **Operations is King.**
