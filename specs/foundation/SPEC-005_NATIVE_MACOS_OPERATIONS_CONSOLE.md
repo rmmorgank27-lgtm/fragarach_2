@@ -2,7 +2,7 @@
 
 **Classification:** Foundation Specification
 
-**Status:** Implemented candidate; runtime proof required
+**Status:** Implemented; bounded runtime acceptance completed 2026-07-11
 
 ## Purpose and authority boundary
 
