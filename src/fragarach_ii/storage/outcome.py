@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Mapping
 
 
 OUTCOME_FORMAT = "fragarach_ii.ingest_outcome.v1"
@@ -35,6 +35,7 @@ def canonical_ingest_outcome(
     conflicts_preserved: int = 0,
     rejected: int = 0,
     rejections: Iterable[Rejection] = (),
+    facts: Mapping[str, str | int | bool] | None = None,
 ) -> str:
     """Serialize an outcome deterministically for equivalent factual input."""
 
@@ -69,5 +70,11 @@ def canonical_ingest_outcome(
         **counts,
         "rejections": rejection_values,
     }
+    reserved = set(payload)
+    for key, value in sorted((facts or {}).items()):
+        if key in reserved:
+            raise ValueError(f"factual outcome key is reserved: {key}")
+        if not key or not isinstance(value, (str, int, bool)):
+            raise ValueError("additional outcome facts must be named JSON scalars")
+        payload[key] = value
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-
