@@ -9,6 +9,10 @@
 > [SPEC-001A](SPEC-001A_PROVENANCE_EVENT_AMENDMENT.md). Migration 1 remains
 > unchanged.
 
+> **Amendment:** The nullable lane validation-summary storage contract is defined
+> by [SPEC-003A](SPEC-003A_LANE_VALIDATION_SUMMARY_AMENDMENT.md). The original
+> lane watermark and ingestion fields retain their SPEC-001 meanings.
+
 ## 1. Purpose and boundary
 
 This specification defines the first Fragarach II truth-store structure and its local runtime proof. It implements storage mechanics only. It does not implement acquisition, CSV ingestion, calendars, rollup computation, scheduling, services, interfaces, migration, or recovery of the prior Fragarach project.

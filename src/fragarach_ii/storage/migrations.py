@@ -10,8 +10,11 @@ from .schema import (
     MIGRATION_1_STATEMENTS,
     MIGRATION_2_NAME,
     MIGRATION_2_STATEMENTS,
+    MIGRATION_3_NAME,
+    MIGRATION_3_STATEMENTS,
     migration_1_checksum,
     migration_2_checksum,
+    migration_3_checksum,
 )
 
 
@@ -22,21 +25,24 @@ class MigrationError(RuntimeError):
 def apply_migrations(
     connection: sqlite3.Connection,
     *,
-    target_version: int = 2,
+    target_version: int = 3,
     fault_after_statement: int | None = None,
+    fault_migration_version: int = 2,
 ) -> None:
     """Apply forward migrations atomically through ``target_version``.
 
     ``fault_after_statement`` exists solely for deterministic interruption proof.
-    It applies to migration 2 and is never used by runtime initialization.
+    ``fault_migration_version`` selects the migration interrupted by that test hook.
+    Neither argument is used by runtime initialization.
     """
 
-    if target_version not in (1, 2):
+    if target_version not in (1, 2, 3):
         raise ValueError(f"unsupported target migration version: {target_version}")
 
     migrations = (
         (1, MIGRATION_1_NAME, migration_1_checksum(), MIGRATION_1_STATEMENTS),
         (2, MIGRATION_2_NAME, migration_2_checksum(), MIGRATION_2_STATEMENTS),
+        (3, MIGRATION_3_NAME, migration_3_checksum(), MIGRATION_3_STATEMENTS),
     )
     for version, name, checksum, statements in migrations[:target_version]:
         existing = _existing_migration(connection, version)
@@ -52,7 +58,9 @@ def apply_migrations(
             name,
             checksum,
             statements,
-            fault_after_statement=fault_after_statement if version == 2 else None,
+            fault_after_statement=(
+                fault_after_statement if version == fault_migration_version else None
+            ),
         )
 
 
@@ -60,6 +68,7 @@ def verify_migrations(connection: sqlite3.Connection) -> None:
     expected = [
         (1, MIGRATION_1_NAME, migration_1_checksum()),
         (2, MIGRATION_2_NAME, migration_2_checksum()),
+        (3, MIGRATION_3_NAME, migration_3_checksum()),
     ]
     rows = connection.execute(
         "SELECT version, name, checksum_sha256 FROM schema_migrations ORDER BY version"

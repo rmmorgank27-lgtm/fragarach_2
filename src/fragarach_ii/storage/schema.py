@@ -437,3 +437,148 @@ def migration_2_checksum() -> str:
         statement.strip() for statement in MIGRATION_2_STATEMENTS
     )
     return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
+MIGRATION_3_NAME = "SPEC-003A lane validation summary foundation amendment"
+
+_VALIDATION_SUMMARY_KEYS = (
+    "format",
+    "symbol",
+    "timeframe",
+    "calendar_id",
+    "calendar_version",
+    "calendar_checksum",
+    "gap_doctrine_id",
+    "gap_doctrine_version",
+    "gap_doctrine_checksum",
+    "validator_version",
+    "through_date",
+    "expected_session_count",
+    "present_expected_session_count",
+    "missing_expected_session_count",
+    "outside_expected_session_count",
+    "empty_week_count",
+    "empty_month_count",
+    "latest_expected_session",
+    "latest_expected_session_present",
+    "material_gap_count",
+    "non_material_gap_count",
+    "result_checksum",
+    "validation_observed_at",
+)
+
+_VALIDATION_SUMMARY_KEY_SQL = ", ".join(
+    f"'{key}'" for key in _VALIDATION_SUMMARY_KEYS
+)
+
+_VALIDATION_SUMMARY_CASE = f"""
+CASE
+    WHEN json_valid(NEW.validation_summary) = 0
+        THEN RAISE(ABORT, 'lane validation summary must be valid JSON')
+    WHEN json_extract(NEW.validation_summary, '$.format')
+         <> 'fragarach_ii.lane_validation_summary.v1'
+        THEN RAISE(ABORT, 'invalid lane validation summary format')
+    WHEN (SELECT count(*) FROM json_each(NEW.validation_summary))
+         <> {len(_VALIDATION_SUMMARY_KEYS)}
+      OR EXISTS (
+        SELECT 1 FROM json_each(NEW.validation_summary)
+        WHERE key NOT IN ({_VALIDATION_SUMMARY_KEY_SQL})
+      )
+        THEN RAISE(ABORT, 'invalid lane validation summary keys')
+    WHEN json_type(NEW.validation_summary, '$.symbol') <> 'text'
+      OR json_extract(NEW.validation_summary, '$.symbol') <> NEW.asset
+      OR json_type(NEW.validation_summary, '$.timeframe') <> 'text'
+      OR json_extract(NEW.validation_summary, '$.timeframe') <> NEW.timeframe
+        THEN RAISE(ABORT, 'lane validation summary identity mismatch')
+    WHEN json_type(NEW.validation_summary, '$.calendar_id') <> 'text'
+      OR length(json_extract(NEW.validation_summary, '$.calendar_id')) = 0
+      OR json_type(NEW.validation_summary, '$.calendar_version') <> 'integer'
+      OR json_extract(NEW.validation_summary, '$.calendar_version') < 1
+      OR json_type(NEW.validation_summary, '$.gap_doctrine_id') <> 'text'
+      OR length(json_extract(NEW.validation_summary, '$.gap_doctrine_id')) = 0
+      OR json_type(NEW.validation_summary, '$.gap_doctrine_version') <> 'integer'
+      OR json_extract(NEW.validation_summary, '$.gap_doctrine_version') < 1
+      OR json_type(NEW.validation_summary, '$.validator_version') <> 'text'
+      OR length(json_extract(NEW.validation_summary, '$.validator_version')) = 0
+        THEN RAISE(ABORT, 'invalid lane validation summary version identity')
+    WHEN json_type(NEW.validation_summary, '$.calendar_checksum') <> 'text'
+      OR length(json_extract(NEW.validation_summary, '$.calendar_checksum')) <> 64
+      OR json_extract(NEW.validation_summary, '$.calendar_checksum') GLOB '*[^0-9a-f]*'
+      OR json_type(NEW.validation_summary, '$.gap_doctrine_checksum') <> 'text'
+      OR length(json_extract(NEW.validation_summary, '$.gap_doctrine_checksum')) <> 64
+      OR json_extract(NEW.validation_summary, '$.gap_doctrine_checksum') GLOB '*[^0-9a-f]*'
+      OR json_type(NEW.validation_summary, '$.result_checksum') <> 'text'
+      OR length(json_extract(NEW.validation_summary, '$.result_checksum')) <> 64
+      OR json_extract(NEW.validation_summary, '$.result_checksum') GLOB '*[^0-9a-f]*'
+        THEN RAISE(ABORT, 'invalid lane validation summary checksum')
+    WHEN json_type(NEW.validation_summary, '$.through_date') <> 'text'
+      OR length(json_extract(NEW.validation_summary, '$.through_date')) <> 10
+      OR date(json_extract(NEW.validation_summary, '$.through_date'))
+         <> json_extract(NEW.validation_summary, '$.through_date')
+      OR (
+        json_type(NEW.validation_summary, '$.latest_expected_session') <> 'null'
+        AND (
+          json_type(NEW.validation_summary, '$.latest_expected_session') <> 'text'
+          OR length(json_extract(NEW.validation_summary, '$.latest_expected_session')) <> 10
+          OR date(json_extract(NEW.validation_summary, '$.latest_expected_session'))
+             <> json_extract(NEW.validation_summary, '$.latest_expected_session')
+        )
+      )
+      OR json_type(NEW.validation_summary, '$.validation_observed_at') <> 'text'
+      OR length(json_extract(NEW.validation_summary, '$.validation_observed_at')) = 0
+        THEN RAISE(ABORT, 'invalid lane validation summary date')
+    WHEN json_type(NEW.validation_summary, '$.expected_session_count') <> 'integer'
+      OR json_type(NEW.validation_summary, '$.present_expected_session_count') <> 'integer'
+      OR json_type(NEW.validation_summary, '$.missing_expected_session_count') <> 'integer'
+      OR json_type(NEW.validation_summary, '$.outside_expected_session_count') <> 'integer'
+      OR json_type(NEW.validation_summary, '$.empty_week_count') <> 'integer'
+      OR json_type(NEW.validation_summary, '$.empty_month_count') <> 'integer'
+      OR json_type(NEW.validation_summary, '$.material_gap_count') <> 'integer'
+      OR json_type(NEW.validation_summary, '$.non_material_gap_count') <> 'integer'
+        THEN RAISE(ABORT, 'lane validation summary counts must be integers')
+    WHEN json_extract(NEW.validation_summary, '$.expected_session_count') < 0
+      OR json_extract(NEW.validation_summary, '$.present_expected_session_count') < 0
+      OR json_extract(NEW.validation_summary, '$.missing_expected_session_count') < 0
+      OR json_extract(NEW.validation_summary, '$.outside_expected_session_count') < 0
+      OR json_extract(NEW.validation_summary, '$.empty_week_count') < 0
+      OR json_extract(NEW.validation_summary, '$.empty_month_count') < 0
+      OR json_extract(NEW.validation_summary, '$.material_gap_count') < 0
+      OR json_extract(NEW.validation_summary, '$.non_material_gap_count') < 0
+      OR json_extract(NEW.validation_summary, '$.present_expected_session_count')
+         + json_extract(NEW.validation_summary, '$.missing_expected_session_count')
+         <> json_extract(NEW.validation_summary, '$.expected_session_count')
+        THEN RAISE(ABORT, 'invalid lane validation summary counts')
+    WHEN json_type(NEW.validation_summary, '$.latest_expected_session_present')
+         NOT IN ('true', 'false')
+        THEN RAISE(ABORT, 'latest expected session presence must be boolean')
+END
+""".strip()
+
+MIGRATION_3_STATEMENTS = (
+    "ALTER TABLE lane_state ADD COLUMN validation_summary TEXT",
+    f"""
+    CREATE TRIGGER lane_state_validation_summary_insert
+    BEFORE INSERT ON lane_state
+    WHEN NEW.validation_summary IS NOT NULL
+    BEGIN
+        SELECT {_VALIDATION_SUMMARY_CASE};
+    END
+    """,
+    f"""
+    CREATE TRIGGER lane_state_validation_summary_update
+    BEFORE UPDATE OF validation_summary ON lane_state
+    WHEN NEW.validation_summary IS NOT NULL
+    BEGIN
+        SELECT {_VALIDATION_SUMMARY_CASE};
+    END
+    """,
+)
+
+
+def migration_3_checksum() -> str:
+    """Return the stable checksum of the SPEC-003A executable statements."""
+
+    source = "\n-- statement --\n".join(
+        statement.strip() for statement in MIGRATION_3_STATEMENTS
+    )
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()

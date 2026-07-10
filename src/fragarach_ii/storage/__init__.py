@@ -10,12 +10,18 @@ from .database import (
     verify_integrity,
 )
 from .outcome import OUTCOME_FORMAT, Rejection, canonical_ingest_outcome
+from .validation_summary import (
+    VALIDATION_SUMMARY_FORMAT,
+    LaneValidationSummary,
+)
 from .writer import WriterLock, WriterLockError
 
 __all__ = [
     "IntegrityReport",
+    "LaneValidationSummary",
     "OUTCOME_FORMAT",
     "Rejection",
+    "VALIDATION_SUMMARY_FORMAT",
     "WriterLock",
     "WriterLockError",
     "backup_database",
