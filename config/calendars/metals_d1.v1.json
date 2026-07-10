@@ -1,0 +1,18 @@
+{
+  "asset_class": "METALS_XAUUSD",
+  "calculated_closures": ["GOOD_FRIDAY"],
+  "calendar_id": "METALS_D1_V1",
+  "calendar_version": 1,
+  "definition_checksum": "38e099907749091ac3b3d0038ff4814b0f0f5d5f4dca0b7fbd0dc46f3730a1a9",
+  "effective_from": "1900-01-01",
+  "effective_to": null,
+  "format": "fragarach_ii.calendar_definition.v1",
+  "overrides": [],
+  "recurring_full_day_closures": [
+    {"day": 1, "month": 1, "reason": "New Year's Day"},
+    {"day": 25, "month": 12, "reason": "Christmas Day"}
+  ],
+  "timeframe": "D1",
+  "timezone_basis": "UTC",
+  "weekdays_expected": [1, 2, 3, 4, 5]
+}

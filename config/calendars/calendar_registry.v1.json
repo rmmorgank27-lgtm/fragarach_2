@@ -1,0 +1,9 @@
+{
+  "calendars": {
+    "CRYPTO_D1_V1": "crypto_d1.v1.json",
+    "FX_D1_V1": "fx_d1.v1.json",
+    "METALS_D1_V1": "metals_d1.v1.json"
+  },
+  "format": "fragarach_ii.calendar_registry.v1",
+  "registry_checksum": "368421535ded1e952b3d44e0d8533b18a17c0d84a47d52f1d3e2b9b3bf20275a"
+}

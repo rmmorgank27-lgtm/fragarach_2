@@ -21,4 +21,13 @@ PYTHONPATH=src python3 -m fragarach_ii.commands.ingest_file \
   --symbol AUDUSD --timeframe D1 --merge-mode preserve --json
 ```
 
+Factual D1 validation defaults to read-only/no-persist:
+
+```sh
+PYTHONPATH=src python3 -m fragarach_ii.commands.validate_lane \
+  --database /path/to/authority.sqlite3 \
+  --symbol AUDUSD --timeframe D1 --through-date 2026-07-10 \
+  --no-persist --json
+```
+
 **Operations is King.**

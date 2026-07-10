@@ -1,0 +1,14 @@
+{
+  "doctrine_checksum": "c86382fc8099c3f27af2976592dd1b39e6fdb1f9065da0b134ba351e2340ad28",
+  "format": "fragarach_ii.gap_doctrine.v1",
+  "gap_doctrine_id": "FRAGARACH_II_D1_GAP_DOCTRINE_V1",
+  "gap_doctrine_version": 1,
+  "material_classes": [
+    "CURRENT_EDGE_MISSING",
+    "EMPTY_EXPECTED_WEEK",
+    "EMPTY_EXPECTED_MONTH"
+  ],
+  "material_wording": "MATERIAL_BY_GAP_DOCTRINE_V1",
+  "non_material_classes": ["ISOLATED_EXPECTED_SESSION_MISSING"],
+  "non_material_wording": "NON_MATERIAL_BY_GAP_DOCTRINE_V1"
+}

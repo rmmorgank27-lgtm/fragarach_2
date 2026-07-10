@@ -1,0 +1,15 @@
+{
+  "asset_class": "CRYPTO",
+  "calculated_closures": [],
+  "calendar_id": "CRYPTO_D1_V1",
+  "calendar_version": 1,
+  "definition_checksum": "b9debf8c139437c0ba3c7505dcea8423452565a255fefee4d35f98529ab887c6",
+  "effective_from": "1900-01-01",
+  "effective_to": null,
+  "format": "fragarach_ii.calendar_definition.v1",
+  "overrides": [],
+  "recurring_full_day_closures": [],
+  "timeframe": "D1",
+  "timezone_basis": "UTC",
+  "weekdays_expected": [1, 2, 3, 4, 5, 6, 7]
+}

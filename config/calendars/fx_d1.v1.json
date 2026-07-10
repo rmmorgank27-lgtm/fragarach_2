@@ -1,0 +1,18 @@
+{
+  "asset_class": "FX",
+  "calculated_closures": [],
+  "calendar_id": "FX_D1_V1",
+  "calendar_version": 1,
+  "definition_checksum": "a19ab5557787748619e7130c3cf89aa524a117073f08aa4c9b97e432db5e0926",
+  "effective_from": "1900-01-01",
+  "effective_to": null,
+  "format": "fragarach_ii.calendar_definition.v1",
+  "overrides": [],
+  "recurring_full_day_closures": [
+    {"day": 1, "month": 1, "reason": "New Year's Day"},
+    {"day": 25, "month": 12, "reason": "Christmas Day"}
+  ],
+  "timeframe": "D1",
+  "timezone_basis": "UTC",
+  "weekdays_expected": [1, 2, 3, 4, 5]
+}
