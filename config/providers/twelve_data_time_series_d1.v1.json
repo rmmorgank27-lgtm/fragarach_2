@@ -1,0 +1,27 @@
+{
+  "authentication_environment": "TWELVE_DATA_API_KEY",
+  "base_url": "https://api.twelvedata.com",
+  "configuration_checksum": "d372a15a3541d56903e276355a65038cc3ce9fb12bbd71d80cf01f0a8f1ff9c5",
+  "connect_timeout_seconds": 10,
+  "endpoint_family": "time_series",
+  "endpoint_path": "/time_series",
+  "format": "fragarach_ii.provider_contract.v1",
+  "interval": "1day",
+  "max_attempts": 3,
+  "max_calendar_days": 5000,
+  "max_response_bytes": 5242880,
+  "order": "ASC",
+  "provider_contract": "TWELVE_DATA_TIME_SERIES_D1_V1",
+  "provider_host": "api.twelvedata.com",
+  "provider_id": "TWELVE_DATA",
+  "read_timeout_seconds": 20,
+  "retry_backoff_seconds": [0, 1, 2],
+  "symbols": {
+    "AUDUSD": "AUD/USD",
+    "BTCUSD": "BTC/USD",
+    "XAUUSD": "XAU/USD"
+  },
+  "timeframe": "D1",
+  "timezone": "UTC",
+  "user_agent": "Fragarach-II/1 SPEC-004"
+}

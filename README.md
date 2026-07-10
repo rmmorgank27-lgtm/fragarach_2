@@ -30,4 +30,7 @@ PYTHONPATH=src python3 -m fragarach_ii.commands.validate_lane \
   --no-persist --json
 ```
 
+Bounded Twelve Data acquisition is documented in
+[`TWELVE_DATA_ACQUISITION.md`](docs/operations/TWELVE_DATA_ACQUISITION.md).
+
 **Operations is King.**

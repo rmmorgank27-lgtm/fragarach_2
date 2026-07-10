@@ -1,0 +1,1 @@
+"""Controlled provider acquisition tests."""

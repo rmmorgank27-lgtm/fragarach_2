@@ -76,6 +76,7 @@ def stage_csv_bytes(
                         explicit_symbol=symbol,
                         explicit_timeframe=timeframe,
                         provider=provider,
+                        source="MANUAL_FILE",
                         raw_block_id=raw_block_id,
                         source_row_number=source_row_number,
                         received_at=received_at,

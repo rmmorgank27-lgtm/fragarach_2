@@ -32,6 +32,7 @@ def stage_record(
     explicit_symbol: str | None,
     explicit_timeframe: str | None,
     provider: str,
+    source: str,
     raw_block_id: str,
     source_row_number: int,
     received_at: str,
@@ -76,7 +77,7 @@ def stage_record(
         low=canonical_decimal(low_value),
         close=canonical_decimal(close_value),
         volume=canonical_decimal(volume_value) if volume_value is not None else None,
-        source="MANUAL_FILE",
+        source=source,
         provider=normalize_identity(provider, "provider"),
         raw_block_id=raw_block_id,
         source_row_number=source_row_number,
@@ -182,4 +183,3 @@ def _resolve_identity(
     if result is None:
         raise RowValidationError("MISSING_IDENTITY", f"{name} is required")
     return result
-
