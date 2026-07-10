@@ -36,6 +36,11 @@ class CsvStagingTests(unittest.TestCase):
         self.assertEqual(first.source, "MANUAL_FILE")
         self.assertEqual(first.provider, "MANUAL")
 
+    def test_time_header_maps_to_logical_timestamp_without_changing_source_text(self) -> None:
+        batch = self.stage("time,open,high,low,close\n2026-07-09,1,2,0,1\n")
+        self.assertEqual(batch.rejections, ())
+        self.assertEqual(batch.bars[0].source_timestamp_text, "2026-07-09")
+
     def test_csv_identity_must_agree_with_explicit_identity(self) -> None:
         batch = self.stage(
             "symbol,timeframe,timestamp,open,high,low,close\n"
@@ -92,6 +97,11 @@ class CsvStagingTests(unittest.TestCase):
             "timestamp,open,high,low,close\n2026-07-09T12:00:00,1,2,0,1\n"
         )
         self.assertEqual(missing_zone.rejections[0].code, "MISSING_TIMEZONE")
+        duplicate_logical = self.stage(
+            "time,timestamp,open,high,low,close\n"
+            "2026-07-09,2026-07-09,1,2,0,1\n"
+        )
+        self.assertEqual(duplicate_logical.rejections[0].code, "DUPLICATE_HEADER")
 
 
 if __name__ == "__main__":

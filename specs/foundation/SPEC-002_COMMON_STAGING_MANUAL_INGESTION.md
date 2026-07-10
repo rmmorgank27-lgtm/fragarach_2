@@ -26,7 +26,7 @@ One ingestion run processes one selected file, one immutable raw block, and one 
 
 ## 3. CSV boundary
 
-The adapter accepts UTF-8, optionally with a UTF-8 BOM, and requires a header row. Logical headers are trimmed and case-normalized independently of column order. Required fields are `timestamp`, `open`, `high`, `low`, and `close`; `volume`, `symbol`, and `timeframe` are optional. Duplicate, missing, empty, extra, and unsupported logical columns are factual errors.
+The adapter accepts UTF-8, optionally with a UTF-8 BOM, and requires a header row. Logical headers are trimmed and case-normalized independently of column order. Required fields are `timestamp`, `open`, `high`, `low`, and `close`; `volume`, `symbol`, and `timeframe` are optional. The physical header `time` is explicitly mapped to the logical `timestamp` field; providing both is a duplicate logical header and is rejected. Duplicate, missing, empty, extra, and unsupported logical columns are factual errors.
 
 Symbol and timeframe may be supplied by the command, the row, or both. Values are trimmed and uppercased without alias translation. When command and row both supply a value, disagreement rejects that row. Missing identity rejects it. Filenames never supply identity.
 
@@ -112,4 +112,3 @@ Tests and synthetic runtime commands must prove clean ingestion, checksum idempo
 Synthetic evidence proves mechanics only. Operator-selected real evidence is required later for real-world operational trust.
 
 Fragarach II remains a candidate authority. **Operations is King.**
-

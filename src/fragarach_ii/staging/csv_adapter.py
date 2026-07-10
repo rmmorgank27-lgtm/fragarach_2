@@ -16,6 +16,7 @@ from .contract import StagingBatch, StagingRejection
 
 REQUIRED_FIELDS = frozenset({"timestamp", "open", "high", "low", "close"})
 OPTIONAL_FIELDS = frozenset({"volume", "symbol", "timeframe"})
+HEADER_ALIASES = {"time": "timestamp"}
 
 
 def stage_csv_bytes(
@@ -36,7 +37,8 @@ def stage_csv_bytes(
         reader = csv.DictReader(io.StringIO(text, newline=""), strict=True)
         if reader.fieldnames is None:
             return _file_rejection("MISSING_HEADER", "CSV header row is required")
-        normalized_headers = [header.strip().lower() for header in reader.fieldnames]
+        physical_headers = [header.strip().lower() for header in reader.fieldnames]
+        normalized_headers = [HEADER_ALIASES.get(header, header) for header in physical_headers]
         if any(not header for header in normalized_headers):
             return _file_rejection("INVALID_HEADER", "CSV contains an empty header")
         if len(set(normalized_headers)) != len(normalized_headers):
