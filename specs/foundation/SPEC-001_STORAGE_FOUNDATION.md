@@ -4,6 +4,11 @@
 **Status:** Implemented candidate  
 **Scope:** SQLite storage only
 
+> **Amendment:** The provenance identity, evidence-run association, and structured
+> run-outcome contract are superseded where applicable by
+> [SPEC-001A](SPEC-001A_PROVENANCE_EVENT_AMENDMENT.md). Migration 1 remains
+> unchanged.
+
 ## 1. Purpose and boundary
 
 This specification defines the first Fragarach II truth-store structure and its local runtime proof. It implements storage mechanics only. It does not implement acquisition, CSV ingestion, calendars, rollup computation, scheduling, services, interfaces, migration, or recovery of the prior Fragarach project.
@@ -142,4 +147,3 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 
 Fragarach II remains a candidate authority until runtime operation proves otherwise. **Operations is King.**
-

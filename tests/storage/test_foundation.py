@@ -13,6 +13,7 @@ from fragarach_ii.storage import (
     WriterLock,
     WriterLockError,
     backup_database,
+    canonical_ingest_outcome,
     initialize_database,
     open_read_only,
     registered_writer,
@@ -245,17 +246,20 @@ class StorageFoundationTestCase(unittest.TestCase):
             writer.execute(
                 """
                 INSERT INTO provenance
-                    (asset, timeframe, open_time_utc, raw_block_id,
-                     source_record_ref, observed_at_utc, ingest_run_id)
-                VALUES ('AUDUSD', 'D1', 0, 'immutable-1', 'line:1', ?,
-                        'provenance-run')
+                    (provenance_event_id, ingest_run_id, raw_block_id, symbol,
+                     timeframe, timestamp, source_row_number, merge_action,
+                     candidate_open, candidate_high, candidate_low, candidate_close,
+                     candidate_volume, recorded_at)
+                VALUES ('event-1', 'provenance-run', 'immutable-1', 'AUDUSD',
+                        'D1', 0, 1, 'INSERT', '1.0', '1.1', '0.9', '1.05',
+                        NULL, ?)
                 """,
                 ("2026-07-10T00:00:00Z",),
             )
             with self.assertRaisesRegex(sqlite3.IntegrityError, "append-only"):
                 writer.execute(
-                    "UPDATE provenance SET source_record_ref = 'line:2' "
-                    "WHERE raw_block_id = 'immutable-1'"
+                    "UPDATE provenance SET source_row_number = 2 "
+                    "WHERE provenance_event_id = 'event-1'"
                 )
             with self.assertRaisesRegex(sqlite3.IntegrityError, "append-only"):
                 writer.execute(
@@ -268,9 +272,12 @@ class StorageFoundationTestCase(unittest.TestCase):
                 writer.execute(
                     """
                     INSERT INTO provenance
-                        (asset, timeframe, open_time_utc, raw_block_id,
-                         source_record_ref, observed_at_utc, ingest_run_id)
-                    VALUES ('AUDUSD', 'D1', 0, 'missing', 'line:1', ?, 'missing')
+                        (provenance_event_id, ingest_run_id, raw_block_id, symbol,
+                         timeframe, timestamp, source_row_number, merge_action,
+                         candidate_open, candidate_high, candidate_low,
+                         candidate_close, recorded_at)
+                    VALUES ('missing-event', 'missing', 'missing', 'AUDUSD',
+                            'D1', 0, 1, 'INSERT', '1', '1', '1', '1', ?)
                     """,
                     ("2026-07-10T00:00:00Z",),
                 )
@@ -304,7 +311,8 @@ class StorageFoundationTestCase(unittest.TestCase):
             )
             with self.assertRaisesRegex(sqlite3.IntegrityError, "illegal"):
                 writer.execute(
-                    "UPDATE ingest_runs SET detail = 'rewritten' WHERE ingest_run_id = 'run-1'"
+                    "UPDATE ingest_runs SET detail = ? WHERE ingest_run_id = 'run-1'",
+                    (canonical_ingest_outcome(),),
                 )
             with self.assertRaisesRegex(sqlite3.IntegrityError, "append-only"):
                 writer.execute("DELETE FROM ingest_runs WHERE ingest_run_id = 'run-1'")
