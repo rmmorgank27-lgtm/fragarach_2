@@ -1,0 +1,36 @@
+{
+  "format": "fragarach_ii.instrument_registration_backfill.v1",
+  "historical_only": true,
+  "registrations": [
+    {
+      "asset": "AUDUSD", "timeframe": "D1", "instrument_family": "AUDUSD", "local_symbol": "AUDUSD",
+      "aliases": [], "display_name": "Australian Dollar / US Dollar", "instrument_type": "FX_SPOT_PAIR",
+      "asset_class": "FX", "representation_type": "FX_SPOT_PAIR", "exchange_name": "OTC", "exchange_mic": null,
+      "provider_id": "TWELVE_DATA", "provider_contract": "TWELVE_DATA_TIME_SERIES_D1_V1", "provider_symbol": "AUD/USD",
+      "provider_exchange": null, "provider_country": null, "provider_instrument_type": "Physical Currency",
+      "calendar_id": "FX_D1_V1", "calendar_version": 1, "gap_doctrine_id": "FRAGARACH_II_D1_GAP_DOCTRINE_V1",
+      "gap_doctrine_version": 1, "registered_at_utc": "2026-07-10T13:55:08.321103+00:00",
+      "identity_checksum_sha256": "20c0355ae9ca4b6e1ffe6f24f5dc7920d036757e132c3e33e1648d5a86b7730f"
+    },
+    {
+      "asset": "XAUUSD", "timeframe": "D1", "instrument_family": "GOLD", "local_symbol": "XAUUSD",
+      "aliases": [], "display_name": "Gold Spot / US Dollar", "instrument_type": "PRECIOUS_METAL_SPOT_PAIR",
+      "asset_class": "METALS", "representation_type": "SPOT", "exchange_name": "OTC", "exchange_mic": null,
+      "provider_id": "TWELVE_DATA", "provider_contract": "TWELVE_DATA_TIME_SERIES_D1_V1", "provider_symbol": "XAU/USD",
+      "provider_exchange": null, "provider_country": null, "provider_instrument_type": "Precious Metal",
+      "calendar_id": "METALS_D1_V1", "calendar_version": 1, "gap_doctrine_id": "FRAGARACH_II_D1_GAP_DOCTRINE_V1",
+      "gap_doctrine_version": 1, "registered_at_utc": "2026-07-10T13:55:08.686443+00:00",
+      "identity_checksum_sha256": "f296a6ed305bc12146b6ed84a2fee22fcb70f1697889100c6ebaaa06074d136a"
+    },
+    {
+      "asset": "BTCUSD", "timeframe": "D1", "instrument_family": "BITCOIN", "local_symbol": "BTCUSD",
+      "aliases": [], "display_name": "Bitcoin / US Dollar", "instrument_type": "CRYPTO_SPOT_PAIR",
+      "asset_class": "CRYPTO", "representation_type": "CRYPTO_SPOT_PAIR", "exchange_name": "Coinbase Pro", "exchange_mic": null,
+      "provider_id": "TWELVE_DATA", "provider_contract": "TWELVE_DATA_TIME_SERIES_D1_V1", "provider_symbol": "BTC/USD",
+      "provider_exchange": "Coinbase Pro", "provider_country": null, "provider_instrument_type": "Digital Currency",
+      "calendar_id": "CRYPTO_D1_V1", "calendar_version": 1, "gap_doctrine_id": "FRAGARACH_II_D1_GAP_DOCTRINE_V1",
+      "gap_doctrine_version": 1, "registered_at_utc": "2026-07-10T13:55:09.027943+00:00",
+      "identity_checksum_sha256": "f3bbb3d7770a3ae0668d8b2a68e0e224df91123c4cff96e226e0223429a1042b"
+    }
+  ]
+}

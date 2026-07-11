@@ -84,6 +84,8 @@ def ingest_staged_batch(
     ingest_run_id = uuid.uuid4().hex
     with registered_writer(database_path) as connection:
         apply_migrations(connection)
+        if batch.bars:
+            _require_registration(connection, batch.bars[0].symbol, batch.bars[0].timeframe)
         if batch.rejections:
             if not preserve_rejected_evidence:
                 raise ValueError("rejected staged provider evidence is not persistable")
@@ -114,6 +116,7 @@ def ingest_staged_batch(
                 )
                 if counts.canonical_mutations:
                     _refresh_lane_state(connection, batch, ingest_run_id, evidence.received_at)
+                _confirm_registration_evidence(connection, batch.bars[0].symbol, batch.bars[0].timeframe, evidence.received_at)
                 if before_commit is not None:
                     before_commit(connection)
                 detail = _outcome_json(
@@ -166,6 +169,20 @@ def _ensure_raw_block(connection: sqlite3.Connection, evidence: RawEvidence) -> 
         ),
     )
     return False
+
+
+def _require_registration(connection: sqlite3.Connection, symbol: str, timeframe: str) -> None:
+    if connection.execute("SELECT 1 FROM instrument_registrations WHERE asset=? AND timeframe=?",(symbol,timeframe)).fetchone() is None:
+        raise ValueError(f"UNREGISTERED_LANE: {symbol}:{timeframe}")
+
+
+def _confirm_registration_evidence(connection: sqlite3.Connection, symbol: str, timeframe: str, observed_at: str) -> None:
+    row=connection.execute("SELECT registration_status FROM instrument_registrations WHERE asset=? AND timeframe=?",(symbol,timeframe)).fetchone()
+    if row == ("REGISTERED_NO_EVIDENCE",):
+        connection.execute("UPDATE instrument_registrations SET registration_status='REGISTERED_WITH_EVIDENCE',evidence_confirmed_at_utc=? WHERE asset=? AND timeframe=?",(observed_at,symbol,timeframe))
+    mismatch=connection.execute("""SELECT 1 FROM instrument_registrations r WHERE r.asset=? AND r.timeframe=? AND
+      ((r.registration_status='REGISTERED_WITH_EVIDENCE') <> EXISTS(SELECT 1 FROM bars b WHERE b.asset=r.asset AND b.timeframe=r.timeframe))""",(symbol,timeframe)).fetchone()
+    if mismatch: raise RuntimeError("registration evidence status invariant failed")
 
 
 def _record_active_run(

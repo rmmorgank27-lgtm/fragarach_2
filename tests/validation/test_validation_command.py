@@ -66,7 +66,7 @@ class ValidationCommandTests(unittest.TestCase):
                     ]
                 )
             self.assertEqual(status, 2)
-            self.assertEqual(json.loads(output.getvalue())["code"], "CALENDAR_NOT_CONFIGURED")
+            self.assertEqual(json.loads(output.getvalue())["code"], "UNREGISTERED_LANE")
 
 
 if __name__ == "__main__":

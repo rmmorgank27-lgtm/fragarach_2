@@ -14,6 +14,7 @@ APPLICATION_TABLES = frozenset(
         "lane_state",
         "rollup_state",
         "schema_migrations",
+        "instrument_registrations",
     }
 )
 
@@ -581,4 +582,142 @@ def migration_3_checksum() -> str:
     source = "\n-- statement --\n".join(
         statement.strip() for statement in MIGRATION_3_STATEMENTS
     )
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
+MIGRATION_4_NAME = "SPEC-006A instrument registration authority foundation amendment"
+
+MIGRATION_4_STATEMENTS = (
+    """
+    CREATE TABLE instrument_registrations (
+        asset TEXT NOT NULL, timeframe TEXT NOT NULL,
+        registration_contract TEXT NOT NULL, registration_contract_version INTEGER NOT NULL,
+        instrument_family TEXT NOT NULL, local_symbol TEXT NOT NULL, aliases_json TEXT NOT NULL,
+        display_name TEXT NOT NULL, instrument_type TEXT NOT NULL, asset_class TEXT NOT NULL,
+        representation_type TEXT NOT NULL, underlying_reference TEXT, contract_or_series TEXT,
+        semantic_equivalence TEXT NOT NULL, jurisdiction TEXT, trading_currency TEXT NOT NULL,
+        exchange_name TEXT NOT NULL, exchange_mic TEXT,
+        provider_id TEXT NOT NULL, provider_contract TEXT NOT NULL, provider_symbol TEXT NOT NULL,
+        provider_exchange TEXT, provider_country TEXT, provider_instrument_type TEXT NOT NULL,
+        provider_identity_key TEXT NOT NULL,
+        calendar_id TEXT NOT NULL, calendar_version INTEGER NOT NULL,
+        gap_doctrine_id TEXT NOT NULL, gap_doctrine_version INTEGER NOT NULL,
+        registration_status TEXT NOT NULL, registered_at_utc TEXT NOT NULL,
+        evidence_confirmed_at_utc TEXT, identity_json TEXT NOT NULL,
+        identity_checksum_sha256 TEXT NOT NULL,
+        PRIMARY KEY (asset,timeframe),
+        UNIQUE (provider_identity_key,timeframe), UNIQUE (identity_checksum_sha256),
+        CHECK (length(asset)>0 AND asset=trim(asset) AND asset=upper(asset)
+               AND asset NOT GLOB '*[^A-Z0-9._-]*'),
+        CHECK (timeframe='D1'),
+        CHECK (registration_contract='INSTRUMENT_REGISTRATION_V1' AND registration_contract_version=1),
+        CHECK (length(instrument_family)>0 AND instrument_family=trim(instrument_family)
+               AND instrument_family=upper(instrument_family) AND instrument_family NOT GLOB '*[^A-Z0-9._-]*'),
+        CHECK (length(local_symbol)>0 AND local_symbol=trim(local_symbol)
+               AND local_symbol=upper(local_symbol) AND local_symbol NOT GLOB '*[^A-Z0-9._-]*'),
+        CHECK (json_valid(aliases_json) AND json_type(aliases_json)='array'),
+        CHECK (length(display_name)>0 AND display_name=trim(display_name)),
+        CHECK (length(instrument_type)>0 AND instrument_type=trim(instrument_type)),
+        CHECK (length(asset_class)>0 AND asset_class=trim(asset_class)),
+        CHECK (representation_type IN ('CFD','INDEX','ETF','FUTURES','SPOT','FX_SPOT_PAIR','CRYPTO_SPOT_PAIR','COMMON_STOCK')),
+        CHECK (semantic_equivalence='DISTINCT_INSTRUMENT'),
+        CHECK (length(trading_currency)>0 AND trading_currency=trim(trading_currency)
+               AND trading_currency=upper(trading_currency) AND trading_currency NOT GLOB '*[^A-Z0-9]*'),
+        CHECK (length(exchange_name)>0 AND exchange_name=trim(exchange_name)),
+        CHECK (exchange_mic IS NULL OR (length(exchange_mic)=4 AND exchange_mic=upper(exchange_mic)
+               AND exchange_mic NOT GLOB '*[^A-Z0-9]*')),
+        CHECK (length(provider_id)>0 AND provider_id=trim(provider_id)),
+        CHECK (length(provider_contract)>0 AND provider_contract=trim(provider_contract)),
+        CHECK (length(provider_symbol)>0 AND provider_symbol=trim(provider_symbol)),
+        CHECK (length(provider_instrument_type)>0 AND provider_instrument_type=trim(provider_instrument_type)),
+        CHECK (length(provider_identity_key)>0 AND provider_identity_key=trim(provider_identity_key)),
+        CHECK (length(calendar_id)>0 AND calendar_id=trim(calendar_id) AND calendar_version>0),
+        CHECK (length(gap_doctrine_id)>0 AND gap_doctrine_id=trim(gap_doctrine_id) AND gap_doctrine_version>0),
+        CHECK (registration_status IN ('REGISTERED_NO_EVIDENCE','REGISTERED_WITH_EVIDENCE')),
+        CHECK (registered_at_utc=trim(registered_at_utc) AND julianday(registered_at_utc) IS NOT NULL
+               AND substr(registered_at_utc,-6)='+00:00'),
+        CHECK ((registration_status='REGISTERED_NO_EVIDENCE' AND evidence_confirmed_at_utc IS NULL)
+               OR (registration_status='REGISTERED_WITH_EVIDENCE' AND evidence_confirmed_at_utc IS NOT NULL
+                   AND julianday(evidence_confirmed_at_utc) IS NOT NULL AND substr(evidence_confirmed_at_utc,-6)='+00:00')),
+        CHECK (json_valid(identity_json)),
+        CHECK (length(identity_checksum_sha256)=64 AND identity_checksum_sha256 NOT GLOB '*[^0-9a-f]*'),
+        CHECK (representation_type<>'FUTURES' OR contract_or_series IS NOT NULL),
+        CHECK (instr(asset,'.')=0 OR asset=instrument_family||'.'||local_symbol)
+    ) STRICT, WITHOUT ROWID
+    """,
+    """
+    INSERT INTO instrument_registrations VALUES
+    ('AUDUSD','D1','INSTRUMENT_REGISTRATION_V1',1,'AUDUSD','AUDUSD','[]','Australian Dollar / US Dollar','FX_SPOT_PAIR','FX','FX_SPOT_PAIR',NULL,NULL,'DISTINCT_INSTRUMENT',NULL,'USD','OTC',NULL,'TWELVE_DATA','TWELVE_DATA_TIME_SERIES_D1_V1','AUD/USD',NULL,NULL,'Physical Currency','["TWELVE_DATA","AUD/USD",null,"Physical Currency","USD",null]','FX_D1_V1',1,'FRAGARACH_II_D1_GAP_DOCTRINE_V1',1,'REGISTERED_WITH_EVIDENCE','2026-07-10T13:55:08.321103+00:00','2026-07-10T13:55:08.321103+00:00','{"aliases":[],"asset":"AUDUSD","asset_class":"FX","calendar_id":"FX_D1_V1","calendar_version":1,"contract_or_series":null,"display_name":"Australian Dollar / US Dollar","exchange_mic":null,"exchange_name":"OTC","gap_doctrine_id":"FRAGARACH_II_D1_GAP_DOCTRINE_V1","gap_doctrine_version":1,"instrument_family":"AUDUSD","instrument_type":"FX_SPOT_PAIR","jurisdiction":null,"local_symbol":"AUDUSD","provider_contract":"TWELVE_DATA_TIME_SERIES_D1_V1","provider_country":null,"provider_exchange":null,"provider_id":"TWELVE_DATA","provider_identity_key":"[\\"TWELVE_DATA\\",\\"AUD/USD\\",null,\\"Physical Currency\\",\\"USD\\",null]","provider_instrument_type":"Physical Currency","provider_symbol":"AUD/USD","registration_contract":"INSTRUMENT_REGISTRATION_V1","registration_contract_version":1,"representation_type":"FX_SPOT_PAIR","semantic_equivalence":"DISTINCT_INSTRUMENT","timeframe":"D1","trading_currency":"USD","underlying_reference":null}','20c0355ae9ca4b6e1ffe6f24f5dc7920d036757e132c3e33e1648d5a86b7730f'),
+    ('XAUUSD','D1','INSTRUMENT_REGISTRATION_V1',1,'GOLD','XAUUSD','[]','Gold Spot / US Dollar','PRECIOUS_METAL_SPOT_PAIR','METALS','SPOT',NULL,NULL,'DISTINCT_INSTRUMENT',NULL,'USD','OTC',NULL,'TWELVE_DATA','TWELVE_DATA_TIME_SERIES_D1_V1','XAU/USD',NULL,NULL,'Precious Metal','["TWELVE_DATA","XAU/USD",null,"Precious Metal","USD",null]','METALS_D1_V1',1,'FRAGARACH_II_D1_GAP_DOCTRINE_V1',1,'REGISTERED_WITH_EVIDENCE','2026-07-10T13:55:08.686443+00:00','2026-07-10T13:55:08.686443+00:00','{"aliases":[],"asset":"XAUUSD","asset_class":"METALS","calendar_id":"METALS_D1_V1","calendar_version":1,"contract_or_series":null,"display_name":"Gold Spot / US Dollar","exchange_mic":null,"exchange_name":"OTC","gap_doctrine_id":"FRAGARACH_II_D1_GAP_DOCTRINE_V1","gap_doctrine_version":1,"instrument_family":"GOLD","instrument_type":"PRECIOUS_METAL_SPOT_PAIR","jurisdiction":null,"local_symbol":"XAUUSD","provider_contract":"TWELVE_DATA_TIME_SERIES_D1_V1","provider_country":null,"provider_exchange":null,"provider_id":"TWELVE_DATA","provider_identity_key":"[\\"TWELVE_DATA\\",\\"XAU/USD\\",null,\\"Precious Metal\\",\\"USD\\",null]","provider_instrument_type":"Precious Metal","provider_symbol":"XAU/USD","registration_contract":"INSTRUMENT_REGISTRATION_V1","registration_contract_version":1,"representation_type":"SPOT","semantic_equivalence":"DISTINCT_INSTRUMENT","timeframe":"D1","trading_currency":"USD","underlying_reference":null}','f296a6ed305bc12146b6ed84a2fee22fcb70f1697889100c6ebaaa06074d136a'),
+    ('BTCUSD','D1','INSTRUMENT_REGISTRATION_V1',1,'BITCOIN','BTCUSD','[]','Bitcoin / US Dollar','CRYPTO_SPOT_PAIR','CRYPTO','CRYPTO_SPOT_PAIR',NULL,NULL,'DISTINCT_INSTRUMENT',NULL,'USD','Coinbase Pro',NULL,'TWELVE_DATA','TWELVE_DATA_TIME_SERIES_D1_V1','BTC/USD','Coinbase Pro',NULL,'Digital Currency','["TWELVE_DATA","BTC/USD","Coinbase Pro","Digital Currency","USD",null]','CRYPTO_D1_V1',1,'FRAGARACH_II_D1_GAP_DOCTRINE_V1',1,'REGISTERED_WITH_EVIDENCE','2026-07-10T13:55:09.027943+00:00','2026-07-10T13:55:09.027943+00:00','{"aliases":[],"asset":"BTCUSD","asset_class":"CRYPTO","calendar_id":"CRYPTO_D1_V1","calendar_version":1,"contract_or_series":null,"display_name":"Bitcoin / US Dollar","exchange_mic":null,"exchange_name":"Coinbase Pro","gap_doctrine_id":"FRAGARACH_II_D1_GAP_DOCTRINE_V1","gap_doctrine_version":1,"instrument_family":"BITCOIN","instrument_type":"CRYPTO_SPOT_PAIR","jurisdiction":null,"local_symbol":"BTCUSD","provider_contract":"TWELVE_DATA_TIME_SERIES_D1_V1","provider_country":null,"provider_exchange":"Coinbase Pro","provider_id":"TWELVE_DATA","provider_identity_key":"[\\"TWELVE_DATA\\",\\"BTC/USD\\",\\"Coinbase Pro\\",\\"Digital Currency\\",\\"USD\\",null]","provider_instrument_type":"Digital Currency","provider_symbol":"BTC/USD","registration_contract":"INSTRUMENT_REGISTRATION_V1","registration_contract_version":1,"representation_type":"CRYPTO_SPOT_PAIR","semantic_equivalence":"DISTINCT_INSTRUMENT","timeframe":"D1","trading_currency":"USD","underlying_reference":null}','f3bbb3d7770a3ae0668d8b2a68e0e224df91123c4cff96e226e0223429a1042b')
+    """,
+    """UPDATE instrument_registrations
+       SET registration_status='REGISTERED_NO_EVIDENCE', evidence_confirmed_at_utc=NULL
+       WHERE NOT EXISTS (SELECT 1 FROM bars b WHERE b.asset=instrument_registrations.asset AND b.timeframe=instrument_registrations.timeframe)""",
+    """INSERT INTO instrument_registrations(asset)
+       SELECT 'INVALID' WHERE EXISTS (
+         SELECT asset,timeframe FROM bars EXCEPT SELECT asset,timeframe FROM instrument_registrations
+       ) OR EXISTS (
+         SELECT asset,timeframe FROM lane_state EXCEPT SELECT asset,timeframe FROM instrument_registrations
+       )""",
+    """
+    CREATE TRIGGER instrument_registrations_alias_insert BEFORE INSERT ON instrument_registrations BEGIN
+      SELECT CASE WHEN EXISTS (
+        SELECT 1 FROM json_each(NEW.aliases_json) a
+        WHERE json_type(a.value)<>'object' OR (SELECT count(*) FROM json_each(a.value))<>3
+          OR json_type(a.value,'$.alias')<>'text' OR json_type(a.value,'$.normalized_alias')<>'text'
+          OR json_extract(a.value,'$.alias_type') NOT IN ('OPERATOR_SYMBOL','COMMON_NAME','PLATFORM_SYMBOL','LEGACY_SYMBOL')
+          OR json_extract(a.value,'$.normalized_alias')<>upper(trim(json_extract(a.value,'$.normalized_alias')))
+      ) OR (SELECT count(*) FROM json_each(NEW.aliases_json))<>(SELECT count(DISTINCT json_extract(value,'$.normalized_alias')) FROM json_each(NEW.aliases_json))
+      THEN RAISE(ABORT,'invalid aliases') END;
+      SELECT CASE WHEN EXISTS (
+        SELECT 1 FROM instrument_registrations r WHERE r.asset IN (NEW.asset,NEW.local_symbol) OR r.local_symbol IN (NEW.asset,NEW.local_symbol)
+        OR EXISTS (SELECT 1 FROM json_each(r.aliases_json) WHERE json_extract(value,'$.normalized_alias') IN (NEW.asset,NEW.local_symbol))
+        OR EXISTS (SELECT 1 FROM json_each(NEW.aliases_json) n WHERE json_extract(n.value,'$.normalized_alias') IN (r.asset,r.local_symbol)
+          OR EXISTS (SELECT 1 FROM json_each(r.aliases_json) e WHERE json_extract(e.value,'$.normalized_alias')=json_extract(n.value,'$.normalized_alias')))
+      ) THEN RAISE(ABORT,'registration naming collision') END;
+    END
+    """,
+    """
+    CREATE TRIGGER instrument_registrations_no_delete BEFORE DELETE ON instrument_registrations
+    BEGIN SELECT RAISE(ABORT,'instrument registrations cannot be deleted'); END
+    """,
+    """
+    CREATE TRIGGER instrument_registrations_update BEFORE UPDATE ON instrument_registrations BEGIN
+      SELECT CASE WHEN NEW.asset IS NOT OLD.asset OR NEW.timeframe IS NOT OLD.timeframe OR NEW.registration_contract IS NOT OLD.registration_contract
+        OR NEW.registration_contract_version IS NOT OLD.registration_contract_version OR NEW.instrument_family IS NOT OLD.instrument_family
+        OR NEW.local_symbol IS NOT OLD.local_symbol OR NEW.aliases_json IS NOT OLD.aliases_json OR NEW.display_name IS NOT OLD.display_name
+        OR NEW.instrument_type IS NOT OLD.instrument_type OR NEW.asset_class IS NOT OLD.asset_class OR NEW.representation_type IS NOT OLD.representation_type
+        OR NEW.underlying_reference IS NOT OLD.underlying_reference OR NEW.contract_or_series IS NOT OLD.contract_or_series
+        OR NEW.semantic_equivalence IS NOT OLD.semantic_equivalence OR NEW.jurisdiction IS NOT OLD.jurisdiction OR NEW.trading_currency IS NOT OLD.trading_currency
+        OR NEW.exchange_name IS NOT OLD.exchange_name OR NEW.exchange_mic IS NOT OLD.exchange_mic OR NEW.provider_id IS NOT OLD.provider_id
+        OR NEW.provider_contract IS NOT OLD.provider_contract OR NEW.provider_symbol IS NOT OLD.provider_symbol OR NEW.provider_exchange IS NOT OLD.provider_exchange
+        OR NEW.provider_country IS NOT OLD.provider_country OR NEW.provider_instrument_type IS NOT OLD.provider_instrument_type
+        OR NEW.provider_identity_key IS NOT OLD.provider_identity_key OR NEW.calendar_id IS NOT OLD.calendar_id OR NEW.calendar_version IS NOT OLD.calendar_version
+        OR NEW.gap_doctrine_id IS NOT OLD.gap_doctrine_id OR NEW.gap_doctrine_version IS NOT OLD.gap_doctrine_version
+        OR NEW.registered_at_utc IS NOT OLD.registered_at_utc OR NEW.identity_json IS NOT OLD.identity_json OR NEW.identity_checksum_sha256 IS NOT OLD.identity_checksum_sha256
+      THEN RAISE(ABORT,'instrument registration identity is immutable') END;
+      SELECT CASE WHEN NOT (OLD.registration_status='REGISTERED_NO_EVIDENCE' AND NEW.registration_status='REGISTERED_WITH_EVIDENCE'
+        AND OLD.evidence_confirmed_at_utc IS NULL AND NEW.evidence_confirmed_at_utc IS NOT NULL
+        AND EXISTS(SELECT 1 FROM bars WHERE asset=OLD.asset AND timeframe=OLD.timeframe))
+      THEN RAISE(ABORT,'invalid registration status transition') END;
+    END
+    """,
+    """
+    CREATE TRIGGER bars_require_registration_insert BEFORE INSERT ON bars BEGIN
+      SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM instrument_registrations r WHERE r.asset=NEW.asset AND r.timeframe=NEW.timeframe)
+      THEN RAISE(ABORT,'canonical evidence requires registration') END;
+    END
+    """,
+    """
+    CREATE TRIGGER bars_require_registration_update BEFORE UPDATE OF asset,timeframe ON bars BEGIN
+      SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM instrument_registrations r WHERE r.asset=NEW.asset AND r.timeframe=NEW.timeframe)
+      THEN RAISE(ABORT,'canonical evidence requires registration') END;
+    END
+    """,
+)
+
+
+def migration_4_checksum() -> str:
+    source = "\n-- statement --\n".join(statement.strip() for statement in MIGRATION_4_STATEMENTS)
     return hashlib.sha256(source.encode("utf-8")).hexdigest()

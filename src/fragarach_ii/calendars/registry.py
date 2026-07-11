@@ -27,7 +27,7 @@ class ConfigurationError(RuntimeError):
 
 
 class CalendarRegistry:
-    def __init__(self, config_root: str | Path | None = None) -> None:
+    def __init__(self, config_root: str | Path | None = None, *, load_symbol_assignments: bool = True) -> None:
         self.config_root = (
             Path(config_root).resolve()
             if config_root is not None
@@ -54,13 +54,13 @@ class CalendarRegistry:
                 )
             self._calendars[calendar_id] = _parse_calendar(raw)
 
-        symbol_registry = _load_verified_json(
-            self.config_root / "symbol_calendars.v1.json",
-            "registry_checksum",
-            "fragarach_ii.symbol_calendars.v1",
-        )
-        self.symbol_registry_checksum = symbol_registry["registry_checksum"]
-        self._symbols = dict(symbol_registry["symbols"])
+        if load_symbol_assignments:
+            symbol_registry = _load_verified_json(self.config_root / "symbol_calendars.v1.json", "registry_checksum", "fragarach_ii.symbol_calendars.v1")
+            self.symbol_registry_checksum = symbol_registry["registry_checksum"]
+            self._symbols = dict(symbol_registry["symbols"])
+        else:
+            self.symbol_registry_checksum = "4c14a8a08af532790be70ddd100e499075980cd89a4d624718c3da36deb68c2f"
+            self._symbols = {}
         unknown = sorted(set(self._symbols.values()) - set(self._calendars))
         if unknown:
             raise ConfigurationError(

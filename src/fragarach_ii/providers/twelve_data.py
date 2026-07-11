@@ -14,7 +14,7 @@ from urllib.parse import urlencode
 
 from fragarach_ii.ingestion import RawEvidence, ingest_staged_batch
 from fragarach_ii.ingestion.pipeline import IngestionResult
-from fragarach_ii.storage import open_read_only, registered_writer, transaction
+from fragarach_ii.storage import open_read_only, registered_writer, transaction, registration_for_lane, RegistrationError, initialize_database
 from fragarach_ii.validation import validate_lane
 
 from .config import ProviderConfig, ProviderConfigurationError, load_provider_config
@@ -115,8 +115,12 @@ def acquire_twelve_data(
         raise AcquisitionError("INVALID_BOUNDARY", "through_date precedes from_date")
     try:
         config = load_provider_config(config_root)
-        provider_symbol = config.provider_symbol(normalized_asset)
-    except ProviderConfigurationError as error:
+        initialize_database(database_path)
+        registration = registration_for_lane(database_path, normalized_asset, normalized_timeframe)
+        if registration[0] != config.provider_id or registration[1] != config.provider_contract:
+            raise ProviderConfigurationError("registered provider contract mismatch")
+        provider_symbol = registration[2]
+    except (ProviderConfigurationError, RegistrationError) as error:
         raise AcquisitionError("PROVIDER_CONFIGURATION_ERROR", str(error)) from error
     days = (end - start).days + 1
     if days > config.max_calendar_days:

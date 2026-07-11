@@ -199,7 +199,7 @@ class D1SessionValidationTests(unittest.TestCase):
         finally:
             connection.close()
         cases = (
-            ({"symbol": "EURUSD", "timeframe": "D1", "through_date": "2026-07-10", "persist": True}, "CALENDAR_NOT_CONFIGURED"),
+            ({"symbol": "EURUSD", "timeframe": "D1", "through_date": "2026-07-10", "persist": True}, "UNREGISTERED_LANE"),
             ({"symbol": "AUDUSD", "timeframe": "H1", "through_date": "2026-07-10", "persist": True}, "UNSUPPORTED_TIMEFRAME"),
             ({"symbol": "AUDUSD", "timeframe": "D1", "through_date": "07/10/2026", "persist": True}, "INVALID_THROUGH_DATE"),
         )

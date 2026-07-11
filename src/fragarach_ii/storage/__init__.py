@@ -14,6 +14,8 @@ from .validation_summary import (
     VALIDATION_SUMMARY_FORMAT,
     LaneValidationSummary,
 )
+from .registrations import (Alias, RegistrationCandidate, RegistrationError, RegistrationResult,
+    canonical_registration, register_instrument, registration_for_lane)
 from .writer import WriterLock, WriterLockError
 
 __all__ = [
@@ -31,4 +33,6 @@ __all__ = [
     "registered_writer",
     "transaction",
     "verify_integrity",
+    "Alias", "RegistrationCandidate", "RegistrationError", "RegistrationResult",
+    "canonical_registration", "register_instrument", "registration_for_lane",
 ]

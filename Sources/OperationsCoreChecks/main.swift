@@ -5,7 +5,22 @@ enum CheckFailure: Error { case failed(String) }
 func check(_ condition: @autoclosure () throws -> Bool, _ message: String) throws { if try !condition() { throw CheckFailure.failed(message) } }
 
 let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-let authority = root.appendingPathComponent("data/runtime/spec002_real_evidence_acceptance.sqlite3").path
+let sourceAuthority = root.appendingPathComponent("data/runtime/spec002_real_evidence_acceptance.sqlite3").path
+let oldSevenTableAuthority = "/Users/raymorgan/Documents/Fragarach II Backups/spec006a_pre_migration_20260711.sqlite3"
+let migratedFixtureDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+try FileManager.default.createDirectory(at: migratedFixtureDirectory, withIntermediateDirectories: true)
+defer { try? FileManager.default.removeItem(at: migratedFixtureDirectory) }
+let authority = migratedFixtureDirectory.appendingPathComponent("authority.sqlite3").path
+let migrator = Process()
+migrator.executableURL = URL(fileURLWithPath: "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3")
+migrator.arguments = ["-c", "from fragarach_ii.storage import initialize_database;import sqlite3,sys;s=sqlite3.connect('file:'+sys.argv[1]+'?mode=ro',uri=True);d=sqlite3.connect(sys.argv[2]);s.backup(d);s.close();d.close();initialize_database(sys.argv[2]);c=sqlite3.connect(sys.argv[2]);c.execute('PRAGMA journal_mode=DELETE');c.close()", sourceAuthority, authority]
+migrator.currentDirectoryURL = root
+var migrationEnvironment = ProcessInfo.processInfo.environment
+migrationEnvironment["PYTHONPATH"] = "\(root.path)/src"
+migrator.environment = migrationEnvironment
+try migrator.run(); migrator.waitUntilExit()
+try check(migrator.terminationStatus == 0, "migrated fixture creation failed")
+try check(FileManager.default.fileExists(atPath: authority), "migrated fixture file missing")
 var passed = 0
 @MainActor func run(_ name: String, _ body: () throws -> Void) throws { try body(); passed += 1; print("PASS \(name)") }
 
@@ -21,6 +36,9 @@ try run("missing and incompatible rejection") {
     do { _=try SQLiteReadService().load(path:"/tmp/fragarach-ii-does-not-exist.sqlite3"); throw CheckFailure.failed("missing accepted") } catch is AuthorityReadError {}
     let url=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString);try Data("not sqlite".utf8).write(to:url);defer{try? FileManager.default.removeItem(at:url)}
     do { _=try SQLiteReadService().load(path:url.path);throw CheckFailure.failed("incompatible accepted") } catch is AuthorityReadError {}
+}
+try run("old seven-table authority rejected read-only") {
+    do { _=try SQLiteReadService().load(path:oldSevenTableAuthority);throw CheckFailure.failed("unmigrated authority accepted") } catch is AuthorityReadError {}
 }
 try run("deterministic search filter sort") { let lanes=Array(try SQLiteReadService().load(path:authority).lanes.reversed());try check(LaneQuery.apply(lanes,search:"usd",timeframe:"D1").map(\.asset)==["AUDUSD","BTCUSD","XAUUSD"],"sort");try check(LaneQuery.apply(lanes,search:"xau",timeframe:nil).map(\.asset)==["XAUUSD"],"search") }
 try run("explicit secret-free arguments") { let db="/authority.sqlite3",secret="never-in-arguments";let intents:[OperationIntent]=[.acquire(asset:"AUDUSD",from:"2026-07-01",through:"2026-07-10",mode:.preserve),.importCSV(file:"/evidence.csv",symbol:"AUDUSD",timeframe:"D1",mode:.preserve),.validate(symbol:"AUDUSD",timeframe:"D1",through:"2026-07-10",persist:true),.verify,.backup(destination:"/backup.sqlite3")];for intent in intents{let args=ArgumentBuilder.arguments(for:intent,database:db);try check(args.contains(db) && !args.contains(secret),"arguments")}}

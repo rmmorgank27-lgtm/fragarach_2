@@ -45,8 +45,19 @@ def validate_lane(
         )
     boundary = _parse_date(through_date, "INVALID_THROUGH_DATE")
     try:
-        registry = CalendarRegistry(config_root)
-        calendar = registry.calendar_for_symbol(normalized_symbol)
+        registry = CalendarRegistry(config_root, load_symbol_assignments=False)
+        authority = open_read_only(database_path)
+        try:
+            assignment = authority.execute("SELECT calendar_id,calendar_version,gap_doctrine_id,gap_doctrine_version FROM instrument_registrations WHERE asset=? AND timeframe=?",(normalized_symbol,normalized_timeframe)).fetchone()
+        finally:
+            authority.close()
+        if assignment is None:
+            raise ValidationError("UNREGISTERED_LANE", f"{normalized_symbol}:{normalized_timeframe}")
+        if assignment[2:] != (registry.gap_doctrine.gap_doctrine_id,registry.gap_doctrine.gap_doctrine_version):
+            raise ValidationError("GAP_DOCTRINE_MISMATCH", normalized_symbol)
+        calendar = registry.calendar_by_id(assignment[0])
+        if calendar.calendar_version != assignment[1]:
+            raise ValidationError("CALENDAR_VERSION_MISMATCH", normalized_symbol)
     except ConfigurationError as error:
         raise ValidationError(error.code, str(error)) from error
     if calendar.timeframe != normalized_timeframe:
@@ -63,6 +74,7 @@ def validate_lane(
                     normalized_timeframe,
                     boundary,
                     registry,
+                    calendar,
                     observed_at,
                 )
                 cursor = connection.execute(
@@ -89,6 +101,7 @@ def validate_lane(
             normalized_timeframe,
             boundary,
             registry,
+            calendar,
             observed_at,
         )
     finally:
@@ -101,9 +114,9 @@ def _validate_connection(
     timeframe: str,
     boundary: date,
     registry: CalendarRegistry,
+    calendar,
     observed_at: str,
 ) -> ValidationResult:
-    calendar = registry.calendar_for_symbol(symbol)
     rows = connection.execute(
         """
         SELECT open_time_utc FROM bars

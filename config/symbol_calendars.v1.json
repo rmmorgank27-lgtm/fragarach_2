@@ -1,6 +1,7 @@
 {
   "format": "fragarach_ii.symbol_calendars.v1",
-  "registry_checksum": "4c14a8a08af532790be70ddd100e499075980cd89a4d624718c3da36deb68c2f",
+  "historical_only": true,
+  "registry_checksum": "7f04c0a0c7f36fea2d8faf751cea93f46a836bbb696e642fb01c141ce3d5d7d5",
   "symbols": {
     "AUDUSD": "FX_D1_V1",
     "BTCUSD": "CRYPTO_D1_V1",

@@ -1,7 +1,7 @@
 {
   "authentication_environment": "TWELVE_DATA_API_KEY",
   "base_url": "https://api.twelvedata.com",
-  "configuration_checksum": "d372a15a3541d56903e276355a65038cc3ce9fb12bbd71d80cf01f0a8f1ff9c5",
+  "configuration_checksum": "64c2ee27f6d8ba3c26904e4f1bad3c1bfaf1e365071470a2a503aad9d5724064",
   "connect_timeout_seconds": 10,
   "endpoint_family": "time_series",
   "endpoint_path": "/time_series",
@@ -16,11 +16,6 @@
   "provider_id": "TWELVE_DATA",
   "read_timeout_seconds": 20,
   "retry_backoff_seconds": [0, 1, 2],
-  "symbols": {
-    "AUDUSD": "AUD/USD",
-    "BTCUSD": "BTC/USD",
-    "XAUUSD": "XAU/USD"
-  },
   "timeframe": "D1",
   "timezone": "UTC",
   "user_agent": "Fragarach-II/1 SPEC-004"

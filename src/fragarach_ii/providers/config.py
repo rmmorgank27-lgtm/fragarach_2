@@ -32,14 +32,7 @@ class ProviderConfig:
     max_response_bytes: int
     max_calendar_days: int
     user_agent: str
-    symbols: dict[str, str]
     configuration_checksum: str
-
-    def provider_symbol(self, asset: str) -> str:
-        try:
-            return self.symbols[asset]
-        except KeyError as error:
-            raise ProviderConfigurationError(f"asset is not authorized: {asset}") from error
 
 
 def load_provider_config(config_root: str | Path | None = None) -> ProviderConfig:
@@ -88,5 +81,5 @@ def load_provider_config(config_root: str | Path | None = None) -> ProviderConfi
         retry_backoff_seconds=tuple(raw["retry_backoff_seconds"]),
         max_response_bytes=raw["max_response_bytes"],
         max_calendar_days=raw["max_calendar_days"], user_agent=raw["user_agent"],
-        symbols=dict(raw["symbols"]), configuration_checksum=stored,
+        configuration_checksum=stored,
     )

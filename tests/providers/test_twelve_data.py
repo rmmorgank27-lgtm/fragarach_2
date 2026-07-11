@@ -94,10 +94,7 @@ class TwelveDataAcquisitionTests(unittest.TestCase):
 
     def test_explicit_mapping_and_unauthorized_inputs(self) -> None:
         config = load_provider_config()
-        self.assertEqual(
-            {asset: config.provider_symbol(asset) for asset in ("AUDUSD", "XAUUSD", "BTCUSD")},
-            {"AUDUSD": "AUD/USD", "XAUUSD": "XAU/USD", "BTCUSD": "BTC/USD"},
-        )
+        self.assertEqual(config.provider_contract, "TWELVE_DATA_TIME_SERIES_D1_V1")
         body = _fixture("audusd_d1_2026-07-09_2026-07-10.json")
         cases = (
             ({"asset": "EURUSD"}, "PROVIDER_CONFIGURATION_ERROR"),
@@ -110,7 +107,7 @@ class TwelveDataAcquisitionTests(unittest.TestCase):
             with self.assertRaises(AcquisitionError) as raised:
                 self.acquire(body, **values)
             self.assertEqual(raised.exception.code, code)
-        self.assertFalse(self.database.exists())
+        self.assertEqual(_counts(self.database)[:4], (0, 0, 0, 0))
 
     def test_provider_configuration_checksum_drift_is_detected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -187,7 +184,7 @@ class TwelveDataAcquisitionTests(unittest.TestCase):
                     sleeper=lambda _: None,
                 )
             self.assertEqual(raised.exception.code, code)
-            self.assertFalse(database.exists())
+            self.assertEqual(_counts(database)[:4], (0, 0, 0, 0))
 
         for body, code in (
             (b"not-json", "MALFORMED_PAYLOAD"),
@@ -202,7 +199,7 @@ class TwelveDataAcquisitionTests(unittest.TestCase):
                     sleeper=lambda _: None,
                 )
             self.assertEqual(raised.exception.code, code)
-            self.assertFalse(database.exists())
+            self.assertEqual(_counts(database)[:4], (0, 0, 0, 0))
 
     def test_retryable_failure_can_recover_without_duplicate_attempt_state(self) -> None:
         body = _fixture("audusd_d1_2026-07-09_2026-07-10.json")
@@ -231,7 +228,7 @@ class TwelveDataAcquisitionTests(unittest.TestCase):
                 transport=FakeTransport(_response(json.dumps(conflict).encode())), sleeper=lambda _: None,
             )
         self.assertEqual(raised.exception.code, "CONFLICTING_DUPLICATE")
-        self.assertFalse(other.exists())
+        self.assertEqual(_counts(other)[:4], (0, 0, 0, 0))
 
     def test_existing_preserve_and_correct_modes_are_reused(self) -> None:
         original = _fixture("audusd_d1_2026-07-09_2026-07-10.json")
@@ -276,7 +273,7 @@ class TwelveDataAcquisitionTests(unittest.TestCase):
             raise RuntimeError("simulated interruption")
         with self.assertRaisesRegex(RuntimeError, "simulated"):
             self.acquire(body, before_ingest=interrupt)
-        self.assertFalse(self.database.exists())
+        self.assertEqual(_counts(self.database)[:4], (0, 0, 0, 0))
         result, _ = self.acquire(body)
         self.assertEqual(result.inserted, 2)
 

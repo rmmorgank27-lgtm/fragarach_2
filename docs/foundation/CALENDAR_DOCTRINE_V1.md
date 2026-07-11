@@ -6,7 +6,7 @@ Calendars state which canonical UTC D1 dates are expected for a configured lane.
 
 Definitions are immutable versioned JSON assets. Every definition has a stable ID, positive version, asset class, timeframe, timezone basis, effective range, explicit rules and overrides, and a SHA-256 checksum over canonical JSON excluding the checksum field. Any rule or override change requires a new version and checksum.
 
-Symbol assignment is explicit in `symbol_calendars.v1.json`. Validators never infer asset class from spelling and never choose a generic fallback.
+Operational symbol assignment is read from `instrument_registrations`. The historical `symbol_calendars.v1.json` is retained only as migration evidence. Validators never infer asset class from spelling and never choose a generic fallback.
 
 ## V1 definitions
 
