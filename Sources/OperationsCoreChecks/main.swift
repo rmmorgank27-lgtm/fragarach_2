@@ -13,7 +13,7 @@ defer { try? FileManager.default.removeItem(at: migratedFixtureDirectory) }
 let authority = migratedFixtureDirectory.appendingPathComponent("authority.sqlite3").path
 let migrator = Process()
 migrator.executableURL = URL(fileURLWithPath: "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3")
-migrator.arguments = ["-c", "from fragarach_ii.storage import initialize_database;import sqlite3,sys;s=sqlite3.connect('file:'+sys.argv[1]+'?mode=ro',uri=True);d=sqlite3.connect(sys.argv[2]);s.backup(d);s.close();d.close();initialize_database(sys.argv[2]);c=sqlite3.connect(sys.argv[2]);c.execute('PRAGMA journal_mode=DELETE');c.close()", sourceAuthority, authority]
+migrator.arguments = ["-c", "from fragarach_ii.storage import initialize_database,bootstrap_legacy_authority;import sqlite3,sys;s=sqlite3.connect('file:'+sys.argv[1]+'?mode=ro',uri=True);d=sqlite3.connect(sys.argv[2]);s.backup(d);s.close();d.close();initialize_database(sys.argv[2]);bootstrap_legacy_authority(sys.argv[2]);c=sqlite3.connect(sys.argv[2]);c.execute('PRAGMA journal_mode=DELETE');c.close()", sourceAuthority, authority]
 migrator.currentDirectoryURL = root
 var migrationEnvironment = ProcessInfo.processInfo.environment
 migrationEnvironment["PYTHONPATH"] = "\(root.path)/src"
@@ -28,6 +28,7 @@ try run("read-only real schema and bounded queries") {
     let url=URL(fileURLWithPath:authority), before=try Data(contentsOf:url), snapshot=try SQLiteReadService().load(path:authority,operationLimit:5)
     try check(snapshot.lanes.map(\.asset)==["AUDUSD","BTCUSD","XAUUSD"],"lane decode")
     try check(snapshot.operations.count==5,"bounded operations")
+    try check(snapshot.authorityEvents.count==6,"authority ledger decode")
     try check(snapshot.lanes.first{$0.asset=="AUDUSD"}?.validation?.outsideExpectedSessionCount==16,"AUD outside sessions")
     try check(snapshot.lanes.first{$0.asset=="XAUUSD"}?.validation?.outsideExpectedSessionCount==49,"XAU outside sessions")
     try check(try Data(contentsOf:url)==before,"read mutated database")

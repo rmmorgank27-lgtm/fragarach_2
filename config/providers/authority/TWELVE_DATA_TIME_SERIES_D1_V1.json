@@ -1,0 +1,30 @@
+{
+    "canonical_timestamp_mapping_authority": "APPLICABLE_D1_TIMEFRAME_AUTHORITY",
+    "contract_checksum_sha256": "c96065ee1418f351b5e6d7ae188dd679002d35d36c69cdfc352ac58c23cd7484",
+    "contract_version": 1,
+    "earliest_timestamp_endpoint": "/earliest_timestamp",
+    "endpoint": "/time_series",
+    "entitlement_interpretation": "PROVIDER_RESPONSE_FACT_REQUIRES_LANE_REVIEW",
+    "fragarach_request_ceiling": 4000,
+    "interval_code": "1day",
+    "overlap_authority": "APPLICABLE_D1_TIMEFRAME_AUTHORITY",
+    "provider": "TWELVE_DATA",
+    "provider_contract_id": "TWELVE_DATA_TIME_SERIES_D1_V1",
+    "provider_hard_maximum": 5000,
+    "request_boundary_handling": "EXPLICIT_INCLUSIVE_RANGE_CANONICALLY_FILTERED",
+    "request_timezone_rule": "APPLICABLE_TIMEFRAME_AUTHORITY",
+    "response_truncation_detection": "REJECT_AT_OR_ABOVE_UNPROVEN_BOUNDARY",
+    "sort_order": "ASC",
+    "supported_market_families": [
+        "AUSTRALIAN_EQUITIES",
+        "CRYPTO",
+        "ENERGY",
+        "FX",
+        "GERMAN_EQUITIES",
+        "INDICES",
+        "METALS",
+        "UK_EQUITIES",
+        "US_EQUITIES"
+    ],
+    "timestamp_meaning": "APPLICABLE_D1_TIMEFRAME_AUTHORITY"
+}

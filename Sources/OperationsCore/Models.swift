@@ -1,6 +1,6 @@
 import Foundation
 
-public let foundationTables = Set(["bars", "evidence_lanes", "ingest_runs", "instrument_registrations", "lane_state", "provenance", "raw_blocks", "rollup_state", "schema_migrations"])
+public let foundationTables = Set(["authority_events", "bars", "evidence_lanes", "ingest_runs", "instrument_registrations", "lane_state", "provenance", "raw_blocks", "rollup_state", "schema_migrations"])
 
 public struct ValidationSummary: Codable, Equatable, Sendable {
     public let format: String
@@ -70,19 +70,36 @@ public struct OperationRecord: Identifiable, Equatable, Sendable {
     public let corrected: Int
 }
 
+public struct AuthorityEventRecord: Identifiable, Equatable, Sendable {
+    public let id: String
+    public let entityKind: String
+    public let entityID: String
+    public let eventKind: String
+    public let supersedesEventID: String?
+    public let effectiveFrom: String
+    public let effectiveTo: String?
+    public let compatibilityState: String
+    public let compatibilityReasonsJSON: String
+    public let payloadChecksum: String
+    public let eventChecksum: String
+    public let recordedAt: String
+    public let recordedBy: String
+}
+
 public struct AuthoritySnapshot: Equatable, Sendable {
     public let databasePath: String
     public let lanes: [LaneRecord]
     public let operations: [OperationRecord]
+    public let authorityEvents: [AuthorityEventRecord]
     public let readAt: Date
 }
 
 public enum ConsoleSection: String, CaseIterable, Identifiable, Sendable {
-    case lanes = "Lanes", acquire = "Acquire", importEvidence = "Import Evidence", addInstrument = "Add Instrument", operations = "Operations"
+    case lanes = "Lanes", authority = "Authority Ledger", acquire = "Acquire", importEvidence = "Import Evidence", addInstrument = "Add Instrument", operations = "Operations"
     case integrity = "Integrity & Backup", settings = "Settings"
     public var id: String { rawValue }
     public var icon: String {
-        switch self { case .lanes: "list.bullet.rectangle"; case .acquire: "arrow.down.circle"; case .importEvidence: "doc.badge.plus"; case .addInstrument: "plus.circle"; case .operations: "clock.arrow.circlepath"; case .integrity: "checkmark.shield"; case .settings: "gearshape" }
+        switch self { case .lanes: "list.bullet.rectangle"; case .authority: "books.vertical"; case .acquire: "arrow.down.circle"; case .importEvidence: "doc.badge.plus"; case .addInstrument: "plus.circle"; case .operations: "clock.arrow.circlepath"; case .integrity: "checkmark.shield"; case .settings: "gearshape" }
     }
 }
 

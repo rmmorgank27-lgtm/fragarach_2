@@ -16,6 +16,7 @@ APPLICATION_TABLES = frozenset(
         "schema_migrations",
         "instrument_registrations",
         "evidence_lanes",
+        "authority_events",
     }
 )
 
@@ -780,4 +781,102 @@ MIGRATION_5_STATEMENTS = (
 
 def migration_5_checksum() -> str:
     source = "\n-- statement --\n".join(statement.strip() for statement in MIGRATION_5_STATEMENTS)
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
+MIGRATION_6_NAME = "SPEC-008A1 immutable authority ledger amendment"
+
+_AUTHORITY_EVENT_KINDS = (
+    "'LEGACY_REGISTRATION_BOUND','REGISTRATION_DECLARED','REGISTRATION_REVISED',"
+    "'REGISTRATION_REJECTED','REGISTRATION_SUPERSEDED','PROVIDER_MAPPING_DISCOVERED',"
+    "'PROVIDER_MAPPING_REVIEWED','PROVIDER_MAPPING_APPROVED','PROVIDER_MAPPING_REJECTED',"
+    "'PROVIDER_MAPPING_SUPERSEDED','LEGACY_LANE_BOUND','LANE_CANDIDATE_RETAINED',"
+    "'LANE_DECLARED','LANE_REVISED','LANE_REJECTED','LANE_SUPERSEDED',"
+    "'ENTITLEMENT_CHANGED','EFFECTIVE_RANGE_CHANGED','AUTHORITY_BINDING_CHANGED',"
+    "'COMPATIBILITY_FINDING_RECORDED','COMPATIBILITY_FINDING_SUPERSEDED'"
+)
+
+MIGRATION_6_STATEMENTS = (
+    f"""
+    CREATE TABLE authority_events (
+        authority_event_id TEXT PRIMARY KEY,
+        ledger_contract TEXT NOT NULL,
+        ledger_contract_version INTEGER NOT NULL,
+        entity_kind TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        event_kind TEXT NOT NULL,
+        supersedes_event_id TEXT,
+        effective_from_utc TEXT NOT NULL,
+        effective_to_utc TEXT,
+        canonical_payload TEXT NOT NULL,
+        payload_checksum_sha256 TEXT NOT NULL,
+        event_checksum_sha256 TEXT NOT NULL,
+        recorded_at_utc TEXT NOT NULL,
+        recorded_by TEXT NOT NULL,
+        FOREIGN KEY (supersedes_event_id) REFERENCES authority_events(authority_event_id)
+          ON UPDATE RESTRICT ON DELETE RESTRICT,
+        UNIQUE (event_checksum_sha256),
+        CHECK (length(authority_event_id)=64 AND authority_event_id NOT GLOB '*[^0-9a-f]*'),
+        CHECK (ledger_contract='AUTHORITY_EVENT_LEDGER_V1' AND ledger_contract_version=1),
+        CHECK (entity_kind IN ('INSTRUMENT_REGISTRATION','PROVIDER_MAPPING','EVIDENCE_LANE')),
+        CHECK (length(entity_id)>0 AND entity_id=trim(entity_id)),
+        CHECK (event_kind IN ({_AUTHORITY_EVENT_KINDS})),
+        CHECK (supersedes_event_id IS NULL OR supersedes_event_id<>authority_event_id),
+        CHECK (effective_from_utc=trim(effective_from_utc) AND julianday(effective_from_utc) IS NOT NULL
+               AND substr(effective_from_utc,-6)='+00:00'),
+        CHECK (effective_to_utc IS NULL OR (effective_to_utc=trim(effective_to_utc)
+               AND julianday(effective_to_utc) IS NOT NULL AND substr(effective_to_utc,-6)='+00:00'
+               AND julianday(effective_to_utc)>julianday(effective_from_utc))),
+        CHECK (json_valid(canonical_payload) AND json_type(canonical_payload)='object'),
+        CHECK (length(payload_checksum_sha256)=64 AND payload_checksum_sha256 NOT GLOB '*[^0-9a-f]*'),
+        CHECK (length(event_checksum_sha256)=64 AND event_checksum_sha256 NOT GLOB '*[^0-9a-f]*'),
+        CHECK (length(recorded_by)>0 AND recorded_by=trim(recorded_by)),
+        CHECK (recorded_at_utc=trim(recorded_at_utc) AND julianday(recorded_at_utc) IS NOT NULL
+               AND substr(recorded_at_utc,-6)='+00:00')
+    ) STRICT
+    """,
+    "CREATE INDEX authority_events_entity_order ON authority_events(entity_kind,entity_id,effective_from_utc,recorded_at_utc,authority_event_id)",
+    "CREATE INDEX authority_events_kind_effective ON authority_events(event_kind,effective_from_utc,effective_to_utc)",
+    "CREATE INDEX authority_events_payload_checksum ON authority_events(payload_checksum_sha256)",
+    "CREATE UNIQUE INDEX authority_events_one_successor ON authority_events(supersedes_event_id) WHERE supersedes_event_id IS NOT NULL",
+    """
+    CREATE TRIGGER authority_events_no_update BEFORE UPDATE ON authority_events
+    BEGIN SELECT RAISE(ABORT,'authority events are immutable'); END
+    """,
+    """
+    CREATE TRIGGER authority_events_no_delete BEFORE DELETE ON authority_events
+    BEGIN SELECT RAISE(ABORT,'authority events cannot be deleted'); END
+    """,
+    """
+    CREATE TRIGGER authority_events_validate_insert BEFORE INSERT ON authority_events BEGIN
+      SELECT CASE WHEN NEW.authority_event_id<>NEW.event_checksum_sha256
+        THEN RAISE(ABORT,'authority event id/checksum mismatch') END;
+      SELECT CASE WHEN json_extract(NEW.canonical_payload,'$.format')<>'fragarach_ii.authority_event_payload.v1'
+        OR json_extract(NEW.canonical_payload,'$.entity_kind')<>NEW.entity_kind
+        OR json_extract(NEW.canonical_payload,'$.entity_id')<>NEW.entity_id
+        OR json_extract(NEW.canonical_payload,'$.event_kind')<>NEW.event_kind
+        OR json_type(NEW.canonical_payload,'$.authority_bindings')<>'array'
+        OR json_type(NEW.canonical_payload,'$.compatibility_state')<>'text'
+        OR json_type(NEW.canonical_payload,'$.compatibility_reasons')<>'array'
+        OR json_type(NEW.canonical_payload,'$.body')<>'object'
+        THEN RAISE(ABORT,'invalid authority event payload envelope') END;
+      SELECT CASE WHEN NEW.supersedes_event_id IS NOT NULL AND NOT EXISTS(
+        SELECT 1 FROM authority_events p WHERE p.authority_event_id=NEW.supersedes_event_id
+          AND p.entity_kind=NEW.entity_kind AND p.entity_id=NEW.entity_id
+          AND julianday(NEW.effective_from_utc)>=julianday(p.effective_from_utc))
+        THEN RAISE(ABORT,'invalid authority supersession predecessor') END;
+      SELECT CASE WHEN
+        (NEW.event_kind LIKE 'REGISTRATION_%' OR NEW.event_kind='LEGACY_REGISTRATION_BOUND')
+          AND NEW.entity_kind<>'INSTRUMENT_REGISTRATION'
+        OR (NEW.event_kind LIKE 'PROVIDER_MAPPING_%' AND NEW.entity_kind<>'PROVIDER_MAPPING')
+        OR (NEW.event_kind LIKE 'LANE_%' OR NEW.event_kind='LEGACY_LANE_BOUND')
+          AND NEW.entity_kind<>'EVIDENCE_LANE'
+        THEN RAISE(ABORT,'invalid authority event kind for entity') END;
+    END
+    """,
+)
+
+
+def migration_6_checksum() -> str:
+    source = "\n-- statement --\n".join(statement.strip() for statement in MIGRATION_6_STATEMENTS)
     return hashlib.sha256(source.encode("utf-8")).hexdigest()

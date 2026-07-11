@@ -16,11 +16,14 @@ from .schema import (
     MIGRATION_4_STATEMENTS,
     MIGRATION_5_NAME,
     MIGRATION_5_STATEMENTS,
+    MIGRATION_6_NAME,
+    MIGRATION_6_STATEMENTS,
     migration_1_checksum,
     migration_2_checksum,
     migration_3_checksum,
     migration_4_checksum,
     migration_5_checksum,
+    migration_6_checksum,
 )
 
 
@@ -31,7 +34,7 @@ class MigrationError(RuntimeError):
 def apply_migrations(
     connection: sqlite3.Connection,
     *,
-    target_version: int = 5,
+    target_version: int = 6,
     fault_after_statement: int | None = None,
     fault_migration_version: int = 2,
 ) -> None:
@@ -42,7 +45,7 @@ def apply_migrations(
     Neither argument is used by runtime initialization.
     """
 
-    if target_version not in (1, 2, 3, 4, 5):
+    if target_version not in (1, 2, 3, 4, 5, 6):
         raise ValueError(f"unsupported target migration version: {target_version}")
 
     migrations = (
@@ -51,6 +54,7 @@ def apply_migrations(
         (3, MIGRATION_3_NAME, migration_3_checksum(), MIGRATION_3_STATEMENTS),
         (4, MIGRATION_4_NAME, migration_4_checksum(), MIGRATION_4_STATEMENTS),
         (5, MIGRATION_5_NAME, migration_5_checksum(), MIGRATION_5_STATEMENTS),
+        (6, MIGRATION_6_NAME, migration_6_checksum(), MIGRATION_6_STATEMENTS),
     )
     for version, name, checksum, statements in migrations[:target_version]:
         existing = _existing_migration(connection, version)
@@ -79,6 +83,7 @@ def verify_migrations(connection: sqlite3.Connection) -> None:
         (3, MIGRATION_3_NAME, migration_3_checksum()),
         (4, MIGRATION_4_NAME, migration_4_checksum()),
         (5, MIGRATION_5_NAME, migration_5_checksum()),
+        (6, MIGRATION_6_NAME, migration_6_checksum()),
     ]
     rows = connection.execute(
         "SELECT version, name, checksum_sha256 FROM schema_migrations ORDER BY version"

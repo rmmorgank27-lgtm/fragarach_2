@@ -21,12 +21,32 @@ public final class SQLiteReadService: @unchecked Sendable {
         guard sqlite3_db_readonly(db, "main") == 1 else { throw AuthorityReadError.sqlite("SQLite did not enforce read-only mode") }
         try exec(db, "PRAGMA query_only=ON")
         let tables = Set(try strings(db, "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'"))
-        guard tables == foundationTables else { throw AuthorityReadError.incompatibleDatabase("exact nine-table identity failed") }
+        guard tables == foundationTables else { throw AuthorityReadError.incompatibleDatabase("exact ten-table identity failed") }
         let migrations = try int(db, "SELECT count(*) FROM schema_migrations")
-        guard migrations == 5 else { throw AuthorityReadError.incompatibleDatabase("expected five recognized migrations") }
+        guard migrations == 6 else { throw AuthorityReadError.incompatibleDatabase("expected six recognized migrations") }
         let lanes = try queryLanes(db)
+        let authorityEvents = try queryAuthorityEvents(db)
         let operations = try queryOperations(db, limit: max(1, min(operationLimit, 500)))
-        return AuthoritySnapshot(databasePath: path, lanes: lanes, operations: operations, readAt: Date())
+        return AuthoritySnapshot(databasePath: path, lanes: lanes, operations: operations, authorityEvents: authorityEvents, readAt: Date())
+    }
+
+    private func queryAuthorityEvents(_ db: OpaquePointer) throws -> [AuthorityEventRecord] {
+        let sql = """
+        SELECT authority_event_id,entity_kind,entity_id,event_kind,supersedes_event_id,
+               effective_from_utc,effective_to_utc,
+               json_extract(canonical_payload,'$.compatibility_state'),
+               json_extract(canonical_payload,'$.compatibility_reasons'),
+               payload_checksum_sha256,event_checksum_sha256,recorded_at_utc,recorded_by
+        FROM authority_events
+        ORDER BY entity_kind,entity_id,effective_from_utc,recorded_at_utc,authority_event_id
+        LIMIT 500
+        """
+        var statement: OpaquePointer?; try prepare(db,sql,&statement); defer{sqlite3_finalize(statement)}
+        var result:[AuthorityEventRecord]=[]
+        while sqlite3_step(statement)==SQLITE_ROW {
+            result.append(.init(id:text(statement,0),entityKind:text(statement,1),entityID:text(statement,2),eventKind:text(statement,3),supersedesEventID:optionalText(statement,4),effectiveFrom:text(statement,5),effectiveTo:optionalText(statement,6),compatibilityState:text(statement,7),compatibilityReasonsJSON:text(statement,8),payloadChecksum:text(statement,9),eventChecksum:text(statement,10),recordedAt:text(statement,11),recordedBy:text(statement,12)))
+        }
+        return result
     }
 
     private func queryLanes(_ db: OpaquePointer) throws -> [LaneRecord] {

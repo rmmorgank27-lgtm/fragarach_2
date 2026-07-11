@@ -17,6 +17,9 @@ from .validation_summary import (
 from .registrations import (Alias, RegistrationCandidate, RegistrationError, RegistrationResult,
     canonical_registration, register_instrument, registration_for_lane)
 from .writer import WriterLock, WriterLockError
+from .authority_ledger import (AuthorityEventManifest, AuthorityEventResult, AuthorityLedgerError,
+    append_authority_event, bootstrap_legacy_authority, canonical_json, inspect_authority,
+    prepare_authority_event, reconstruct_authority)
 
 __all__ = [
     "IntegrityReport",
@@ -35,4 +38,7 @@ __all__ = [
     "verify_integrity",
     "Alias", "RegistrationCandidate", "RegistrationError", "RegistrationResult",
     "canonical_registration", "register_instrument", "registration_for_lane",
+    "AuthorityEventManifest", "AuthorityEventResult", "AuthorityLedgerError",
+    "append_authority_event", "bootstrap_legacy_authority", "canonical_json",
+    "inspect_authority", "prepare_authority_event", "reconstruct_authority",
 ]
