@@ -26,7 +26,7 @@ import SwiftUI
     }
     func run(_ intent:OperationIntent) async {
         guard activeOperationID==nil else{return}; operationError=nil; let id=UUID(); activeOperationID=id; QuitGuard.shared.begin { [weak self] in self?.bridge.cancel() }
-        do { let config=configuration; let credential: String? = { if case .acquire = intent { return CredentialResolver.resolve() }; return nil }(); let result=try await Task.detached { try self.bridge.validateCLI(config); return try self.bridge.run(intent,config:config,credential:credential) }.value; lastProcessResult=result; if result.exitCode != 0 { operationError=result.stderr.isEmpty ? result.stdout:result.stderr } }
+        do { let config=configuration; let credential: String? = { switch intent { case .acquire,.searchInstrument:return CredentialResolver.resolve();default:return nil } }(); let result=try await Task.detached { try self.bridge.validateCLI(config); return try self.bridge.run(intent,config:config,credential:credential) }.value; lastProcessResult=result; if result.exitCode != 0 { operationError=result.stderr.isEmpty ? result.stdout:result.stderr } }
         catch { operationError=error.localizedDescription }
         QuitGuard.shared.end(); activeOperationID=nil; await refresh()
     }

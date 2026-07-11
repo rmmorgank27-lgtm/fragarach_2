@@ -13,6 +13,8 @@ public struct CLIConfiguration: Equatable, Sendable {
 public enum ArgumentBuilder {
     public static func arguments(for intent: OperationIntent, database: String) -> [String] {
         switch intent {
+        case .searchInstrument(let query): ["-m","fragarach_ii.commands.search_instrument","--database",database,"--query",query,"--json"]
+        case .registerInstrument(let candidate): ["-m","fragarach_ii.commands.register_instrument","--database",database,"--candidate",candidate,"--json"]
         case .acquire(let asset,let from,let through,let mode): ["-m","fragarach_ii.commands.acquire","--database",database,"--provider","TWELVE_DATA","--asset",asset,"--timeframe","D1","--from-date",from,"--through-date",through,"--conflict-mode",mode.rawValue,"--json"]
         case .importCSV(let file,let symbol,let timeframe,let mode): ["-m","fragarach_ii.commands.ingest_file","--database",database,"--file",file,"--symbol",symbol,"--timeframe",timeframe,"--merge-mode",mode.rawValue,"--json"]
         case .validate(let symbol,let timeframe,let through,let persist): ["-m","fragarach_ii.commands.validate_lane","--database",database,"--symbol",symbol,"--timeframe",timeframe,"--through-date",through,persist ? "--persist":"--no-persist","--json"]

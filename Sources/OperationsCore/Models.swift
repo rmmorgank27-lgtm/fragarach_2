@@ -78,23 +78,33 @@ public struct AuthoritySnapshot: Equatable, Sendable {
 }
 
 public enum ConsoleSection: String, CaseIterable, Identifiable, Sendable {
-    case lanes = "Lanes", acquire = "Acquire", importEvidence = "Import", operations = "Operations"
+    case lanes = "Lanes", acquire = "Acquire", importEvidence = "Import Evidence", addInstrument = "Add Instrument", operations = "Operations"
     case integrity = "Integrity & Backup", settings = "Settings"
     public var id: String { rawValue }
     public var icon: String {
-        switch self { case .lanes: "list.bullet.rectangle"; case .acquire: "arrow.down.circle"; case .importEvidence: "doc.badge.plus"; case .operations: "clock.arrow.circlepath"; case .integrity: "checkmark.shield"; case .settings: "gearshape" }
+        switch self { case .lanes: "list.bullet.rectangle"; case .acquire: "arrow.down.circle"; case .importEvidence: "doc.badge.plus"; case .addInstrument: "plus.circle"; case .operations: "clock.arrow.circlepath"; case .integrity: "checkmark.shield"; case .settings: "gearshape" }
     }
 }
 
 public enum ConflictMode: String, CaseIterable, Sendable { case preserve, correct }
 
 public enum OperationIntent: Equatable, Sendable {
+    case searchInstrument(query: String)
+    case registerInstrument(candidate: String)
     case acquire(asset: String, from: String, through: String, mode: ConflictMode)
     case importCSV(file: String, symbol: String, timeframe: String, mode: ConflictMode)
     case validate(symbol: String, timeframe: String, through: String, persist: Bool)
     case verify
     case backup(destination: String)
 }
+
+public struct InstrumentAlias: Codable, Equatable, Sendable { public let alias:String; public let normalizedAlias:String; public let aliasType:String; enum CodingKeys:String,CodingKey{case alias;case normalizedAlias="normalized_alias";case aliasType="alias_type"} }
+public struct InstrumentCandidate: Codable, Equatable, Sendable {
+    public let asset,timeframe,instrumentFamily,localSymbol,displayName,instrumentType,assetClass,representationType,tradingCurrency,exchangeName,providerID,providerContract,providerSymbol,providerInstrumentType,calendarID,gapDoctrineID:String
+    public let calendarVersion,gapDoctrineVersion:Int; public let aliases:[InstrumentAlias]; public let exchangeMIC,providerExchange,providerCountry:String?
+    enum CodingKeys:String,CodingKey{case asset,timeframe,aliases;case instrumentFamily="instrument_family",localSymbol="local_symbol",displayName="display_name",instrumentType="instrument_type",assetClass="asset_class",representationType="representation_type",tradingCurrency="trading_currency",exchangeName="exchange_name",providerID="provider_id",providerContract="provider_contract",providerSymbol="provider_symbol",providerInstrumentType="provider_instrument_type",calendarID="calendar_id",calendarVersion="calendar_version",gapDoctrineID="gap_doctrine_id",gapDoctrineVersion="gap_doctrine_version",exchangeMIC="exchange_mic",providerExchange="provider_exchange",providerCountry="provider_country"}
+}
+public struct InstrumentSearchResponse: Codable, Equatable, Sendable { public let found,alreadyRegistered:Bool;public let candidate:InstrumentCandidate?;public let registrationStatus:String?;public init(found:Bool,alreadyRegistered:Bool,candidate:InstrumentCandidate?,registrationStatus:String?){self.found=found;self.alreadyRegistered=alreadyRegistered;self.candidate=candidate;self.registrationStatus=registrationStatus};enum CodingKeys:String,CodingKey{case found,candidate;case alreadyRegistered="already_registered",registrationStatus="registration_status"} }
 
 public enum LaneQuery {
     public static func apply(_ lanes: [LaneRecord], search: String, timeframe: String?) -> [LaneRecord] {
