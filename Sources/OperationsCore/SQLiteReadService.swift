@@ -21,9 +21,9 @@ public final class SQLiteReadService: @unchecked Sendable {
         guard sqlite3_db_readonly(db, "main") == 1 else { throw AuthorityReadError.sqlite("SQLite did not enforce read-only mode") }
         try exec(db, "PRAGMA query_only=ON")
         let tables = Set(try strings(db, "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'"))
-        guard tables == foundationTables else { throw AuthorityReadError.incompatibleDatabase("exact eight-table identity failed") }
+        guard tables == foundationTables else { throw AuthorityReadError.incompatibleDatabase("exact nine-table identity failed") }
         let migrations = try int(db, "SELECT count(*) FROM schema_migrations")
-        guard migrations == 4 else { throw AuthorityReadError.incompatibleDatabase("expected four recognized migrations") }
+        guard migrations == 5 else { throw AuthorityReadError.incompatibleDatabase("expected five recognized migrations") }
         let lanes = try queryLanes(db)
         let operations = try queryOperations(db, limit: max(1, min(operationLimit, 500)))
         return AuthoritySnapshot(databasePath: path, lanes: lanes, operations: operations, readAt: Date())

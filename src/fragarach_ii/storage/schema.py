@@ -15,6 +15,7 @@ APPLICATION_TABLES = frozenset(
         "rollup_state",
         "schema_migrations",
         "instrument_registrations",
+        "evidence_lanes",
     }
 )
 
@@ -720,4 +721,63 @@ MIGRATION_4_STATEMENTS = (
 
 def migration_4_checksum() -> str:
     source = "\n-- statement --\n".join(statement.strip() for statement in MIGRATION_4_STATEMENTS)
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
+MIGRATION_5_NAME = "SPEC-007 generic evidence lane foundation"
+
+MIGRATION_5_STATEMENTS = (
+    "DROP TRIGGER bars_require_registration_insert",
+    "DROP TRIGGER bars_require_registration_update",
+    """
+    CREATE TABLE evidence_lanes (
+        asset TEXT NOT NULL,
+        timeframe TEXT NOT NULL,
+        registration_timeframe TEXT NOT NULL,
+        lane_contract TEXT NOT NULL,
+        lane_contract_version INTEGER NOT NULL,
+        created_at_utc TEXT NOT NULL,
+        PRIMARY KEY (asset,timeframe),
+        FOREIGN KEY (asset,registration_timeframe)
+          REFERENCES instrument_registrations(asset,timeframe)
+          ON UPDATE RESTRICT ON DELETE RESTRICT,
+        CHECK (length(asset)>0 AND asset=trim(asset) AND asset=upper(asset)),
+        CHECK (length(timeframe)>0 AND timeframe=trim(timeframe) AND timeframe=upper(timeframe)),
+        CHECK (registration_timeframe='D1'),
+        CHECK (lane_contract='EVIDENCE_LANE_V1' AND lane_contract_version=1),
+        CHECK (created_at_utc=trim(created_at_utc) AND julianday(created_at_utc) IS NOT NULL
+               AND substr(created_at_utc,-6)='+00:00')
+    ) STRICT, WITHOUT ROWID
+    """,
+    """
+    INSERT INTO evidence_lanes
+      (asset,timeframe,registration_timeframe,lane_contract,lane_contract_version,created_at_utc)
+    SELECT asset,'D1',timeframe,'EVIDENCE_LANE_V1',1,registered_at_utc
+    FROM instrument_registrations ORDER BY asset
+    """,
+    """
+    CREATE TRIGGER evidence_lanes_no_update BEFORE UPDATE ON evidence_lanes
+    BEGIN SELECT RAISE(ABORT,'evidence lanes are immutable'); END
+    """,
+    """
+    CREATE TRIGGER evidence_lanes_no_delete BEFORE DELETE ON evidence_lanes
+    BEGIN SELECT RAISE(ABORT,'evidence lanes cannot be deleted'); END
+    """,
+    """
+    CREATE TRIGGER bars_require_evidence_lane_insert BEFORE INSERT ON bars BEGIN
+      SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM evidence_lanes l WHERE l.asset=NEW.asset AND l.timeframe=NEW.timeframe)
+      THEN RAISE(ABORT,'canonical evidence requires evidence lane') END;
+    END
+    """,
+    """
+    CREATE TRIGGER bars_require_evidence_lane_update BEFORE UPDATE OF asset,timeframe ON bars BEGIN
+      SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM evidence_lanes l WHERE l.asset=NEW.asset AND l.timeframe=NEW.timeframe)
+      THEN RAISE(ABORT,'canonical evidence requires evidence lane') END;
+    END
+    """,
+)
+
+
+def migration_5_checksum() -> str:
+    source = "\n-- statement --\n".join(statement.strip() for statement in MIGRATION_5_STATEMENTS)
     return hashlib.sha256(source.encode("utf-8")).hexdigest()

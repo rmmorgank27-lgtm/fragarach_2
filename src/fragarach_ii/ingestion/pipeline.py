@@ -172,7 +172,9 @@ def _ensure_raw_block(connection: sqlite3.Connection, evidence: RawEvidence) -> 
 
 
 def _require_registration(connection: sqlite3.Connection, symbol: str, timeframe: str) -> None:
-    if connection.execute("SELECT 1 FROM instrument_registrations WHERE asset=? AND timeframe=?",(symbol,timeframe)).fetchone() is None:
+    if connection.execute("""SELECT 1 FROM evidence_lanes l JOIN instrument_registrations r
+      ON r.asset=l.asset AND r.timeframe=l.registration_timeframe
+      WHERE l.asset=? AND l.timeframe=?""",(symbol,timeframe)).fetchone() is None:
         raise ValueError(f"UNREGISTERED_LANE: {symbol}:{timeframe}")
 
 

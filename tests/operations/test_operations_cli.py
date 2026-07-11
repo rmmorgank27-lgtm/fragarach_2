@@ -33,7 +33,7 @@ class OperationsCliTests(unittest.TestCase):
             self.assertTrue(verification["integrity_ok"])
             self.assertTrue(verification["foreign_keys_ok"])
             self.assertTrue(verification["migration_checksums_ok"])
-            self.assertTrue(verification["exact_eight_tables"])
+            self.assertTrue(verification["exact_nine_tables"])
             self.assertTrue(verification["read_only_contract"])
             code, backup = self.invoke(["backup", "--database", str(source), "--destination", str(destination), "--json"])
             self.assertEqual(code, 0)

@@ -2,7 +2,7 @@
 
 Fragarach II is a candidate authority for trusted historical market-bar evidence. Its only responsibilities are to read, validate, store, and serve evidence.
 
-The current implementation has an exact eight-table SQLite foundation, including the canonical instrument-registration authority, plus bounded manual and Twelve Data D1 evidence paths. Passing its tests proves local mechanics; it does not establish operational trust or production readiness.
+The current implementation has an exact nine-table SQLite foundation, including canonical instrument-registration and generic evidence-lane authority, plus bounded manual and Twelve Data D1 evidence paths. Passing its tests proves local mechanics; it does not establish operational trust or production readiness.
 
 ## Development
 

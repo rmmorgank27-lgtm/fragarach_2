@@ -97,6 +97,9 @@ def register_instrument(database_path: str | Path, candidate: RegistrationCandid
                 try: connection.execute("INSERT INTO instrument_registrations VALUES ("+",".join("?" for _ in values)+")",values)
                 except sqlite3.IntegrityError as error: raise RegistrationError("PROVIDER_OR_NAME_COLLISION",str(error)) from error
                 outcome, status = "INSERTED", "REGISTERED_NO_EVIDENCE"
+            connection.execute("""INSERT OR IGNORE INTO evidence_lanes
+              (asset,timeframe,registration_timeframe,lane_contract,lane_contract_version,created_at_utc)
+              VALUES (?, 'D1', 'D1', 'EVIDENCE_LANE_V1', 1, ?)""",(candidate.asset,registered_at_utc))
     connection = open_read_only(database_path)
     try:
         row=connection.execute("SELECT identity_json,identity_checksum_sha256 FROM instrument_registrations WHERE asset=? AND timeframe=?",(candidate.asset,candidate.timeframe)).fetchone()

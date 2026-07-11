@@ -1,6 +1,6 @@
 import Foundation
 
-public let foundationTables = Set(["bars", "ingest_runs", "instrument_registrations", "lane_state", "provenance", "raw_blocks", "rollup_state", "schema_migrations"])
+public let foundationTables = Set(["bars", "evidence_lanes", "ingest_runs", "instrument_registrations", "lane_state", "provenance", "raw_blocks", "rollup_state", "schema_migrations"])
 
 public struct ValidationSummary: Codable, Equatable, Sendable {
     public let format: String
