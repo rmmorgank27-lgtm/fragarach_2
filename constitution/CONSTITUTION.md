@@ -2,12 +2,12 @@
 
 **Authority ID:** `FRAGARACH_II_CONSTITUTION_V1`  
 **Version:** `1`  
-**Status:** `DRAFT FOR APPROVAL`  
+**Status:** APPROVED  
 **Classification:** `Constitutional Root Authority`  
 **Repository Location:** `constitution/CONSTITUTION.md`  
 **Doctrine:** `Operations is King`  
-**Approval Date:** `PENDING`  
-**Effective Date:** `PENDING`  
+**Approval Date:** 2026-07-11  
+**Effective Date:** 2026-07-11  
 **Constitutional Authority Owner:** `Ray Morgan`
 
 ---

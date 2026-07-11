@@ -7,15 +7,15 @@
 **Market Code:** `EQUITIES_UK`  
 **Timeframe:** `M5`  
 **Version:** 1.0  
-**Status:** DRAFT FOR APPROVAL  
+**Status:** APPROVED  
 **Repository Location:** `constitution/authorities/equities_uk/UK_EQUITIES_M5_AUTHORITY_V1.md`  
 **Governing Constitution:** `constitution/CONSTITUTION.md`  
 **Parent Authority:** `constitution/doctrines/UK_EQUITIES_BASE_DOCTRINE_V1.md`  
-**Effective From:** Not effective until approved  
+**Effective From:** 2026-07-11  
 **Effective Until:** OPEN  
 **Supersedes:** NONE  
-**Approved By:** PENDING  
-**Approval Date:** PENDING
+**Approved By:** Ray Morgan  
+**Approval Date:** 2026-07-11
 
 ---
 
@@ -486,7 +486,7 @@ and MUST be shortened where required to remain at or below 4,000 expected rows.
 Adjacent chunks MUST overlap by at least:
 
 ```text
-156 expected M5 intervals, equal to two normal regular sessions
+204 expected M5 intervals, equal to two normal regular sessions
 ```
 
 Overlap provides deterministic reassembly, correction detection, and corporate-action boundary evidence.
@@ -496,7 +496,7 @@ Overlap provides deterministic reassembly, correction detection, and corporate-a
 An incremental request SHOULD begin at least:
 
 ```text
-156 expected M5 intervals
+204 expected M5 intervals
 ```
 
 before the latest accepted closed interval and continue through the interval immediately after the latest expected closed interval, followed by canonical filtering.

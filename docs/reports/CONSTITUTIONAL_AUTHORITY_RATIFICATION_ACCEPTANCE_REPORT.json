@@ -1,0 +1,20 @@
+{
+  "authority_owner": "Ray Morgan",
+  "authority_state": "RATIFIED CONSTITUTIONAL AUTHORITY",
+  "checkpoint_subject": "Ratify Fragarach II constitutional authority",
+  "controlled_documents": 49,
+  "database_sha256_after": "b39e9e521ea7f55d2c47011db3744d5494d28bd73761c8e60167173a093b5221",
+  "database_sha256_before": "b39e9e521ea7f55d2c47011db3744d5494d28bd73761c8e60167173a093b5221",
+  "doctrines_approved": 9,
+  "manifest_status": "RATIFIED",
+  "native_launch_verified": true,
+  "python_tests_passed": 89,
+  "ratification_date": "2026-07-11",
+  "runtime_mutation": false,
+  "schema_table_count": 9,
+  "secret_scan_clean": true,
+  "sha256_inventory": "CONSTITUTIONAL_AUTHORITY_RATIFICATION_ACCEPTANCE_REPORT.md#final-sha-256-inventory",
+  "swift_checks_passed": 11,
+  "templates_retained": 2,
+  "timeframe_authorities_approved": 36
+}

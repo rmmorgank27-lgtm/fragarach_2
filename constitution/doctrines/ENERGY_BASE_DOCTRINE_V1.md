@@ -7,14 +7,14 @@
 **Market Name:** Energy Reference Prices  
 **Market Code:** `ENERGY`  
 **Version:** 1.0  
-**Status:** DRAFT FOR APPROVAL  
+**Status:** APPROVED  
 **Repository Location:** `constitution/doctrines/ENERGY_BASE_DOCTRINE_V1.md`  
 **Governing Constitution:** `constitution/CONSTITUTION.md`  
-**Effective From:** Not effective until approved  
+**Effective From:** 2026-07-11  
 **Effective Until:** OPEN  
 **Supersedes:** NONE  
-**Approved By:** PENDING  
-**Approval Date:** PENDING
+**Approved By:** Ray Morgan  
+**Approval Date:** 2026-07-11
 
 ---
 

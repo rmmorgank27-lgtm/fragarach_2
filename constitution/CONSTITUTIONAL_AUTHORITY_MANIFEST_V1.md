@@ -3,8 +3,8 @@
 **Document ID:** `CONSTITUTIONAL_AUTHORITY_MANIFEST_V1`  
 **Repository:** `/Users/raymorgan/VSC/Fragarach_2`  
 **Date:** `2026-07-11`  
-**Status:** `PENDING RATIFICATION`  
-**Authority State:** `CANDIDATE AUTHORITY`  
+**Status:** `RATIFIED`  
+**Authority State:** `RATIFIED CONSTITUTIONAL AUTHORITY`  
 **Doctrine:** `Operations is King`
 
 ---
