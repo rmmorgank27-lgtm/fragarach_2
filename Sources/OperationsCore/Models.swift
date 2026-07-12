@@ -425,6 +425,7 @@ public struct ProcessResult: Equatable, Sendable {
     public let exitCode: Int32
     public let stdout: String
     public let stderr: String
+    public init(operationID:UUID,exitCode:Int32,stdout:String,stderr:String){self.operationID=operationID;self.exitCode=exitCode;self.stdout=stdout;self.stderr=stderr}
     public var JSON: [String: Any]? { (try? JSONSerialization.jsonObject(with: Data(stdout.utf8))) as? [String: Any] }
     public static func == (lhs: Self, rhs: Self) -> Bool { lhs.operationID == rhs.operationID && lhs.exitCode == rhs.exitCode && lhs.stdout == rhs.stdout && lhs.stderr == rhs.stderr }
 }

@@ -1,4 +1,5 @@
 import CryptoKit
+import AppKit
 import Foundation
 import OperationsCore
 import SwiftUI
@@ -11,14 +12,15 @@ struct DataOperationsView: View {
     @State private var showRetired = false
     @State private var selection = DataOperationsSelection()
     @State private var intent: FetchIntent = .maximum
-    @State private var from = ""
-    @State private var through = ""
+    @State private var fromDate = Calendar.current.date(byAdding:.year,value:-1,to:Date())!
+    @State private var throughDate = Calendar.current.date(byAdding:.day,value:-1,to:Date())!
     @State private var conflict = ConflictMode.preserve
     @State private var file: URL?
     @State private var reviewing = false
     @State private var retirementImpact: RetirementImpact?
     @State private var retirementReceipt: RetirementReceipt?
     @State private var localError: String?
+    @State private var dateInterpretation:String?
 
     private var allRegistrations: [InstrumentRegistrationRecord] { store.snapshot?.registrations ?? [] }
     private var registrations: [InstrumentRegistrationRecord] {
@@ -64,11 +66,17 @@ struct DataOperationsView: View {
                 readableResult
             }.padding().frame(maxWidth:900,alignment:.leading) }
         }
-        .onAppear { applyNavigationContext() }
+        .onAppear { store.clearCurrentOperationResult();applyNavigationContext() }
         .onChange(of:store.snapshot){reconcileSelection()}
         .onChange(of:search){reconcileSelection()}
         .onChange(of:showRetired){reconcileSelection()}
         .onChange(of:selection.selectedRegistrationID){resetInstrumentContext()}
+        .onChange(of:store.dataOperationsMode){store.clearCurrentOperationResult()}
+        .onChange(of:fromDate){store.clearCurrentOperationResult()}
+        .onChange(of:throughDate){store.clearCurrentOperationResult()}
+        .onChange(of:intent){store.clearCurrentOperationResult()}
+        .onChange(of:conflict){store.clearCurrentOperationResult()}
+        .onChange(of:file){store.clearCurrentOperationResult()}
         .sheet(isPresented:$reviewing){reviewSheet}
         .sheet(item:$retirementImpact){impact in RetirementOperationReview(impact:impact,onConfirm:confirmRetirement)}
         .sheet(item:$retirementReceipt){receipt in RetirementOperationSuccess(receipt:receipt){retirementReceipt=nil}}
@@ -81,11 +89,14 @@ struct DataOperationsView: View {
         Picker("Intent",selection:$intent){ForEach(FetchIntent.allCases,id:\.self){Text($0.rawValue)}}.pickerStyle(.segmented)
         if intent == .maximum { unavailableCapability(title:"Maximum history cannot yet be proven.",reason:"Terminal-boundary proof and resume behavior are not implemented.") }
         else if intent == .update { unavailableCapability(title:"Automatic update range is unavailable.",reason:"The correction-overlap resolver is not implemented.");Facts([("Latest stored",latestText),("Latest completed D1",latestCompletedD1)]) }
-        else { Form { TextField("Inclusive from date",text:$from);TextField("Inclusive through date",text:$through) } }
+        else { customRangeControls }
         Picker("Conflict policy",selection:$conflict){ForEach(ConflictMode.allCases,id:\.self){Text($0.rawValue.capitalized)}}
         Text("Preserve keeps prior evidence and records the conflicting candidate without silent overwrite.").font(.caption).foregroundStyle(.secondary)
-        Button("Review Data Operation"){reviewing=true}.buttonStyle(.borderedProminent).disabled(!canMutate || intent != .custom || from.isEmpty || through.isEmpty || !store.credentialAvailable)
+        Button("Review Data Operation"){store.clearCurrentOperationResult();reviewing=true}.buttonStyle(.borderedProminent).disabled(!customPlanValid)
+        if intent == .custom,!customPlanValid { Label(customValidationMessage,systemImage:"exclamationmark.triangle").foregroundStyle(.red) }
     } }
+
+    private var customRangeControls:some View { VStack(alignment:.leading,spacing:10) { HStack { DatePicker("Inclusive From Date",selection:$fromDate,displayedComponents:.date);Button("Paste From Date"){pasteDate(toFrom:true)};DatePicker("Inclusive Through Date",selection:$throughDate,in:...latestCompletedBoundary,displayedComponents:.date);Button("Paste Through Date"){pasteDate(toFrom:false)} };if let dateInterpretation{Label(dateInterpretation,systemImage:"calendar.badge.checkmark").foregroundStyle(.orange)};Text("Latest completed D1 boundary: \(ControlledDateRange.iso(latestCompletedBoundary))").font(.caption).foregroundStyle(.secondary);HStack{Text("Canonical plan: \(dateRange.fromISO) → \(dateRange.throughISO)").font(.caption.monospaced()).foregroundStyle(.secondary);Spacer();Menu("Presets"){Button("Last 7 Days"){applyPreset(days:7)};Button("Last 30 Days"){applyPreset(days:30)};Button("Year to Date"){let c=Calendar.current;fromDate=c.date(from:c.dateComponents([.year],from:latestCompletedBoundary))!;throughDate=latestCompletedBoundary};Button("Last 12 Months"){fromDate=Calendar.current.date(byAdding:.year,value:-1,to:latestCompletedBoundary)!;throughDate=latestCompletedBoundary};if let latest=lane?.latestBar{Button("Since Latest Stored"){fromDate=Date(timeIntervalSince1970:TimeInterval(latest));throughDate=latestCompletedBoundary}}}} } }
 
     private func unavailableCapability(title:String,reason:String)->some View { GroupBox("Capability unavailable; safe fallback active") { VStack(alignment:.leading,spacing:10) { Label(title,systemImage:"exclamationmark.triangle").foregroundStyle(.orange);Text(reason).foregroundStyle(.secondary);Facts([("Affected scope","\(registration?.asset ?? "Instrument"):D1 — selected convenience operation"),("What remains safe","Bounded D1 fetch, Import File, and Retire")]);HStack{Button("Choose Custom Range"){intent = .custom};Button("Import File"){store.dataOperationsMode = .importFile}.buttonStyle(.borderedProminent)};DisclosureGroup("Technical reason"){Text("The current implementation cannot prove a provider terminal boundary or calculate an approved automatic overlap. Ratified timeframe authority remains present; this is an implementation incompatibility.").font(.caption)} } } }
 
@@ -100,17 +111,23 @@ struct DataOperationsView: View {
 
     private func laneMatrix(_ r:InstrumentRegistrationRecord)->some View { GroupBox("Timeframe Lane Matrix") { Grid(alignment:.leading,horizontalSpacing:18,verticalSpacing:8) { GridRow{ForEach(["Timeframe","Registration","Evidence","Latest","Default intent","Selectable"],id:\.self){Text($0).font(.caption.bold())}};Divider().gridCellColumns(6);GridRow{Text(r.timeframe).monospaced();Text(r.retired ? "Retired":"Existing");Text((lane?.barCount ?? 0)>0 ? "Yes":"No");Text(latestText);Text((lane?.barCount ?? 0)>0 ? "Update to Current":"Maximum Available");Text(r.retired ? "No — retired":"Yes")} }.frame(maxWidth:.infinity,alignment:.leading) } }
 
-    @ViewBuilder private var readableResult:some View { if store.dataOperationsMode != .history,let result=store.lastProcessResult { GroupBox(result.exitCode==0 ? "Data Operation Complete":"Data Operation Failed") { VStack(alignment:.leading,spacing:8) { Label(result.exitCode==0 ? "Authority service completed successfully":"No success was claimed",systemImage:result.exitCode==0 ? "checkmark.circle.fill":"xmark.octagon").foregroundStyle(result.exitCode==0 ? .green:.red);if let op=store.snapshot?.operations.first{Facts([("Rows inserted","\(op.inserted)"),("Rows unchanged","\(op.unchanged)"),("Conflicts preserved","\(op.conflicts)"),("Raw block",op.rawBlockID ?? "—")])};DisclosureGroup("Technical Details"){Text(result.stdout.isEmpty ? result.stderr:result.stdout).font(.caption.monospaced()).textSelection(.enabled)} } } } }
+    @ViewBuilder private var readableResult:some View { if store.dataOperationsMode != .history,let owned=store.currentOperationResult,owned.planRevision==store.currentPlanRevision { let result=owned.result;GroupBox(result.exitCode==0 ? "Data Operation Complete":"Data Operation Failed") { VStack(alignment:.leading,spacing:8) { Label(result.exitCode==0 ? "Authority service completed successfully":"No evidence was written.",systemImage:result.exitCode==0 ? "checkmark.circle.fill":"xmark.octagon").foregroundStyle(result.exitCode==0 ? .green:.red);if result.exitCode==0,let json=result.JSON{Facts([("Rows inserted","\(json["inserted"] as? Int ?? 0)"),("Rows unchanged","\(json["unchanged"] as? Int ?? 0)"),("Conflicts preserved","\(json["conflicts_preserved"] as? Int ?? 0)"),("Raw block",json["raw_block_id"] as? String ?? "—")])}else{Facts([("Rows inserted","0"),("Rows unchanged","0"),("Conflicts preserved","0"),("Raw blocks created","0")])};DisclosureGroup("Technical Details"){Text(result.stdout.isEmpty ? result.stderr:result.stdout).font(.caption.monospaced()).textSelection(.enabled)} } } } }
 
-    @ViewBuilder private var reviewSheet:some View { if let r=registration { VStack(alignment:.leading,spacing:16) { Text("Review Data Operation").font(.title);Facts([("Instrument","\(r.asset) — \(r.displayName)"),("Source",store.dataOperationsMode == .importFile ? "Manual file import":"Twelve Data"),("Lane",r.timeframe),("Intent",store.dataOperationsMode == .fetch ? intent.rawValue:"Import File"),("Requested range",store.dataOperationsMode == .fetch ? "\(from) → \(through) inclusive":file?.lastPathComponent ?? "—"),("Conflict Policy",conflict.rawValue.capitalized)]);HStack{Button("Cancel",role:.cancel){reviewing=false};Spacer();Button("Run Data Operation"){runReviewed(r)}.buttonStyle(.borderedProminent)} }.padding(24).frame(minWidth:620) } }
+    @ViewBuilder private var reviewSheet:some View { if let r=registration { VStack(alignment:.leading,spacing:16) { Text("Review Data Operation").font(.title);Facts([("Instrument","\(r.asset) — \(r.displayName)"),("Source",store.dataOperationsMode == .importFile ? "Manual file import":"Twelve Data"),("Lane",r.timeframe),("Intent",store.dataOperationsMode == .fetch ? intent.rawValue:"Import File"),("Requested range",store.dataOperationsMode == .fetch ? "\(dateRange.fromISO) → \(dateRange.throughISO) inclusive":file?.lastPathComponent ?? "—"),("Conflict Policy",conflict.rawValue.capitalized)]);HStack{Button("Cancel",role:.cancel){reviewing=false};Spacer();Button("Run Data Operation"){runReviewed(r)}.buttonStyle(.borderedProminent)} }.padding(24).frame(minWidth:620) } }
 
     private var latestText:String { lane?.latestBar.map{Date(timeIntervalSince1970:TimeInterval($0)).formatted(date:.numeric,time:.shortened)} ?? "—" }
     private var latestCompletedD1:String { Calendar.current.date(byAdding:.day,value:-1,to:Date())!.formatted(.iso8601.year().month().day()) }
+    private var latestCompletedBoundary:Date{Calendar.current.startOfDay(for:Calendar.current.date(byAdding:.day,value:-1,to:Date())!)}
+    private var dateRange:ControlledDateRange{.init(from:fromDate,through:throughDate,completedBoundary:latestCompletedBoundary)}
+    private var customPlanValid:Bool{canMutate && intent == .custom && dateRange.validation == .valid && store.credentialAvailable}
+    private var customValidationMessage:String{switch dateRange.validation{case .valid:return store.credentialAvailable ? "Choose a valid plan before reviewing.":"Provider credential is unavailable; Import File remains available.";case .reversed:return "The start date must be on or before the through date.";case .futureBoundary(let maximum):return "The through date exceeds the latest completed D1 boundary. Maximum permitted date: \(maximum).";case .contractLimit(let days):return "The range exceeds the provider contract limit of \(days) calendar days."}}
+    private func applyPreset(days:Int){throughDate=latestCompletedBoundary;fromDate=Calendar.current.date(byAdding:.day,value:-(days-1),to:throughDate)!}
+    private func pasteDate(toFrom:Bool){guard let text=NSPasteboard.general.string(forType:.string),let parsed=ControlledDateParser.parse(text)else{dateInterpretation="The pasted date could not be understood. Choose a date from the calendar.";return};if toFrom{fromDate=parsed.date}else{throughDate=parsed.date};dateInterpretation=parsed.interpretation ?? "Normalised to \(parsed.canonicalISO)."}
     private func rowCount(_ url:URL)->String{guard let text=try? String(contentsOf:url,encoding:.utf8)else{return "Unknown"};return String(max(0,text.split(whereSeparator:\.isNewline).count-1))}
     private func reconcileSelection(){selection.reconcile(visibleRegistrationIDs:Set(registrations.map(\.id)))}
     private func applyNavigationContext(){guard let asset=store.acquisitionAsset else{return};store.acquisitionAsset=nil;let id=registrations.first(where:{$0.asset==asset})?.id;selection.applyNavigationContext(id,visibleRegistrationIDs:Set(registrations.map(\.id)))}
-    private func resetInstrumentContext(){intent=(lane?.barCount ?? 0)>0 ? .update:.maximum;from="";through="";file=nil;reviewing=false;retirementImpact=nil;retirementReceipt=nil;localError=nil;conflict = .preserve}
-    private func runReviewed(_ r:InstrumentRegistrationRecord){reviewing=false;Task{if store.dataOperationsMode == .fetch{await store.run(.acquire(asset:r.asset,from:from,through:through,mode:conflict))}else if let file{await store.run(.importCSV(file:file.path,symbol:r.asset,timeframe:r.timeframe,mode:conflict))}}}
+    private func resetInstrumentContext(){intent=(lane?.barCount ?? 0)>0 ? .update:.maximum;throughDate=latestCompletedBoundary;fromDate=Calendar.current.date(byAdding:.year,value:-1,to:throughDate)!;file=nil;reviewing=false;retirementImpact=nil;retirementReceipt=nil;localError=nil;dateInterpretation=nil;conflict = .preserve;store.clearCurrentOperationResult()}
+    private func runReviewed(_ r:InstrumentRegistrationRecord){reviewing=false;store.clearCurrentOperationResult();Task{if store.dataOperationsMode == .fetch{await store.run(.acquire(asset:r.asset,from:dateRange.fromISO,through:dateRange.throughISO,mode:conflict))}else if let file{await store.run(.importCSV(file:file.path,symbol:r.asset,timeframe:r.timeframe,mode:conflict))}}}
     private func planRetirement(_ r:InstrumentRegistrationRecord){localError=nil;Task{await store.run(.retirementPlan(asset:r.asset,scope:"WHOLE_INSTRUMENT",lanes:selectedRegistrations.map(\.timeframe)));guard store.lastProcessResult?.exitCode==0,let text=store.lastProcessResult?.stdout,let impact=try? JSONDecoder().decode(RetirementImpact.self,from:Data(text.utf8))else{localError=store.operationError ?? "Retirement impact could not be loaded";return};retirementImpact=impact}}
     private func confirmRetirement(_ impact:RetirementImpact,_ reason:String,_ note:String,_ confirmation:String){retirementImpact=nil;Task{await store.run(.retireInstrument(asset:impact.canonicalInstrument,scope:impact.scope,lanes:impact.selectedLanes,reason:reason,note:note,confirmation:confirmation));guard store.lastProcessResult?.exitCode==0,let text=store.lastProcessResult?.stdout,let receipt=try? JSONDecoder().decode(RetirementReceipt.self,from:Data(text.utf8))else{localError=store.operationError ?? "Retirement failed";return};retirementReceipt=receipt}}
 }

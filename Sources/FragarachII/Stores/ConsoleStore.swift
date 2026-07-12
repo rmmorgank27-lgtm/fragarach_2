@@ -20,6 +20,8 @@ import SwiftUI
     @Published var isRefreshing=false
     @Published var activeOperationID: UUID?
     @Published var lastProcessResult: ProcessResult?
+    @Published var currentPlanRevision=UUID()
+    @Published var currentOperationResult: OwnedOperationResult?
     @Published var operationError: String?
     @Published var acquisitionAsset: String?
     private let reader=SQLiteReadService(); let bridge=ProcessBridge()
@@ -43,11 +45,12 @@ import SwiftUI
         catch { readError=error.localizedDescription }
     }
     func run(_ intent:OperationIntent) async {
-        guard activeOperationID==nil else{return}; operationError=nil; let id=UUID(); activeOperationID=id; QuitGuard.shared.begin { [weak self] in self?.bridge.cancel() }
-        do { let config=configuration; let credential: String? = { switch intent { case .acquire,.searchInstrument:return CredentialResolver.resolve();default:return nil } }(); let result=try await Task.detached { try self.bridge.validateCLI(config); return try self.bridge.run(intent,config:config,credential:credential) }.value; lastProcessResult=result; if result.exitCode != 0 { operationError=result.stderr.isEmpty ? result.stdout:result.stderr } }
+        guard activeOperationID==nil else{return}; operationError=nil;currentOperationResult=nil;let id=UUID();activeOperationID=id;QuitGuard.shared.begin { [weak self] in self?.bridge.cancel() }
+        do { let config=configuration,revision=currentPlanRevision;let credential: String? = { switch intent { case .acquire,.searchInstrument:return CredentialResolver.resolve();default:return nil } }(); let result=try await Task.detached { try self.bridge.validateCLI(config); return try self.bridge.run(intent,config:config,credential:credential) }.value; lastProcessResult=result;currentOperationResult = .init(planRevision:revision,result:result);if result.exitCode != 0 { operationError=result.stderr.isEmpty ? result.stdout:result.stderr } }
         catch { operationError=error.localizedDescription }
         QuitGuard.shared.end(); activeOperationID=nil; await refresh()
     }
     func cancel(){bridge.cancel()}
+    func clearCurrentOperationResult(){currentPlanRevision=UUID();currentOperationResult=nil;operationError=nil}
     func navigate(_ route:LegacyRoute,asset:String?=nil){let target=NavigationRedirect.destination(for:route);section=target.workspace;if let mode=target.dataMode{dataOperationsMode=mode};if let system=target.systemSection{systemSection=system};if let asset{acquisitionAsset=asset}}
 }

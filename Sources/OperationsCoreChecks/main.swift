@@ -124,4 +124,29 @@ try run("legacy routes redirect to four-workspace destinations") {
     try check(NavigationRedirect.destination(for:.settings).systemSection == .settings,"settings redirect")
     try check(NavigationRedirect.destination(for:.acquire).dataMode == .fetch && NavigationRedirect.destination(for:.importEvidence).dataMode == .importFile,"data redirects")
 }
+try run("controlled dates serialize canonically and validate ranges") {
+    let iso=ISO8601DateFormatter(),start=iso.date(from:"1980-01-01T00:00:00Z")!,end=iso.date(from:"1990-01-01T00:00:00Z")!,boundary=iso.date(from:"2026-07-11T00:00:00Z")!
+    let valid=ControlledDateRange(from:start,through:end,completedBoundary:boundary)
+    try check(valid.fromISO=="1980-01-01" && valid.throughISO=="1990-01-01","ISO serialization")
+    try check(valid.validation == .valid,"valid range")
+    try check(ControlledDateRange(from:end,through:start,completedBoundary:boundary).validation == .reversed,"reversed range")
+    if case .futureBoundary(let maximum)=ControlledDateRange(from:start,through:Date(timeIntervalSince1970:boundary.timeIntervalSince1970+86400),completedBoundary:boundary).validation{try check(maximum=="2026-07-11","future boundary")}else{throw CheckFailure.failed("future range accepted")}
+}
+try run("locale date input normalizes with visible ambiguous interpretation") {
+    let au=try ControlledDateParser.parse("01/02/1980",locale:Locale(identifier:"en_AU")) ?? {throw CheckFailure.failed("AU date parse")}()
+    try check(au.canonicalISO=="1980-02-01" && au.interpretation != nil,"ambiguous locale interpretation")
+    try check(ControlledDateParser.parse("1 Jan 1980")?.canonicalISO=="1980-01-01","month date parse")
+}
+try run("controlled operational domains cannot emit arbitrary identifiers") {
+    let registrations=try SQLiteReadService().load(path:authority).registrations
+    try check(registrations.allSatisfy{$0.id=="\($0.asset):\($0.timeframe)"},"registration identity")
+    try check(Set(registrations.map(\.timeframe)) == ["D1"],"controlled timeframe")
+    try check(Set(registrations.map(\.providerID)) == ["TWELVE_DATA"],"controlled provider")
+}
+try run("operation results are owned by one plan revision") {
+    let first=UUID(),second=UUID(),result=ProcessResult(operationID:UUID(),exitCode:1,stdout:"{\"evidence_committed\":false}",stderr:"")
+    let owned=OwnedOperationResult(planRevision:first,result:result)
+    try check(owned.planRevision==first && owned.planRevision != second,"result ownership")
+    try check(owned.result.exitCode==1 && owned.result.JSON?["evidence_committed"] as? Bool == false,"pre-mutation failure")
+}
 print("OperationsCoreChecks: \(passed) checks passed")
