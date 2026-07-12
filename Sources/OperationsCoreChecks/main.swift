@@ -141,7 +141,7 @@ try run("controlled operational domains cannot emit arbitrary identifiers") {
     let registrations=try SQLiteReadService().load(path:authority).registrations
     try check(registrations.allSatisfy{$0.id=="\($0.asset):\($0.timeframe)"},"registration identity")
     try check(Set(registrations.map(\.timeframe)) == ["D1"],"controlled timeframe")
-    try check(Set(registrations.map(\.providerID)) == ["TWELVE_DATA"],"controlled provider")
+    try check(Set(registrations.map(\.providerID)).isSubset(of:["", "TWELVE_DATA", "YAHOO_FINANCE"]),"controlled provider")
 }
 try run("operation results are owned by one plan revision") {
     let first=UUID(),second=UUID(),result=ProcessResult(operationID:UUID(),exitCode:1,stdout:"{\"evidence_committed\":false}",stderr:"")

@@ -21,7 +21,7 @@ public enum ArgumentBuilder {
         case .registerInstrument(let candidate): ["-m","fragarach_ii.commands.register_instrument","--database",database,"--candidate",candidate,"--json"]
         case .retirementPlan(let asset,let scope,let lanes): ["-m","fragarach_ii.commands.retire_instrument","--database",database,"--asset",asset,"--scope",scope,"--lanes",lanes.joined(separator:","),"--json"]
         case .retireInstrument(let asset,let scope,let lanes,let reason,let note,let confirmation): ["-m","fragarach_ii.commands.retire_instrument","--database",database,"--asset",asset,"--scope",scope,"--lanes",lanes.joined(separator:","),"--reason",reason,"--note",note,"--confirmation",confirmation,"--confirm","--json"]
-        case .acquire(let asset,let from,let through,let mode): ["-m","fragarach_ii.commands.acquire","--database",database,"--provider","TWELVE_DATA","--asset",asset,"--timeframe","D1","--from-date",from,"--through-date",through,"--conflict-mode",mode.rawValue,"--json"]
+        case .acquire(let asset,let from,let through,let mode): ["-m","fragarach_ii.commands.acquire","--database",database,"--provider","AUTO","--asset",asset,"--timeframe","D1","--from-date",from,"--through-date",through,"--conflict-mode",mode.rawValue,"--json"]
         case .importCSV(let file,let symbol,let timeframe,let mode): ["-m","fragarach_ii.commands.ingest_file","--database",database,"--file",file,"--symbol",symbol,"--timeframe",timeframe,"--merge-mode",mode.rawValue,"--json"]
         case .validate(let symbol,let timeframe,let through,let persist): ["-m","fragarach_ii.commands.validate_lane","--database",database,"--symbol",symbol,"--timeframe",timeframe,"--through-date",through,persist ? "--persist":"--no-persist","--json"]
         case .verify: ["-m","fragarach_ii.commands.operations","verify","--database",database,"--json"]
@@ -43,7 +43,6 @@ public final class ProcessBridge: @unchecked Sendable {
         guard result.exitCode==0, result.JSON?["cli_id"] as? String == "fragarach_ii.operations_cli.v1", result.JSON?["cli_version"] as? Int == 1 else { throw BridgeError.incompatibleCLI }
     }
     public func run(_ intent: OperationIntent, config: CLIConfiguration, credential: String? = nil) throws -> ProcessResult {
-        if case .acquire = intent, credential == nil { throw BridgeError.missingCredential }
         return try runRaw(config:config,args:ArgumentBuilder.arguments(for:intent,database:config.database),environment:credential.map{["TWELVE_DATA_API_KEY":$0]} ?? [:])
     }
     public func cancel() { lock.withLock { process?.terminate() } }

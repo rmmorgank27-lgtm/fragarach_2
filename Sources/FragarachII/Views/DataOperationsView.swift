@@ -4,14 +4,14 @@ import Foundation
 import OperationsCore
 import SwiftUI
 
-private enum FetchIntent: String, CaseIterable, Hashable { case initial = "Bounded Initial Fetch", update = "Bounded Update", custom = "Custom Range", maximum = "Maximum Available — unavailable" }
+private enum FetchIntent: String, CaseIterable, Hashable { case initial = "Fetch Full D1 History", update = "Update D1", custom = "Custom Range" }
 
 struct DataOperationsView: View {
     @EnvironmentObject private var store: ConsoleStore
     @State private var search = ""
     @State private var showRetired = false
     @State private var selection = DataOperationsSelection()
-    @State private var intent: FetchIntent = .maximum
+    @State private var intent: FetchIntent = .initial
     @State private var fromDate = Calendar.current.date(byAdding:.year,value:-1,to:Date())!
     @State private var throughDate = Calendar.current.date(byAdding:.day,value:-1,to:Date())!
     @State private var conflict = ConflictMode.preserve
@@ -85,19 +85,17 @@ struct DataOperationsView: View {
 
     private func fetchView(_ r:InstrumentRegistrationRecord)->some View { VStack(alignment:.leading,spacing:14) {
         laneMatrix(r)
-        if !hasProviderMapping { unmappedFetchView(r) }
-        else {
         Picker("Intent",selection:$intent){ForEach(FetchIntent.allCases,id:\.self){Text($0.rawValue).tag($0)}}.pickerStyle(.segmented)
-        if intent == .maximum { unavailableCapability(title:"Maximum history cannot yet be proven.",reason:"Terminal-boundary proof and resume behavior are not implemented.") }
-        else { customRangeControls;if intent == .update { Label("This appends newly completed bars only. Historical correction overlap is not included.",systemImage:"arrow.right.circle").foregroundStyle(.secondary) } }
+        if !hasProviderMapping { unmappedFetchView(r) }
+        if intent == .initial { Label("Provider resolution requests best-available D1 history, targeting 20 years where supplied.",systemImage:"clock.arrow.circlepath").foregroundStyle(.secondary) }
+        else { customRangeControls;if intent == .update { Label("Includes a five-session reconciliation overlap. Preserve remains authoritative.",systemImage:"arrow.triangle.2.circlepath").foregroundStyle(.secondary) } }
         Picker("Conflict policy",selection:$conflict){ForEach(ConflictMode.allCases,id:\.self){Text($0.rawValue.capitalized).tag($0)}}
         Text("Preserve keeps prior evidence and records the conflicting candidate without silent overwrite.").font(.caption).foregroundStyle(.secondary)
         Button("Review Data Operation"){store.clearCurrentOperationResult();reviewing=true}.buttonStyle(.borderedProminent).disabled(!customPlanValid)
-        if intent != .maximum,!customPlanValid { Label(customValidationMessage,systemImage:"exclamationmark.triangle").foregroundStyle(.red) }
-        }
+        if !customPlanValid { Label(customValidationMessage,systemImage:"exclamationmark.triangle").foregroundStyle(.red) }
     } }
 
-    private func unmappedFetchView(_ r:InstrumentRegistrationRecord)->some View { GroupBox("Provider Mapping Required") { VStack(alignment:.leading,spacing:10) { Label("Provider fetch unavailable for this instrument.",systemImage:"network.slash").foregroundStyle(.orange);Text("No provider name or symbol has been assigned to \(r.asset). Other safe operations remain available.");HStack{Button("Import File"){store.dataOperationsMode = .importFile}.buttonStyle(.borderedProminent);Button("View Registration"){store.section = .discoverMarket};Button("Retire Instrument",role:.destructive){store.dataOperationsMode = .retire}} } } }
+    private func unmappedFetchView(_ r:InstrumentRegistrationRecord)->some View { GroupBox("Provider Resolution") { VStack(alignment:.leading,spacing:10) { Text("No provider has been confirmed yet.");if store.activeOperationID != nil{HStack{ProgressView();Text("Trying Twelve Data, then Yahoo Finance…")}};HStack{Button("Find Provider and Fetch Full History"){intent = .initial;throughDate=latestCompletedBoundary;fromDate=Calendar.current.date(byAdding:.year,value:-20,to:throughDate)!;store.clearCurrentOperationResult();reviewing=true}.buttonStyle(.borderedProminent).disabled(!canMutate);Button("Import CSV"){store.dataOperationsMode = .importFile};Button("Retire Instrument",role:.destructive){store.dataOperationsMode = .retire}} } } }
 
     private var customRangeControls:some View { VStack(alignment:.leading,spacing:10) { HStack { DatePicker("Inclusive From Date",selection:$fromDate,displayedComponents:.date);Button("Paste From Date"){pasteDate(toFrom:true)};DatePicker("Inclusive Through Date",selection:$throughDate,in:...latestCompletedBoundary,displayedComponents:.date);Button("Paste Through Date"){pasteDate(toFrom:false)} };if let dateInterpretation{Label(dateInterpretation,systemImage:"calendar.badge.checkmark").foregroundStyle(.orange)};Text("Latest completed D1 boundary: \(ControlledDateRange.iso(latestCompletedBoundary))").font(.caption).foregroundStyle(.secondary);HStack{Text("Canonical plan: \(dateRange.fromISO) → \(dateRange.throughISO)").font(.caption.monospaced()).foregroundStyle(.secondary);Spacer();Menu("Presets"){Button("Last 7 Days"){applyPreset(days:7)};Button("Last 30 Days"){applyPreset(days:30)};Button("Year to Date"){let c=Calendar.current;fromDate=c.date(from:c.dateComponents([.year],from:latestCompletedBoundary))!;throughDate=latestCompletedBoundary};Button("Last 12 Months"){fromDate=Calendar.current.date(byAdding:.year,value:-1,to:latestCompletedBoundary)!;throughDate=latestCompletedBoundary};if let latest=lane?.latestBar{Button("Since Latest Stored"){fromDate=Date(timeIntervalSince1970:TimeInterval(latest));throughDate=latestCompletedBoundary}}}} } }
 
@@ -112,7 +110,7 @@ struct DataOperationsView: View {
 
     private func retireView(_ r:InstrumentRegistrationRecord)->some View { VStack(alignment:.leading,spacing:12) { if r.retired { Label("Retired authority is audit-only. Provider acquisition and import are disabled.",systemImage:"archivebox").foregroundStyle(.orange);Facts([("Lifecycle","RETIRED"),("Serving","HISTORICAL_ONLY · NOT_SERVED"),("Acquisition","ACQUISITION_DISABLED"),("Evidence","Preserved for audit")]) } else { Text("Uses the reviewed SPEC-013 impact, supersession, quarantine, acquisition shutdown, and receipt service.");Button("Review Retirement Impact",role:.destructive){planRetirement(r)}.disabled(store.activeOperationID != nil) } } }
 
-    private func laneMatrix(_ r:InstrumentRegistrationRecord)->some View { GroupBox("Timeframe Lane Matrix") { Grid(alignment:.leading,horizontalSpacing:18,verticalSpacing:8) { GridRow{ForEach(["Timeframe","Registration","Evidence","Latest","Default intent","Selectable"],id:\.self){Text($0).font(.caption.bold())}};Divider().gridCellColumns(6);GridRow{Text(r.timeframe).monospaced();Text(r.registrationStatus);Text((lane?.barCount ?? 0)>0 ? "Yes":"No");Text(latestText);Text(!hasProviderMapping ? "Provider Mapping Required":(lane?.barCount ?? 0)>0 ? "Bounded Update":"Bounded Initial Fetch");Text(r.retired ? "No — retired":"Yes")} }.frame(maxWidth:.infinity,alignment:.leading) } }
+    private func laneMatrix(_ r:InstrumentRegistrationRecord)->some View { GroupBox("Timeframe Lane Matrix") { Grid(alignment:.leading,horizontalSpacing:18,verticalSpacing:8) { GridRow{ForEach(["Timeframe","Registration","Evidence","Latest","Default intent","Selectable"],id:\.self){Text($0).font(.caption.bold())}};Divider().gridCellColumns(6);GridRow{Text(r.timeframe).monospaced();Text(r.registrationStatus);Text((lane?.barCount ?? 0)>0 ? "Yes":"No");Text(latestText);Text((lane?.barCount ?? 0)>0 ? "Update D1":"Fetch Full D1 History");Text(r.retired ? "No — retired":"Yes")} }.frame(maxWidth:.infinity,alignment:.leading) } }
 
     @ViewBuilder private var readableResult:some View {
         if store.dataOperationsMode != .history,let owned=store.currentOperationResult,owned.planRevision==store.currentPlanRevision {
@@ -121,7 +119,7 @@ struct DataOperationsView: View {
                 VStack(alignment:.leading,spacing:8) {
                     Label(result.exitCode==0 ? "Authority service completed successfully":"No evidence was written.",systemImage:result.exitCode==0 ? "checkmark.circle.fill":"xmark.octagon").foregroundStyle(result.exitCode==0 ? .green:.red)
                     if result.exitCode==0,let json=result.JSON { Facts(readableFacts(json)) }
-                    else { Facts([("Rows inserted","0"),("Rows unchanged","0"),("Conflicts preserved","0"),("Raw blocks created","0")]) }
+                    else { Facts([("Rows inserted","0"),("Rows unchanged","0"),("Conflicts preserved","0"),("Raw blocks created","0")]);Text("No provider returned valid data.");HStack{Button("Import CSV"){store.dataOperationsMode = .importFile};Button("Try Again"){store.clearCurrentOperationResult()}} }
                     DisclosureGroup("Technical Details"){Text(result.stdout.isEmpty ? result.stderr:result.stdout).font(.caption.monospaced()).textSelection(.enabled)}
                 }
             }
@@ -134,21 +132,22 @@ struct DataOperationsView: View {
         return common+[("Requested range","\(json["from_date"] as? String ?? dateRange.fromISO) → \(json["through_date"] as? String ?? dateRange.throughISO)"),("Actual range",json["actual_range"] as? String ?? json["canonical_high_watermark"] as? String ?? "No returned bars"),("Rows received","\(json["received"] as? Int ?? 0)")]+counts+[("CAODT",truth?.truthState.caodt ?? "Refresh pending"),("Truth Score",truth.map{String($0.truthState.truthScore)} ?? "Refresh pending"),("Warnings",(json["warnings"] as? [String])?.joined(separator:", ") ?? "None")]
     }
 
-    @ViewBuilder private var reviewSheet:some View { if let r=registration { VStack(alignment:.leading,spacing:16) { Text("Review Data Operation").font(.title);Facts([("Instrument","\(r.asset) — \(r.displayName)"),("Source",store.dataOperationsMode == .importFile ? "Manual file import":"Twelve Data"),("Lane",r.timeframe),("Intent",store.dataOperationsMode == .fetch ? intent.rawValue:"Import File"),("Requested range",store.dataOperationsMode == .fetch ? "\(dateRange.fromISO) → \(dateRange.throughISO) inclusive":file?.lastPathComponent ?? "—"),("Conflict Policy",conflict.rawValue.capitalized)]);HStack{Button("Cancel",role:.cancel){reviewing=false};Spacer();Button("Run Data Operation"){runReviewed(r)}.buttonStyle(.borderedProminent)} }.padding(24).frame(minWidth:620) } }
+    @ViewBuilder private var reviewSheet:some View { if let r=registration { VStack(alignment:.leading,spacing:16) { Text("Review Data Operation").font(.title);Facts([("Instrument","\(r.asset) — \(r.displayName)"),("Source",store.dataOperationsMode == .importFile ? "Manual file import":"Automatic provider resolution"),("Lane",r.timeframe),("Intent",store.dataOperationsMode == .fetch ? intent.rawValue:"Import CSV"),("Requested range",store.dataOperationsMode == .fetch ? "\(dateRange.fromISO) → \(dateRange.throughISO) inclusive":file?.lastPathComponent ?? "—"),("Conflict Policy",conflict.rawValue.capitalized)]);HStack{Button("Cancel",role:.cancel){reviewing=false};Spacer();Button("Run Data Operation"){runReviewed(r)}.buttonStyle(.borderedProminent)} }.padding(24).frame(minWidth:620) } }
 
     private var latestText:String { lane?.latestBar.map{Date(timeIntervalSince1970:TimeInterval($0)).formatted(date:.numeric,time:.shortened)} ?? "—" }
     private var latestCompletedD1:String { Calendar.current.date(byAdding:.day,value:-1,to:Date())!.formatted(.iso8601.year().month().day()) }
     private var latestCompletedBoundary:Date{Calendar.current.startOfDay(for:Calendar.current.date(byAdding:.day,value:-1,to:Date())!)}
     private var dateRange:ControlledDateRange{.init(from:fromDate,through:throughDate,completedBoundary:latestCompletedBoundary)}
     private var hasProviderMapping:Bool{!(registration?.providerID.isEmpty ?? true) && !(registration?.providerSymbol.isEmpty ?? true)}
-    private var customPlanValid:Bool{canMutate && hasProviderMapping && intent != .maximum && dateRange.validation == .valid && store.credentialAvailable}
-    private var customValidationMessage:String{switch dateRange.validation{case .valid:return store.credentialAvailable ? "Choose a valid plan before reviewing.":"Provider credential is unavailable; Import File remains available.";case .reversed:return "The start date must be on or before the through date.";case .futureBoundary(let maximum):return "The through date exceeds the latest completed D1 boundary. Maximum permitted date: \(maximum).";case .contractLimit(let days):return "The range exceeds the provider contract limit of \(days) calendar days."}}
+    private var customPlanValid:Bool{canMutate && (intent == .initial || dateRange.validation == .valid)}
+    private var customValidationMessage:String{switch dateRange.validation{case .valid:return "Choose a valid plan before reviewing.";case .reversed:return "The start date must be on or before the through date.";case .futureBoundary(let maximum):return "The through date exceeds the latest completed D1 boundary. Maximum permitted date: \(maximum).";case .contractLimit(let days):return intent == .initial ? "Provider resolution will use the best permitted history window.":"The range exceeds the provider contract limit of \(days) calendar days."}}
     private func applyPreset(days:Int){throughDate=latestCompletedBoundary;fromDate=Calendar.current.date(byAdding:.day,value:-(days-1),to:throughDate)!}
     private func pasteDate(toFrom:Bool){guard let text=NSPasteboard.general.string(forType:.string),let parsed=ControlledDateParser.parse(text)else{dateInterpretation="The pasted date could not be understood. Choose a date from the calendar.";return};if toFrom{fromDate=parsed.date}else{throughDate=parsed.date};dateInterpretation=parsed.interpretation ?? "Normalised to \(parsed.canonicalISO)."}
     private func rowCount(_ url:URL)->String{guard let text=try? String(contentsOf:url,encoding:.utf8)else{return "Unknown"};return String(max(0,text.split(whereSeparator:\.isNewline).count-1))}
     private func reconcileSelection(){selection.reconcile(visibleRegistrationIDs:Set(registrations.map(\.id)))}
     private func applyNavigationContext(){guard let asset=store.acquisitionAsset else{return};store.acquisitionAsset=nil;let id=registrations.first(where:{$0.asset==asset})?.id;selection.applyNavigationContext(id,visibleRegistrationIDs:Set(registrations.map(\.id)))}
-    private func resetInstrumentContext(){throughDate=latestCompletedBoundary;if (lane?.barCount ?? 0)==0{intent = .initial;fromDate=Calendar.current.date(byAdding:.day,value:-29,to:throughDate)!}else if let next=nextExpectedSession(after:lane?.latestBar){intent = next<=throughDate ? .update:.custom;fromDate=next<=throughDate ? next:Calendar.current.date(byAdding:.day,value:-29,to:throughDate)!}else{intent = .custom;fromDate=Calendar.current.date(byAdding:.day,value:-29,to:throughDate)!};file=nil;reviewing=false;retirementImpact=nil;localError=nil;dateInterpretation=nil;conflict = .preserve;store.clearCurrentOperationResult()}
+    private func resetInstrumentContext(){throughDate=latestCompletedBoundary;if (lane?.barCount ?? 0)==0{intent = .initial;fromDate=Calendar.current.date(byAdding:.year,value:-20,to:throughDate)!}else if let latest=lane?.latestBar{intent = .update;fromDate=reconciliationStart(latest)}else{intent = .custom;fromDate=Calendar.current.date(byAdding:.day,value:-29,to:throughDate)!};file=nil;reviewing=false;retirementImpact=nil;localError=nil;dateInterpretation=nil;conflict = .preserve;store.clearCurrentOperationResult()}
+    private func reconciliationStart(_ timestamp:Int64)->Date{var date=Calendar.current.startOfDay(for:Date(timeIntervalSince1970:TimeInterval(timestamp)));var sessions=0;while sessions<5{date=Calendar.current.date(byAdding:.day,value:-1,to:date)!;if registration?.assetClass=="CRYPTO" || !Calendar.current.isDateInWeekend(date){sessions += 1}};return date}
     private func nextExpectedSession(after timestamp:Int64?)->Date?{guard let timestamp else{return nil};var date=Calendar.current.startOfDay(for:Date(timeIntervalSince1970:TimeInterval(timestamp))).addingTimeInterval(86400);if registration?.assetClass != "CRYPTO"{while Calendar.current.isDateInWeekend(date){date=date.addingTimeInterval(86400)}};return date}
     private func runReviewed(_ r:InstrumentRegistrationRecord){reviewing=false;store.clearCurrentOperationResult();Task{if store.dataOperationsMode == .fetch{await store.run(.acquire(asset:r.asset,from:dateRange.fromISO,through:dateRange.throughISO,mode:conflict))}else if let file{await store.run(.importCSV(file:file.path,symbol:r.asset,timeframe:r.timeframe,mode:conflict))}}}
     private func planRetirement(_ r:InstrumentRegistrationRecord){localError=nil;Task{await store.run(.retirementPlan(asset:r.asset,scope:"WHOLE_INSTRUMENT",lanes:selectedRegistrations.map(\.timeframe)));guard store.lastProcessResult?.exitCode==0,let text=store.lastProcessResult?.stdout,let impact=try? JSONDecoder().decode(RetirementImpact.self,from:Data(text.utf8))else{localError=store.operationError ?? "Retirement impact could not be loaded";return};retirementImpact=impact}}

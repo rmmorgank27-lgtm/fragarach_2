@@ -104,6 +104,7 @@ def acquire_twelve_data(
     sleeper: Sleeper = time.sleep,
     before_ingest: Callable[[], None] | None = None,
     validator: Callable[..., object] = validate_lane,
+    provider_symbol_override: str | None = None,
 ) -> AcquisitionResult:
     normalized_asset = asset.strip().upper()
     normalized_timeframe = timeframe.strip().upper()
@@ -123,12 +124,19 @@ def acquire_twelve_data(
         config = load_provider_config(config_root)
         initialize_database(database_path)
         registration = registration_for_lane(database_path, normalized_asset, normalized_timeframe)
-        if registration[0] != config.provider_id or registration[1] != config.provider_contract:
-            raise ProviderConfigurationError("registered provider contract mismatch")
-        provider_symbol = registration[2]
+        if provider_symbol_override:
+            provider_symbol = provider_symbol_override
+        else:
+            if registration[0] != config.provider_id or registration[1] != config.provider_contract:
+                raise ProviderConfigurationError("registered provider contract mismatch")
+            provider_symbol = registration[2]
         if normalized_asset_class(database_path,normalized_asset,normalized_timeframe)=="FX":
-            try:validate_direct_mapping(normalized_asset,registration[0],provider_symbol)
-            except ValueError as error:raise AcquisitionError("PROVIDER_ORIENTATION_MISMATCH",str(error)) from error
+            if provider_symbol_override:
+                expected=f"{normalized_asset[:3]}/{normalized_asset[3:]}"
+                if provider_symbol != expected:raise AcquisitionError("PROVIDER_ORIENTATION_MISMATCH",f"expected exact direct symbol {expected}")
+            else:
+                try:validate_direct_mapping(normalized_asset,registration[0],provider_symbol)
+                except ValueError as error:raise AcquisitionError("PROVIDER_ORIENTATION_MISMATCH",str(error)) from error
     except (ProviderConfigurationError, RegistrationError) as error:
         raise AcquisitionError("PROVIDER_CONFIGURATION_ERROR", str(error)) from error
     days = (end - start).days + 1
@@ -181,6 +189,7 @@ def acquire_twelve_data(
             "provider": config.provider_id,
             "provider_contract": config.provider_contract,
             "provider_symbol": provider_symbol,
+            "mapping_state": "CONFIRMED_BY_VALID_EVIDENCE",
             "response_bytes": len(response.body),
             "through_date": through_date,
             "timeframe": normalized_timeframe,

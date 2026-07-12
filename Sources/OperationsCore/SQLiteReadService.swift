@@ -34,7 +34,9 @@ public final class SQLiteReadService: @unchecked Sendable {
     private func queryRegistrations(_ db: OpaquePointer) throws -> [InstrumentRegistrationRecord] {
         let sql = """
         SELECT r.asset,r.timeframe,r.display_name,r.asset_class,r.representation_type,
-               coalesce(r.provider_id,''),coalesce(r.provider_contract,''),coalesce(r.provider_symbol,''),r.registration_status,
+               coalesce(r.provider_id,(SELECT json_extract(i.detail,'$.provider') FROM ingest_runs i WHERE i.status='committed' AND json_extract(i.detail,'$.asset')=r.asset AND json_extract(i.detail,'$.mapping_state')='CONFIRMED_BY_VALID_EVIDENCE' ORDER BY i.finished_at_utc DESC LIMIT 1),''),
+               coalesce(r.provider_contract,(SELECT json_extract(i.detail,'$.provider_contract') FROM ingest_runs i WHERE i.status='committed' AND json_extract(i.detail,'$.asset')=r.asset AND json_extract(i.detail,'$.mapping_state')='CONFIRMED_BY_VALID_EVIDENCE' ORDER BY i.finished_at_utc DESC LIMIT 1),''),
+               coalesce(r.provider_symbol,(SELECT json_extract(i.detail,'$.provider_symbol') FROM ingest_runs i WHERE i.status='committed' AND json_extract(i.detail,'$.asset')=r.asset AND json_extract(i.detail,'$.mapping_state')='CONFIRMED_BY_VALID_EVIDENCE' ORDER BY i.finished_at_utc DESC LIMIT 1),''),r.registration_status,
                EXISTS(SELECT 1 FROM authority_events e WHERE e.event_kind='LANE_SUPERSEDED'
                  AND json_extract(e.canonical_payload,'$.body.asset')=r.asset
                  AND json_extract(e.canonical_payload,'$.body.timeframe')=r.timeframe)
