@@ -6,8 +6,11 @@ import SwiftUI
     @AppStorage("databasePath") var databasePath = "/Users/raymorgan/VSC/Fragarach_2/data/runtime/spec002_real_evidence_acceptance.sqlite3"
     @AppStorage("repositoryPath") var repositoryPath = "/Users/raymorgan/VSC/Fragarach_2"
     @AppStorage("pythonPath") var pythonPath = "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3"
-    @Published var section: ConsoleSection = .lanes
+    @Published var section: ConsoleSection = .truth
     @Published var snapshot: AuthoritySnapshot?
+    @Published var estateTruth: EstateTruthState?
+    @Published var selectedTruthLaneID: String?
+    @Published var estateTruthError: String?
     @Published var selectedLaneID: String?
     @Published var selectedOperationID: String?
     @Published var readError: String?
@@ -21,6 +24,17 @@ import SwiftUI
 
     func refresh() async {
         guard !isRefreshing else{return}; isRefreshing=true; defer{isRefreshing=false}
+        do {
+            let config=configuration, bridge=self.bridge
+            let result=try await Task.detached {
+                try bridge.validateCLI(config)
+                let process=try bridge.run(.readEstateTruth,config:config)
+                guard process.exitCode==0 else { throw BridgeError.malformedResult }
+                return try JSONDecoder().decode(EstateTruthState.self,from:Data(process.stdout.utf8))
+            }.value
+            estateTruth=result; estateTruthError=nil
+            if selectedTruthLaneID==nil || !result.truthMatrix.contains(where:{$0.id==selectedTruthLaneID}) { selectedTruthLaneID=result.truthMatrix.first?.id }
+        } catch { estateTruthError=error.localizedDescription }
         do { let path=databasePath; let result=try await Task.detached { try self.reader.load(path:path) }.value; snapshot=result; readError=nil; if selectedLaneID==nil { selectedLaneID=result.lanes.first?.id } }
         catch { readError=error.localizedDescription }
     }

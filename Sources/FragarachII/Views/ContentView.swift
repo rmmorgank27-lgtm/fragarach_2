@@ -7,8 +7,8 @@ struct ContentView: View {
         NavigationSplitView {
             List(selection:$store.section) { ForEach(ConsoleSection.allCases) { section in Label(section.rawValue,systemImage:section.icon).tag(section) } }.listStyle(.sidebar)
         } detail: {
-            Group { switch store.section { case .lanes: LanesView(); case .authority: AuthorityLedgerView(); case .acquire: AcquireView(); case .importEvidence: ImportView(); case .addInstrument: AddInstrumentView(); case .operations: OperationsView(); case .integrity: IntegrityBackupView(); case .settings: DiagnosticsSettingsView() } }
-                .toolbar { ToolbarItem { Button { Task{await store.refresh()} } label:{Label("Refresh",systemImage:"arrow.clockwise")}.disabled(store.isRefreshing) } }
+            Group { switch store.section { case .truth: TruthConsoleView(); case .lanes: LanesView(); case .authority: AuthorityLedgerView(); case .acquire: AcquireView(); case .importEvidence: ImportView(); case .addInstrument: AddInstrumentView(); case .operations: OperationsView(); case .integrity: IntegrityBackupView(); case .settings: DiagnosticsSettingsView() } }
+                .toolbar { ToolbarItem { Button { Task{await store.refresh()} } label:{Label("Refresh",systemImage:"arrow.clockwise")}.keyboardShortcut("r",modifiers:.command).disabled(store.isRefreshing || store.activeOperationID != nil) } }
         }
         .overlay(alignment:.bottom){ if store.activeOperationID != nil { ActiveOperationBar() } }
     }
