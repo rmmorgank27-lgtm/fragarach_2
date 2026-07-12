@@ -3,7 +3,6 @@ import Foundation
 import OperationsCore
 import SwiftUI
 
-private enum DataMode: String, CaseIterable { case fetch = "Fetch / Update", importFile = "Import File", retire = "Retire" }
 private enum FetchIntent: String, CaseIterable { case maximum = "Maximum Available", update = "Update to Current", custom = "Custom Range" }
 
 struct DataOperationsView: View {
@@ -11,7 +10,6 @@ struct DataOperationsView: View {
     @State private var search = ""
     @State private var showRetired = false
     @State private var selection = DataOperationsSelection()
-    @State private var mode: DataMode = .fetch
     @State private var intent: FetchIntent = .maximum
     @State private var from = ""
     @State private var through = ""
@@ -51,13 +49,14 @@ struct DataOperationsView: View {
             }.frame(width:280).padding()
             Divider()
             ScrollView { VStack(alignment:.leading,spacing:16) {
-                Text("Data Operations").font(.largeTitle)
-                if let r=registration {
+                WorkspaceHeader(title:"Data Operations",purpose:"Add, update, import, retire, and review evidence.")
+                Picker("Mode",selection:$store.dataOperationsMode){ForEach(DataOperationsMode.allCases){Text($0.rawValue)}}.pickerStyle(.segmented)
+                if store.dataOperationsMode == .history { OperationsView(filterAsset:registration?.asset) }
+                else if let r=registration {
                     header(r)
                     if r.retired { retireView(r) }
                     else {
-                        Picker("Mode",selection:$mode){ForEach(DataMode.allCases,id:\.self){Text($0.rawValue)}}.pickerStyle(.segmented)
-                        switch mode { case .fetch: fetchView(r);case .importFile: importView(r);case .retire: retireView(r) }
+                        switch store.dataOperationsMode { case .fetch: fetchView(r);case .importFile: importView(r);case .retire: retireView(r);case .history:EmptyView() }
                     }
                 } else if registrations.isEmpty { ContentUnavailableView("No matching active instruments",systemImage:"magnifyingglass",description:Text("Clear the search or enable Show Retired.")) }
                 else { ContentUnavailableView("Select a registered instrument",systemImage:"arrow.left",description:Text("Choose one registration from the populated authority list.")) }
@@ -75,7 +74,7 @@ struct DataOperationsView: View {
         .sheet(item:$retirementReceipt){receipt in RetirementOperationSuccess(receipt:receipt){retirementReceipt=nil}}
     }
 
-    private func header(_ r:InstrumentRegistrationRecord)->some View { GroupBox { HStack(alignment:.top) { VStack(alignment:.leading,spacing:5) { Text("\(r.displayName) — \(r.asset)").font(.title2.bold());Text("\(r.assetClass) · \(r.representationType)");Text(r.retired ? "Retired":"Active").foregroundStyle(r.retired ? .orange:.green);Facts([("Registered lanes",selectedRegistrations.map(\.timeframe).joined(separator:", ")),("Evidence",(lane?.barCount ?? 0)>0 ? "Present":"None"),("Truth Score",truth.map{String($0.truthState.truthScore)} ?? "Unknown"),("CAODT",truth?.truthState.caodt ?? "—")]) };Spacer();if !r.retired{Button("Retire Instrument",role:.destructive){mode = .retire}} } } }
+    private func header(_ r:InstrumentRegistrationRecord)->some View { GroupBox { HStack(alignment:.top) { VStack(alignment:.leading,spacing:5) { Text("\(r.displayName) — \(r.asset)").font(.title2.bold());Text("\(r.assetClass) · \(r.representationType)");Text(r.retired ? "Retired":"Active").foregroundStyle(r.retired ? .orange:.green);Facts([("Registered lanes",selectedRegistrations.map(\.timeframe).joined(separator:", ")),("Evidence",(lane?.barCount ?? 0)>0 ? "Present":"None"),("Truth Score",truth.map{String($0.truthState.truthScore)} ?? "Unknown"),("CAODT",truth?.truthState.caodt ?? "—")]) };Spacer();if !r.retired{Button("Retire Instrument",role:.destructive){store.dataOperationsMode = .retire}} } } }
 
     private func fetchView(_ r:InstrumentRegistrationRecord)->some View { VStack(alignment:.leading,spacing:14) {
         laneMatrix(r)
@@ -88,7 +87,7 @@ struct DataOperationsView: View {
         Button("Review Data Operation"){reviewing=true}.buttonStyle(.borderedProminent).disabled(!canMutate || intent != .custom || from.isEmpty || through.isEmpty || !store.credentialAvailable)
     } }
 
-    private func unavailableCapability(title:String,reason:String)->some View { GroupBox("Capability unavailable; safe fallback active") { VStack(alignment:.leading,spacing:10) { Label(title,systemImage:"exclamationmark.triangle").foregroundStyle(.orange);Text(reason).foregroundStyle(.secondary);Facts([("Affected scope","\(registration?.asset ?? "Instrument"):D1 — selected convenience operation"),("What remains safe","Bounded D1 fetch, Import File, and Retire")]);HStack{Button("Choose Custom Range"){intent = .custom};Button("Import File"){mode = .importFile}.buttonStyle(.borderedProminent)};DisclosureGroup("Technical reason"){Text("The current implementation cannot prove a provider terminal boundary or calculate an approved automatic overlap. Ratified timeframe authority remains present; this is an implementation incompatibility.").font(.caption)} } } }
+    private func unavailableCapability(title:String,reason:String)->some View { GroupBox("Capability unavailable; safe fallback active") { VStack(alignment:.leading,spacing:10) { Label(title,systemImage:"exclamationmark.triangle").foregroundStyle(.orange);Text(reason).foregroundStyle(.secondary);Facts([("Affected scope","\(registration?.asset ?? "Instrument"):D1 — selected convenience operation"),("What remains safe","Bounded D1 fetch, Import File, and Retire")]);HStack{Button("Choose Custom Range"){intent = .custom};Button("Import File"){store.dataOperationsMode = .importFile}.buttonStyle(.borderedProminent)};DisclosureGroup("Technical reason"){Text("The current implementation cannot prove a provider terminal boundary or calculate an approved automatic overlap. Ratified timeframe authority remains present; this is an implementation incompatibility.").font(.caption)} } } }
 
     private func importView(_ r:InstrumentRegistrationRecord)->some View { VStack(alignment:.leading,spacing:14) {
         laneMatrix(r);Button("Choose CSV…"){file=PanelService.chooseCSV()}
@@ -101,9 +100,9 @@ struct DataOperationsView: View {
 
     private func laneMatrix(_ r:InstrumentRegistrationRecord)->some View { GroupBox("Timeframe Lane Matrix") { Grid(alignment:.leading,horizontalSpacing:18,verticalSpacing:8) { GridRow{ForEach(["Timeframe","Registration","Evidence","Latest","Default intent","Selectable"],id:\.self){Text($0).font(.caption.bold())}};Divider().gridCellColumns(6);GridRow{Text(r.timeframe).monospaced();Text(r.retired ? "Retired":"Existing");Text((lane?.barCount ?? 0)>0 ? "Yes":"No");Text(latestText);Text((lane?.barCount ?? 0)>0 ? "Update to Current":"Maximum Available");Text(r.retired ? "No — retired":"Yes")} }.frame(maxWidth:.infinity,alignment:.leading) } }
 
-    @ViewBuilder private var readableResult:some View { if let result=store.lastProcessResult { GroupBox(result.exitCode==0 ? "Data Operation Complete":"Data Operation Failed") { VStack(alignment:.leading,spacing:8) { Label(result.exitCode==0 ? "Authority service completed successfully":"No success was claimed",systemImage:result.exitCode==0 ? "checkmark.circle.fill":"xmark.octagon").foregroundStyle(result.exitCode==0 ? .green:.red);if let op=store.snapshot?.operations.first{Facts([("Rows inserted","\(op.inserted)"),("Rows unchanged","\(op.unchanged)"),("Conflicts preserved","\(op.conflicts)"),("Raw block",op.rawBlockID ?? "—")])};DisclosureGroup("Technical Details"){Text(result.stdout.isEmpty ? result.stderr:result.stdout).font(.caption.monospaced()).textSelection(.enabled)} } } } }
+    @ViewBuilder private var readableResult:some View { if store.dataOperationsMode != .history,let result=store.lastProcessResult { GroupBox(result.exitCode==0 ? "Data Operation Complete":"Data Operation Failed") { VStack(alignment:.leading,spacing:8) { Label(result.exitCode==0 ? "Authority service completed successfully":"No success was claimed",systemImage:result.exitCode==0 ? "checkmark.circle.fill":"xmark.octagon").foregroundStyle(result.exitCode==0 ? .green:.red);if let op=store.snapshot?.operations.first{Facts([("Rows inserted","\(op.inserted)"),("Rows unchanged","\(op.unchanged)"),("Conflicts preserved","\(op.conflicts)"),("Raw block",op.rawBlockID ?? "—")])};DisclosureGroup("Technical Details"){Text(result.stdout.isEmpty ? result.stderr:result.stdout).font(.caption.monospaced()).textSelection(.enabled)} } } } }
 
-    @ViewBuilder private var reviewSheet:some View { if let r=registration { VStack(alignment:.leading,spacing:16) { Text("Review Data Operation").font(.title);Facts([("Instrument","\(r.asset) — \(r.displayName)"),("Source",mode == .importFile ? "Manual file import":"Twelve Data"),("Lane",r.timeframe),("Intent",mode == .fetch ? intent.rawValue:"Import File"),("Requested range",mode == .fetch ? "\(from) → \(through) inclusive":file?.lastPathComponent ?? "—"),("Conflict Policy",conflict.rawValue.capitalized)]);HStack{Button("Cancel",role:.cancel){reviewing=false};Spacer();Button("Run Data Operation"){runReviewed(r)}.buttonStyle(.borderedProminent)} }.padding(24).frame(minWidth:620) } }
+    @ViewBuilder private var reviewSheet:some View { if let r=registration { VStack(alignment:.leading,spacing:16) { Text("Review Data Operation").font(.title);Facts([("Instrument","\(r.asset) — \(r.displayName)"),("Source",store.dataOperationsMode == .importFile ? "Manual file import":"Twelve Data"),("Lane",r.timeframe),("Intent",store.dataOperationsMode == .fetch ? intent.rawValue:"Import File"),("Requested range",store.dataOperationsMode == .fetch ? "\(from) → \(through) inclusive":file?.lastPathComponent ?? "—"),("Conflict Policy",conflict.rawValue.capitalized)]);HStack{Button("Cancel",role:.cancel){reviewing=false};Spacer();Button("Run Data Operation"){runReviewed(r)}.buttonStyle(.borderedProminent)} }.padding(24).frame(minWidth:620) } }
 
     private var latestText:String { lane?.latestBar.map{Date(timeIntervalSince1970:TimeInterval($0)).formatted(date:.numeric,time:.shortened)} ?? "—" }
     private var latestCompletedD1:String { Calendar.current.date(byAdding:.day,value:-1,to:Date())!.formatted(.iso8601.year().month().day()) }
@@ -111,7 +110,7 @@ struct DataOperationsView: View {
     private func reconcileSelection(){selection.reconcile(visibleRegistrationIDs:Set(registrations.map(\.id)))}
     private func applyNavigationContext(){guard let asset=store.acquisitionAsset else{return};store.acquisitionAsset=nil;let id=registrations.first(where:{$0.asset==asset})?.id;selection.applyNavigationContext(id,visibleRegistrationIDs:Set(registrations.map(\.id)))}
     private func resetInstrumentContext(){intent=(lane?.barCount ?? 0)>0 ? .update:.maximum;from="";through="";file=nil;reviewing=false;retirementImpact=nil;retirementReceipt=nil;localError=nil;conflict = .preserve}
-    private func runReviewed(_ r:InstrumentRegistrationRecord){reviewing=false;Task{if mode == .fetch{await store.run(.acquire(asset:r.asset,from:from,through:through,mode:conflict))}else if let file{await store.run(.importCSV(file:file.path,symbol:r.asset,timeframe:r.timeframe,mode:conflict))}}}
+    private func runReviewed(_ r:InstrumentRegistrationRecord){reviewing=false;Task{if store.dataOperationsMode == .fetch{await store.run(.acquire(asset:r.asset,from:from,through:through,mode:conflict))}else if let file{await store.run(.importCSV(file:file.path,symbol:r.asset,timeframe:r.timeframe,mode:conflict))}}}
     private func planRetirement(_ r:InstrumentRegistrationRecord){localError=nil;Task{await store.run(.retirementPlan(asset:r.asset,scope:"WHOLE_INSTRUMENT",lanes:selectedRegistrations.map(\.timeframe)));guard store.lastProcessResult?.exitCode==0,let text=store.lastProcessResult?.stdout,let impact=try? JSONDecoder().decode(RetirementImpact.self,from:Data(text.utf8))else{localError=store.operationError ?? "Retirement impact could not be loaded";return};retirementImpact=impact}}
     private func confirmRetirement(_ impact:RetirementImpact,_ reason:String,_ note:String,_ confirmation:String){retirementImpact=nil;Task{await store.run(.retireInstrument(asset:impact.canonicalInstrument,scope:impact.scope,lanes:impact.selectedLanes,reason:reason,note:note,confirmation:confirmation));guard store.lastProcessResult?.exitCode==0,let text=store.lastProcessResult?.stdout,let receipt=try? JSONDecoder().decode(RetirementReceipt.self,from:Data(text.utf8))else{localError=store.operationError ?? "Retirement failed";return};retirementReceipt=receipt}}
 }

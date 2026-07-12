@@ -2,10 +2,12 @@ import OperationsCore
 import SwiftUI
 
 struct TruthDetailView:View {
+    @EnvironmentObject var store:ConsoleStore
     let lane:EstateTruthLane
     var body:some View {
         VStack(alignment:.leading,spacing:16) {
             HStack(alignment:.firstTextBaseline){VStack(alignment:.leading){Text(lane.symbol).font(.largeTitle);Text(lane.timeframe).foregroundStyle(.secondary)};Spacer();VStack(alignment:.trailing){Text("\(lane.truthState.truthScore)").font(.system(size:36,weight:.semibold,design:.rounded));Label(lane.truthState.authorityState,systemImage:"circle.fill").foregroundStyle(TruthPresentation.color(lane.truthState.authorityState))}}
+            HStack{Button("Manage Data"){store.navigate(.acquire,asset:lane.symbol)}.buttonStyle(.borderedProminent);Button("View Authority History"){store.auditFilter=lane.symbol;store.navigate(.authorityLedger)}}
             GroupBox("Authority") { Facts([("CAODT",lane.truthState.caodt),("Validation",lane.truthState.validationState),("Epoch",lane.truthState.epoch),("Contract",lane.truthState.contract)]) }
             GroupBox("Coverage and freshness") { Facts([("Earliest",lane.truthState.coverage.earliestBar),("Latest",lane.truthState.coverage.latestBar),("Rows","\(lane.truthState.coverage.rowCount)"),("Expected start",TruthPresentation.text(lane.truthState.coverage.expectedRange.start)),("Expected end",TruthPresentation.text(lane.truthState.coverage.expectedRange.end)),("Available start",TruthPresentation.text(lane.truthState.coverage.availableRange.start)),("Available end",TruthPresentation.text(lane.truthState.coverage.availableRange.end)),("Freshness score",TruthPresentation.value(lane.truthState.freshnessScore)),("Coverage score",TruthPresentation.value(lane.truthState.coverageScore))]) }
             TruthComponentsView(state:lane.truthState)

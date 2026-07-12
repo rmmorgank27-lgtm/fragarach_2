@@ -284,12 +284,27 @@ public struct EstateTruthState: Codable, Equatable, Sendable {
 }
 
 public enum ConsoleSection: String, CaseIterable, Identifiable, Sendable {
-    case truth = "Truth", lanes = "Lanes", authority = "Authority Ledger", dataOperations = "Data Operations", addInstrument = "Discover Market", operations = "Operations"
-    case integrity = "Integrity & Backup", settings = "Settings"
+    case truth = "Truth", discoverMarket = "Discover Market", dataOperations = "Data Operations", system = "System"
     public var id: String { rawValue }
     public var icon: String {
-        switch self { case .truth: "checkmark.seal"; case .lanes: "list.bullet.rectangle"; case .authority: "books.vertical"; case .dataOperations: "arrow.down.doc"; case .addInstrument: "plus.circle"; case .operations: "clock.arrow.circlepath"; case .integrity: "checkmark.shield"; case .settings: "gearshape" }
+        switch self { case .truth: "checkmark.seal"; case .discoverMarket: "plus.magnifyingglass"; case .dataOperations: "arrow.down.doc"; case .system: "gearshape.2" }
     }
+}
+
+public enum DataOperationsMode: String, CaseIterable, Identifiable, Sendable { case fetch="Fetch / Update",importFile="Import File",retire="Retire",history="History";public var id:String{rawValue} }
+public enum SystemSection: String, CaseIterable, Identifiable, Sendable { case status="Status",backups="Backups",settings="Settings",audit="Audit";public var id:String{rawValue} }
+public enum LegacyRoute: String, Sendable { case lanes,authorityLedger,operations,integrityBackup,settings,acquire,importEvidence }
+public struct NavigationDestination:Equatable,Sendable { public let workspace:ConsoleSection;public let dataMode:DataOperationsMode?;public let systemSection:SystemSection?;public init(workspace:ConsoleSection,dataMode:DataOperationsMode?,systemSection:SystemSection?){self.workspace=workspace;self.dataMode=dataMode;self.systemSection=systemSection} }
+public enum NavigationRedirect {
+    public static func destination(for route:LegacyRoute)->NavigationDestination { switch route {
+    case .lanes:return .init(workspace:.truth,dataMode:nil,systemSection:nil)
+    case .authorityLedger:return .init(workspace:.system,dataMode:nil,systemSection:.audit)
+    case .operations:return .init(workspace:.dataOperations,dataMode:.history,systemSection:nil)
+    case .integrityBackup:return .init(workspace:.system,dataMode:nil,systemSection:.backups)
+    case .settings:return .init(workspace:.system,dataMode:nil,systemSection:.settings)
+    case .acquire:return .init(workspace:.dataOperations,dataMode:.fetch,systemSection:nil)
+    case .importEvidence:return .init(workspace:.dataOperations,dataMode:.importFile,systemSection:nil)
+    } }
 }
 
 public enum ConflictMode: String, CaseIterable, Sendable { case preserve, correct }

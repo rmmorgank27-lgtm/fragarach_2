@@ -7,6 +7,9 @@ import SwiftUI
     @AppStorage("repositoryPath") var repositoryPath = "/Users/raymorgan/VSC/Fragarach_2"
     @AppStorage("pythonPath") var pythonPath = "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3"
     @Published var section: ConsoleSection = .truth
+    @Published var dataOperationsMode: DataOperationsMode = .fetch
+    @Published var systemSection: SystemSection = .status
+    @Published var auditFilter = ""
     @Published var snapshot: AuthoritySnapshot?
     @Published var estateTruth: EstateTruthState?
     @Published var selectedTruthLaneID: String?
@@ -46,4 +49,5 @@ import SwiftUI
         QuitGuard.shared.end(); activeOperationID=nil; await refresh()
     }
     func cancel(){bridge.cancel()}
+    func navigate(_ route:LegacyRoute,asset:String?=nil){let target=NavigationRedirect.destination(for:route);section=target.workspace;if let mode=target.dataMode{dataOperationsMode=mode};if let system=target.systemSection{systemSection=system};if let asset{acquisitionAsset=asset}}
 }

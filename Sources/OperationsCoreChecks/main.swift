@@ -108,4 +108,20 @@ try run("Data Operations selection reconciles refresh, filters, retirement, and 
     selection.applyNavigationContext("EURAUD:D1",visibleRegistrationIDs:["EURAUD:D1"]);try check(selection.selectedRegistrationID == "EURAUD:D1","valid context")
     selection.applyNavigationContext("JPYCHF:D1",visibleRegistrationIDs:["EURAUD:D1"]);try check(selection.selectedRegistrationID == nil,"invalid context")
 }
+try run("primary navigation contains exactly four operator workspaces in order") {
+    try check(ConsoleSection.allCases == [.truth,.discoverMarket,.dataOperations,.system],"workspace order")
+    try check(ConsoleSection.allCases.map(\.rawValue)==["Truth","Discover Market","Data Operations","System"],"workspace labels")
+}
+try run("internal workspace sections preserve relocated capabilities") {
+    try check(DataOperationsMode.allCases == [.fetch,.importFile,.retire,.history],"Data Operations modes")
+    try check(SystemSection.allCases == [.status,.backups,.settings,.audit],"System sections")
+}
+try run("legacy routes redirect to four-workspace destinations") {
+    try check(NavigationRedirect.destination(for:.lanes).workspace == .truth,"lanes redirect")
+    try check(NavigationRedirect.destination(for:.authorityLedger) == .init(workspace:.system,dataMode:nil,systemSection:.audit),"ledger redirect")
+    try check(NavigationRedirect.destination(for:.operations) == .init(workspace:.dataOperations,dataMode:.history,systemSection:nil),"operations redirect")
+    try check(NavigationRedirect.destination(for:.integrityBackup).systemSection == .backups,"backup redirect")
+    try check(NavigationRedirect.destination(for:.settings).systemSection == .settings,"settings redirect")
+    try check(NavigationRedirect.destination(for:.acquire).dataMode == .fetch && NavigationRedirect.destination(for:.importEvidence).dataMode == .importFile,"data redirects")
+}
 print("OperationsCoreChecks: \(passed) checks passed")
