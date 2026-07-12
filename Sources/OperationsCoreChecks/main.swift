@@ -90,4 +90,9 @@ try run("malformed child result remains factual") {
     let fake=directory.appendingPathComponent("python3");try "#!/bin/sh\necho not-json\nexit 7\n".write(to:fake,atomically:true,encoding:.utf8);try FileManager.default.setAttributes([.posixPermissions:0o700],ofItemAtPath:fake.path)
     let result=try ProcessBridge().run(.verify,config:.init(python:fake.path,repository:root.path,database:authority));try check(result.exitCode==7 && result.JSON==nil,"malformed result")
 }
+try run("zero blocking degraded decisions retain safe fallbacks") {
+    let maximum=OperationalDecision.degraded(scope:"AUDUSD:D1:MAXIMUM_HISTORY",reason:"Terminal proof unavailable",safeFallbacks:["CUSTOM_RANGE","IMPORT_FILE"],unaffectedOperations:["RETIRE"])
+    try check(!maximum.hardBlock && maximum.status == .degradedOperationAvailable,"degraded status")
+    try check(maximum.safeFallbacks.contains("CUSTOM_RANGE") && maximum.unaffectedOperations.contains("RETIRE"),"safe continuations")
+}
 print("OperationsCoreChecks: \(passed) checks passed")

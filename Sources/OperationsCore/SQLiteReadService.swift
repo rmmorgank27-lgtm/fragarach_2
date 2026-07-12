@@ -24,10 +24,28 @@ public final class SQLiteReadService: @unchecked Sendable {
         guard tables == foundationTables else { throw AuthorityReadError.incompatibleDatabase("exact ten-table identity failed") }
         let migrations = try int(db, "SELECT count(*) FROM schema_migrations")
         guard migrations == 6 else { throw AuthorityReadError.incompatibleDatabase("expected six recognized migrations") }
+        let registrations = try queryRegistrations(db)
         let lanes = try queryLanes(db)
         let authorityEvents = try queryAuthorityEvents(db)
         let operations = try queryOperations(db, limit: max(1, min(operationLimit, 500)))
-        return AuthoritySnapshot(databasePath: path, lanes: lanes, operations: operations, authorityEvents: authorityEvents, readAt: Date())
+        return AuthoritySnapshot(databasePath: path, registrations: registrations, lanes: lanes, operations: operations, authorityEvents: authorityEvents, readAt: Date())
+    }
+
+    private func queryRegistrations(_ db: OpaquePointer) throws -> [InstrumentRegistrationRecord] {
+        let sql = """
+        SELECT r.asset,r.timeframe,r.display_name,r.asset_class,r.representation_type,
+               r.provider_id,r.provider_contract,r.provider_symbol,r.registration_status,
+               EXISTS(SELECT 1 FROM authority_events e WHERE e.event_kind='LANE_SUPERSEDED'
+                 AND json_extract(e.canonical_payload,'$.body.asset')=r.asset
+                 AND json_extract(e.canonical_payload,'$.body.timeframe')=r.timeframe)
+        FROM instrument_registrations r ORDER BY r.display_name,r.asset,r.timeframe
+        """
+        var statement: OpaquePointer?; try prepare(db,sql,&statement); defer{sqlite3_finalize(statement)}
+        var result:[InstrumentRegistrationRecord]=[]
+        while sqlite3_step(statement)==SQLITE_ROW {
+            result.append(.init(asset:text(statement,0),timeframe:text(statement,1),displayName:text(statement,2),assetClass:text(statement,3),representationType:text(statement,4),providerID:text(statement,5),providerContract:text(statement,6),providerSymbol:text(statement,7),registrationStatus:text(statement,8),retired:sqlite3_column_int(statement,9) != 0))
+        }
+        return result
     }
 
     private func queryAuthorityEvents(_ db: OpaquePointer) throws -> [AuthorityEventRecord] {

@@ -88,10 +88,25 @@ public struct AuthorityEventRecord: Identifiable, Equatable, Sendable {
 
 public struct AuthoritySnapshot: Equatable, Sendable {
     public let databasePath: String
+    public let registrations: [InstrumentRegistrationRecord]
     public let lanes: [LaneRecord]
     public let operations: [OperationRecord]
     public let authorityEvents: [AuthorityEventRecord]
     public let readAt: Date
+}
+
+public struct InstrumentRegistrationRecord: Identifiable, Equatable, Sendable {
+    public var id: String { "\(asset):\(timeframe)" }
+    public let asset: String
+    public let timeframe: String
+    public let displayName: String
+    public let assetClass: String
+    public let representationType: String
+    public let providerID: String
+    public let providerContract: String
+    public let providerSymbol: String
+    public let registrationStatus: String
+    public let retired: Bool
 }
 
 public struct TruthScoreComponent: Codable, Equatable, Sendable {
@@ -269,11 +284,11 @@ public struct EstateTruthState: Codable, Equatable, Sendable {
 }
 
 public enum ConsoleSection: String, CaseIterable, Identifiable, Sendable {
-    case truth = "Truth", lanes = "Lanes", authority = "Authority Ledger", acquire = "Acquire", importEvidence = "Import Evidence", addInstrument = "Discover Market", operations = "Operations"
+    case truth = "Truth", lanes = "Lanes", authority = "Authority Ledger", dataOperations = "Data Operations", addInstrument = "Discover Market", operations = "Operations"
     case integrity = "Integrity & Backup", settings = "Settings"
     public var id: String { rawValue }
     public var icon: String {
-        switch self { case .truth: "checkmark.seal"; case .lanes: "list.bullet.rectangle"; case .authority: "books.vertical"; case .acquire: "arrow.down.circle"; case .importEvidence: "doc.badge.plus"; case .addInstrument: "plus.circle"; case .operations: "clock.arrow.circlepath"; case .integrity: "checkmark.shield"; case .settings: "gearshape" }
+        switch self { case .truth: "checkmark.seal"; case .lanes: "list.bullet.rectangle"; case .authority: "books.vertical"; case .dataOperations: "arrow.down.doc"; case .addInstrument: "plus.circle"; case .operations: "clock.arrow.circlepath"; case .integrity: "checkmark.shield"; case .settings: "gearshape" }
     }
 }
 

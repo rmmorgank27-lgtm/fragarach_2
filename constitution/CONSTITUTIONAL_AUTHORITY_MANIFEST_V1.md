@@ -41,22 +41,25 @@ The complete controlled set is:
 1 constitutional root
 2 authority templates
 9 market-family base doctrines
+1 cross-cutting base doctrine
 36 timeframe authorities
 1 constitutional manifest
-49 controlled constitutional documents
+50 controlled constitutional documents
 ```
 
-The 47 market-authority documents are:
+The 48 doctrine and market-authority documents are:
 
 ```text
 2 templates
-9 doctrines
+10 doctrines (9 market-family, 1 cross-cutting)
 36 timeframe authorities
 ```
 
 The Constitutional Root and this Manifest are additional controlled documents.
 
 No implementation specification, schema migration, database operation, provider client, native workflow, or runtime behaviour is approved by this manifest.
+
+The controlled-set SHA-256 digest is recorded in the Zero Blocking Doctrine Ratification Report. It is calculated over the sorted canonical `path<TAB>sha256` inventory for the other 49 controlled documents, excluding this manifest to avoid a self-referential digest.
 
 ---
 
@@ -105,7 +108,17 @@ Intentional template placeholders are valid template content.
 
 ---
 
-# 6. Timeframe Authorities
+# 6. Cross-Cutting Base Doctrine
+
+| Doctrine | Repository path | Ratification state |
+|---|---|---|
+| ZERO_BLOCKING_BASE_DOCTRINE_V1 | `constitution/doctrines/ZERO_BLOCKING_BASE_DOCTRINE_V1.md` | APPROVED — 2026-07-12 by Ray Morgan |
+
+This tenth Base Doctrine is cross-cutting. It is not a tenth market family and does not change the nine-family or 36-timeframe inventory.
+
+---
+
+# 7. Timeframe Authorities
 
 | Family | Directory | Required files |
 |---|---|---:|
@@ -127,9 +140,9 @@ Total timeframe authorities:
 
 ---
 
-# 7. Ratification State Model
+# 8. Ratification State Model
 
-## 7.1 Constitutional Root, Doctrines, and Timeframe Authorities
+## 8.1 Constitutional Root, Doctrines, and Timeframe Authorities
 
 Clean ratification changes:
 
@@ -146,16 +159,16 @@ APPROVED
 for:
 
 - `constitution/CONSTITUTION.md`;
-- 9 Base Doctrines;
+- 10 Base Doctrines (9 market-family and 1 cross-cutting);
 - 36 Timeframe Authorities.
 
 Total documents changed to `APPROVED`:
 
 ```text
-46
+47
 ```
 
-## 7.2 Templates
+## 8.2 Templates
 
 Templates retain:
 
@@ -165,7 +178,7 @@ Status: TEMPLATE
 
 Their acceptance is recorded in the acceptance report and digest inventory.
 
-## 7.3 Manifest
+## 8.3 Manifest
 
 Clean ratification changes this Manifest from:
 
@@ -181,7 +194,7 @@ RATIFIED
 
 ---
 
-# 8. Structural Review Rules
+# 9. Structural Review Rules
 
 The current constitutional house style permits multiple level-one Markdown headings.
 
@@ -203,11 +216,11 @@ Heading normalization MAY be proposed as separate mechanical cleanup but is not 
 
 ---
 
-# 9. Ratification Conditions
+# 10. Ratification Conditions
 
 Ratification requires:
 
-- all 49 controlled documents at canonical paths;
+- all 50 controlled documents at canonical paths;
 - no competing constitutional document identity;
 - no duplicate market-template claimant;
 - doctrines under `constitution/doctrines/`;
@@ -224,9 +237,9 @@ Ratification requires:
 
 ---
 
-# 10. Ratification Outcomes
+# 11. Ratification Outcomes
 
-## 10.1 Clean Ratification
+## 11.1 Clean Ratification
 
 If review is clean:
 
@@ -241,7 +254,7 @@ If review is clean:
 - create one local checkpoint;
 - do not push.
 
-## 10.2 Material Blocker
+## 11.2 Material Blocker
 
 If a material conflict remains:
 
@@ -253,7 +266,7 @@ If a material conflict remains:
 
 ---
 
-# 11. Governing Statement
+# 12. Governing Statement
 
 > Constitution defines what is true.  
 > Specification defines how Fragarach II implements that truth.  

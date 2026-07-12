@@ -1,0 +1,17 @@
+{
+  "approval_date": "2026-07-12",
+  "approved_by": "Ray Morgan",
+  "controlled_documents": 50,
+  "controlled_set_sha256": "880bf5f3fe79213a7307ab0b6ef17123c991400808599d4c3ef08fc0328adbbe",
+  "cross_cutting_base_doctrines": 1,
+  "database_sha256_after": "88f962b004ac359bf9263c1102a2b265105d5365764f28252d3d15c259d061c6",
+  "database_sha256_before": "88f962b004ac359bf9263c1102a2b265105d5365764f28252d3d15c259d061c6",
+  "doctrine": "ZERO_BLOCKING_BASE_DOCTRINE_V1",
+  "doctrine_sha256": "f72da012538be26ceb702168b5d05fe45db3e524bbf063e83d0a91ce07a53835",
+  "effective_date": "2026-07-12",
+  "manifest_sha256": "b25bb169667712dadf3ec0640cd6e1d5bcfebb0ce95186aecf9d52c81d28d25d",
+  "market_family_base_doctrines": 9,
+  "runtime_mutation": false,
+  "status": "APPROVED",
+  "timeframe_authorities": 36
+}
