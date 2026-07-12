@@ -269,7 +269,7 @@ public struct EstateTruthState: Codable, Equatable, Sendable {
 }
 
 public enum ConsoleSection: String, CaseIterable, Identifiable, Sendable {
-    case truth = "Truth", lanes = "Lanes", authority = "Authority Ledger", acquire = "Acquire", importEvidence = "Import Evidence", addInstrument = "Add Instrument", operations = "Operations"
+    case truth = "Truth", lanes = "Lanes", authority = "Authority Ledger", acquire = "Acquire", importEvidence = "Import Evidence", addInstrument = "Resolve Instrument", operations = "Operations"
     case integrity = "Integrity & Backup", settings = "Settings"
     public var id: String { rawValue }
     public var icon: String {
@@ -282,6 +282,7 @@ public enum ConflictMode: String, CaseIterable, Sendable { case preserve, correc
 public enum OperationIntent: Equatable, Sendable {
     case readEstateTruth
     case readTruth(symbol: String, timeframe: String)
+    case resolveInstrument(query: String)
     case searchInstrument(query: String)
     case registerInstrument(candidate: String)
     case acquire(asset: String, from: String, through: String, mode: ConflictMode)
@@ -289,6 +290,55 @@ public enum OperationIntent: Equatable, Sendable {
     case validate(symbol: String, timeframe: String, through: String, persist: Bool)
     case verify
     case backup(destination: String)
+}
+
+public struct ResolvedInstrumentIdentity: Codable, Equatable, Sendable, Identifiable {
+    public var id: String { canonicalSymbol }
+    public let canonicalName: String
+    public let canonicalSymbol: String
+    public let instrumentType: String
+    public let market: String
+    public let assetClass: String
+    public let confidence: Int
+    public let knownAliases: [String]
+    public let knownExchange: String?
+    public let knownCurrency: String?
+    public let baseCurrency: String?
+    public let quoteCurrency: String?
+    public let timezone: String?
+    public let sessions: [String]
+    public let resolutionReason: String
+    public let identityStatus: String
+    public let registrationState: String
+    public let authorityState: String?
+    public let currentTruthScore: Int?
+    public let currentCAODT: String?
+    enum CodingKeys: String, CodingKey {
+        case confidence, market, timezone, sessions
+        case canonicalName = "canonical_name", canonicalSymbol = "canonical_symbol"
+        case instrumentType = "instrument_type", assetClass = "asset_class", knownAliases = "known_aliases"
+        case knownExchange = "known_exchange", knownCurrency = "known_currency", baseCurrency = "base_currency"
+        case quoteCurrency = "quote_currency", resolutionReason = "resolution_reason", identityStatus = "identity_status"
+        case registrationState = "registration_state", authorityState = "authority_state"
+        case currentTruthScore = "current_truth_score", currentCAODT = "current_caodt"
+    }
+}
+
+public struct InstrumentIdentityResolution: Codable, Equatable, Sendable {
+    public let contract: String
+    public let query: String
+    public let identityStatus: String
+    public let confidence: Int
+    public let matches: [ResolvedInstrumentIdentity]
+    public let explanation: String
+    public let suggestedSearches: [String]
+    public let suggestedProviders: [String]
+    public let suggestedAliases: [String]
+    enum CodingKeys: String, CodingKey {
+        case contract, query, confidence, matches, explanation
+        case identityStatus = "identity_status", suggestedSearches = "suggested_searches"
+        case suggestedProviders = "suggested_providers", suggestedAliases = "suggested_aliases"
+    }
 }
 
 public struct InstrumentAlias: Codable, Equatable, Sendable { public let alias:String; public let normalizedAlias:String; public let aliasType:String; enum CodingKeys:String,CodingKey{case alias;case normalizedAlias="normalized_alias";case aliasType="alias_type"} }

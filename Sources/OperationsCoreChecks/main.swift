@@ -57,7 +57,14 @@ try run("native EstateTruthState model and read-only bridge") {
     try check(state.contract=="fragarach_ii.estate_truth_state.v1" && state.truthMatrix.count==3,"EstateTruthState decode")
     try check(state.truthMatrix.map(\.id)==state.truthMatrix.map(\.id).sorted(),"estate ordering")
 }
-try run("explicit secret-free arguments") { let db="/authority.sqlite3",secret="never-in-arguments";let intents:[OperationIntent]=[.readEstateTruth,.readTruth(symbol:"AUDUSD",timeframe:"D1"),.acquire(asset:"AUDUSD",from:"2026-07-01",through:"2026-07-10",mode:.preserve),.importCSV(file:"/evidence.csv",symbol:"AUDUSD",timeframe:"D1",mode:.preserve),.validate(symbol:"AUDUSD",timeframe:"D1",through:"2026-07-10",persist:true),.verify,.backup(destination:"/backup.sqlite3")];for intent in intents{let args=ArgumentBuilder.arguments(for:intent,database:db);try check(args.contains(db) && !args.contains(secret),"arguments")}}
+try run("native identity resolution model and provider-free bridge") {
+    let config=CLIConfiguration(python:"/Library/Frameworks/Python.framework/Versions/3.13/bin/python3",repository:root.path,database:authority)
+    let result=try ProcessBridge().run(.resolveInstrument(query:"BHP"),config:config)
+    try check(result.exitCode==0,"identity resolver failed")
+    let resolution=try JSONDecoder().decode(InstrumentIdentityResolution.self,from:Data(result.stdout.utf8))
+    try check(resolution.identityStatus=="AMBIGUOUS" && resolution.matches.map(\.canonicalSymbol)==["ASX:BHP","NYSE:BHP"],"identity resolution decode")
+}
+try run("explicit secret-free arguments") { let db="/authority.sqlite3",secret="never-in-arguments";let intents:[OperationIntent]=[.readEstateTruth,.readTruth(symbol:"AUDUSD",timeframe:"D1"),.resolveInstrument(query:"Gold"),.acquire(asset:"AUDUSD",from:"2026-07-01",through:"2026-07-10",mode:.preserve),.importCSV(file:"/evidence.csv",symbol:"AUDUSD",timeframe:"D1",mode:.preserve),.validate(symbol:"AUDUSD",timeframe:"D1",through:"2026-07-10",persist:true),.verify,.backup(destination:"/backup.sqlite3")];for intent in intents{let args=ArgumentBuilder.arguments(for:intent,database:db);try check(args.contains(db) && !args.contains(secret),"arguments")}}
 try run("review confirmation gate") { let intent=OperationIntent.acquire(asset:"AUDUSD",from:"2026-07-01",through:"2026-07-10",mode:.preserve);var gate=ReviewGate();try check(!gate.confirm(intent),"unreviewed");gate.review(intent);try check(gate.confirm(intent),"reviewed");try check(!gate.confirm(intent),"repeat") }
 try run("secret filter") { try check(SecretFilter.filter("before SECRET middle SECRET",secrets:["SECRET"])=="before [REDACTED] middle [REDACTED]","filter") }
 try run("credential alias memory resolution") { let file=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString);try "TWELVEDATA_API_KEY=fixture-only-secret\n".write(to:file,atomically:true,encoding:.utf8);defer{try? FileManager.default.removeItem(at:file)};try check(CredentialResolver.resolve(environment:[:],authorizedFile:file.path)=="fixture-only-secret","alias") }
