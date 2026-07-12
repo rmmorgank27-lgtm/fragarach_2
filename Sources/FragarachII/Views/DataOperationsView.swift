@@ -10,7 +10,7 @@ struct DataOperationsView: View {
     @EnvironmentObject private var store: ConsoleStore
     @State private var search = ""
     @State private var showRetired = false
-    @State private var selectedAsset: String?
+    @State private var selection = DataOperationsSelection()
     @State private var mode: DataMode = .fetch
     @State private var intent: FetchIntent = .maximum
     @State private var from = ""
@@ -28,10 +28,11 @@ struct DataOperationsView: View {
             (showRetired || !r.retired) && (search.isEmpty || r.asset.localizedCaseInsensitiveContains(search) || r.displayName.localizedCaseInsensitiveContains(search) || r.assetClass.localizedCaseInsensitiveContains(search) || r.providerID.localizedCaseInsensitiveContains(search))
         }
     }
-    private var selectedRegistrations: [InstrumentRegistrationRecord] { allRegistrations.filter { $0.asset == selectedAsset } }
-    private var registration: InstrumentRegistrationRecord? { selectedRegistrations.first }
-    private var lane: LaneRecord? { store.snapshot?.lanes.first { $0.asset == selectedAsset && $0.timeframe == registration?.timeframe } }
-    private var truth: EstateTruthLane? { store.estateTruth?.truthMatrix.first { $0.symbol == selectedAsset && $0.timeframe == registration?.timeframe } }
+    private var selectedRegistrationID: Binding<String?> { Binding(get:{selection.selectedRegistrationID},set:{selection.select($0)}) }
+    private var registration: InstrumentRegistrationRecord? { registrations.first { $0.id == selection.selectedRegistrationID } }
+    private var selectedRegistrations: [InstrumentRegistrationRecord] { guard let asset=registration?.asset else{return []};return allRegistrations.filter { $0.asset == asset } }
+    private var lane: LaneRecord? { store.snapshot?.lanes.first { $0.asset == registration?.asset && $0.timeframe == registration?.timeframe } }
+    private var truth: EstateTruthLane? { store.estateTruth?.truthMatrix.first { $0.symbol == registration?.asset && $0.timeframe == registration?.timeframe } }
     private var canMutate: Bool { registration?.retired == false && store.activeOperationID == nil }
     private var checksum: String { guard let file, let data=try? Data(contentsOf:file) else{return "—"};return SHA256.hash(data:data).map{String(format:"%02x",$0)}.joined() }
 
@@ -40,12 +41,12 @@ struct DataOperationsView: View {
             VStack(alignment:.leading,spacing:10) {
                 TextField("Search active instruments",text:$search).textFieldStyle(.roundedBorder)
                 Toggle("Show Retired",isOn:$showRetired)
-                List(registrations,selection:$selectedAsset) { r in
+                List(registrations,selection:selectedRegistrationID) { r in
                     VStack(alignment:.leading,spacing:3) {
                         Text(r.displayName).fontWeight(.semibold)
                         Text("\(r.asset) · \(r.assetClass)").font(.caption).foregroundStyle(.secondary)
                         Text(r.retired ? "RETIRED" : "\(r.providerID) · \(r.timeframe)").font(.caption2).foregroundStyle(r.retired ? .orange:.secondary)
-                    }.tag(Optional(r.asset))
+                    }.tag(r.id)
                 }
             }.frame(width:280).padding()
             Divider()
@@ -53,16 +54,22 @@ struct DataOperationsView: View {
                 Text("Data Operations").font(.largeTitle)
                 if let r=registration {
                     header(r)
-                    Picker("Mode",selection:$mode){ForEach(DataMode.allCases,id:\.self){Text($0.rawValue)}}.pickerStyle(.segmented)
-                    switch mode { case .fetch: fetchView(r);case .importFile: importView(r);case .retire: retireView(r) }
-                } else { ContentUnavailableView("Select a registered instrument",systemImage:"arrow.left",description:Text("Active authority drives this selector; retired registrations are hidden by default.")) }
+                    if r.retired { retireView(r) }
+                    else {
+                        Picker("Mode",selection:$mode){ForEach(DataMode.allCases,id:\.self){Text($0.rawValue)}}.pickerStyle(.segmented)
+                        switch mode { case .fetch: fetchView(r);case .importFile: importView(r);case .retire: retireView(r) }
+                    }
+                } else if registrations.isEmpty { ContentUnavailableView("No matching active instruments",systemImage:"magnifyingglass",description:Text("Clear the search or enable Show Retired.")) }
+                else { ContentUnavailableView("Select a registered instrument",systemImage:"arrow.left",description:Text("Choose one registration from the populated authority list.")) }
                 if let localError { Label(localError,systemImage:"exclamationmark.triangle").foregroundStyle(.red) }
                 readableResult
             }.padding().frame(maxWidth:900,alignment:.leading) }
         }
-        .onAppear { if let asset=store.acquisitionAsset{selectedAsset=asset;store.acquisitionAsset=nil};selectFirst() }
-        .onChange(of:store.snapshot){selectFirst()}
-        .onChange(of:selectedAsset){intent=(lane?.barCount ?? 0)>0 ? .update:.maximum}
+        .onAppear { applyNavigationContext() }
+        .onChange(of:store.snapshot){reconcileSelection()}
+        .onChange(of:search){reconcileSelection()}
+        .onChange(of:showRetired){reconcileSelection()}
+        .onChange(of:selection.selectedRegistrationID){resetInstrumentContext()}
         .sheet(isPresented:$reviewing){reviewSheet}
         .sheet(item:$retirementImpact){impact in RetirementOperationReview(impact:impact,onConfirm:confirmRetirement)}
         .sheet(item:$retirementReceipt){receipt in RetirementOperationSuccess(receipt:receipt){retirementReceipt=nil}}
@@ -90,7 +97,7 @@ struct DataOperationsView: View {
         Button("Review Import"){reviewing=true}.buttonStyle(.borderedProminent).disabled(!canMutate || file==nil)
     } }
 
-    private func retireView(_ r:InstrumentRegistrationRecord)->some View { VStack(alignment:.leading,spacing:12) { if r.retired { Label("Retired authority is audit-only. Provider acquisition and import are disabled.",systemImage:"archivebox").foregroundStyle(.orange) } else { Text("Uses the reviewed SPEC-013 impact, supersession, quarantine, acquisition shutdown, and receipt service.");Button("Review Retirement Impact",role:.destructive){planRetirement(r)}.disabled(store.activeOperationID != nil) } } }
+    private func retireView(_ r:InstrumentRegistrationRecord)->some View { VStack(alignment:.leading,spacing:12) { if r.retired { Label("Retired authority is audit-only. Provider acquisition and import are disabled.",systemImage:"archivebox").foregroundStyle(.orange);Facts([("Lifecycle","RETIRED"),("Serving","HISTORICAL_ONLY · NOT_SERVED"),("Acquisition","ACQUISITION_DISABLED"),("Evidence","Preserved for audit")]) } else { Text("Uses the reviewed SPEC-013 impact, supersession, quarantine, acquisition shutdown, and receipt service.");Button("Review Retirement Impact",role:.destructive){planRetirement(r)}.disabled(store.activeOperationID != nil) } } }
 
     private func laneMatrix(_ r:InstrumentRegistrationRecord)->some View { GroupBox("Timeframe Lane Matrix") { Grid(alignment:.leading,horizontalSpacing:18,verticalSpacing:8) { GridRow{ForEach(["Timeframe","Registration","Evidence","Latest","Default intent","Selectable"],id:\.self){Text($0).font(.caption.bold())}};Divider().gridCellColumns(6);GridRow{Text(r.timeframe).monospaced();Text(r.retired ? "Retired":"Existing");Text((lane?.barCount ?? 0)>0 ? "Yes":"No");Text(latestText);Text((lane?.barCount ?? 0)>0 ? "Update to Current":"Maximum Available");Text(r.retired ? "No — retired":"Yes")} }.frame(maxWidth:.infinity,alignment:.leading) } }
 
@@ -101,7 +108,9 @@ struct DataOperationsView: View {
     private var latestText:String { lane?.latestBar.map{Date(timeIntervalSince1970:TimeInterval($0)).formatted(date:.numeric,time:.shortened)} ?? "—" }
     private var latestCompletedD1:String { Calendar.current.date(byAdding:.day,value:-1,to:Date())!.formatted(.iso8601.year().month().day()) }
     private func rowCount(_ url:URL)->String{guard let text=try? String(contentsOf:url,encoding:.utf8)else{return "Unknown"};return String(max(0,text.split(whereSeparator:\.isNewline).count-1))}
-    private func selectFirst(){if selectedAsset==nil || !allRegistrations.contains(where:{$0.asset==selectedAsset}){selectedAsset=registrations.first?.asset}}
+    private func reconcileSelection(){selection.reconcile(visibleRegistrationIDs:Set(registrations.map(\.id)))}
+    private func applyNavigationContext(){guard let asset=store.acquisitionAsset else{return};store.acquisitionAsset=nil;let id=registrations.first(where:{$0.asset==asset})?.id;selection.applyNavigationContext(id,visibleRegistrationIDs:Set(registrations.map(\.id)))}
+    private func resetInstrumentContext(){intent=(lane?.barCount ?? 0)>0 ? .update:.maximum;from="";through="";file=nil;reviewing=false;retirementImpact=nil;retirementReceipt=nil;localError=nil;conflict = .preserve}
     private func runReviewed(_ r:InstrumentRegistrationRecord){reviewing=false;Task{if mode == .fetch{await store.run(.acquire(asset:r.asset,from:from,through:through,mode:conflict))}else if let file{await store.run(.importCSV(file:file.path,symbol:r.asset,timeframe:r.timeframe,mode:conflict))}}}
     private func planRetirement(_ r:InstrumentRegistrationRecord){localError=nil;Task{await store.run(.retirementPlan(asset:r.asset,scope:"WHOLE_INSTRUMENT",lanes:selectedRegistrations.map(\.timeframe)));guard store.lastProcessResult?.exitCode==0,let text=store.lastProcessResult?.stdout,let impact=try? JSONDecoder().decode(RetirementImpact.self,from:Data(text.utf8))else{localError=store.operationError ?? "Retirement impact could not be loaded";return};retirementImpact=impact}}
     private func confirmRetirement(_ impact:RetirementImpact,_ reason:String,_ note:String,_ confirmation:String){retirementImpact=nil;Task{await store.run(.retireInstrument(asset:impact.canonicalInstrument,scope:impact.scope,lanes:impact.selectedLanes,reason:reason,note:note,confirmation:confirmation));guard store.lastProcessResult?.exitCode==0,let text=store.lastProcessResult?.stdout,let receipt=try? JSONDecoder().decode(RetirementReceipt.self,from:Data(text.utf8))else{localError=store.operationError ?? "Retirement failed";return};retirementReceipt=receipt}}

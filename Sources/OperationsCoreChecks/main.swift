@@ -95,4 +95,17 @@ try run("zero blocking degraded decisions retain safe fallbacks") {
     try check(!maximum.hardBlock && maximum.status == .degradedOperationAvailable,"degraded status")
     try check(maximum.safeFallbacks.contains("CUSTOM_RANGE") && maximum.unaffectedOperations.contains("RETIRE"),"safe continuations")
 }
+try run("Data Operations selection starts empty and uses stable registration identity") {
+    var selection=DataOperationsSelection()
+    try check(selection.selectedRegistrationID == nil,"initial selection")
+    selection.select("AAPL:D1");try check(selection.selectedRegistrationID == "AAPL:D1","Apple selection")
+    selection.select("EURAUD:D1");try check(selection.selectedRegistrationID == "EURAUD:D1","selection replacement")
+}
+try run("Data Operations selection reconciles refresh, filters, retirement, and navigation") {
+    var selection=DataOperationsSelection(selectedRegistrationID:"AAPL:D1")
+    selection.reconcile(visibleRegistrationIDs:["AAPL:D1","EURAUD:D1"]);try check(selection.selectedRegistrationID == "AAPL:D1","refresh preservation")
+    selection.reconcile(visibleRegistrationIDs:["EURAUD:D1"]);try check(selection.selectedRegistrationID == nil,"filtered selection clearing")
+    selection.applyNavigationContext("EURAUD:D1",visibleRegistrationIDs:["EURAUD:D1"]);try check(selection.selectedRegistrationID == "EURAUD:D1","valid context")
+    selection.applyNavigationContext("JPYCHF:D1",visibleRegistrationIDs:["EURAUD:D1"]);try check(selection.selectedRegistrationID == nil,"invalid context")
+}
 print("OperationsCoreChecks: \(passed) checks passed")
