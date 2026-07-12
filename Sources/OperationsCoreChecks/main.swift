@@ -13,7 +13,7 @@ defer { try? FileManager.default.removeItem(at: migratedFixtureDirectory) }
 let authority = migratedFixtureDirectory.appendingPathComponent("authority.sqlite3").path
 let migrator = Process()
 migrator.executableURL = URL(fileURLWithPath: "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3")
-migrator.arguments = ["-c", "from fragarach_ii.storage import initialize_database,bootstrap_legacy_authority;import sqlite3,sys;s=sqlite3.connect('file:'+sys.argv[1]+'?mode=ro',uri=True);d=sqlite3.connect(sys.argv[2]);s.backup(d);s.close();d.close();initialize_database(sys.argv[2]);bootstrap_legacy_authority(sys.argv[2]);c=sqlite3.connect(sys.argv[2]);c.execute('PRAGMA journal_mode=DELETE');c.close()", sourceAuthority, authority]
+migrator.arguments = ["-c", "from fragarach_ii.storage import initialize_database,bootstrap_legacy_authority;import sqlite3,sys;s=sqlite3.connect('file:'+sys.argv[1]+'?mode=ro',uri=True);d=sqlite3.connect(sys.argv[2]);s.backup(d);s.close();d.close();initialize_database(sys.argv[2]);c=sqlite3.connect(sys.argv[2]);has_events=c.execute('SELECT EXISTS(SELECT 1 FROM authority_events)').fetchone()[0];c.close();bootstrap_legacy_authority(sys.argv[2]) if not has_events else None;c=sqlite3.connect(sys.argv[2]);c.execute('PRAGMA journal_mode=DELETE');c.close()", sourceAuthority, authority]
 migrator.currentDirectoryURL = root
 var migrationEnvironment = ProcessInfo.processInfo.environment
 migrationEnvironment["PYTHONPATH"] = "\(root.path)/src"
