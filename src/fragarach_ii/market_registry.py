@@ -25,7 +25,8 @@ def load_registry(path:str|Path=DEFAULT_REGISTRY)->RegistrySnapshot:
     if payload.get("contract")!="fragarach_ii.market_registry.v1" or payload.get("registry_version")!=1:raise ValueError("unsupported market registry snapshot")
     required={"registry_id","canonical_symbol","display_name","aliases","asset_class","instrument_type","country","exchange_or_venue","currency","timezone","underlying_market","representation_type","share_class_or_contract_family","registry_version","source_name","source_date","active"}
     records=tuple(payload["records"])
-    if any(set(record)!=required for record in records):raise ValueError("market registry record shape mismatch")
+    optional={"base_currency","quote_currency","canonical_identity"}
+    if any(not required.issubset(record) or set(record)-required-optional for record in records):raise ValueError("market registry record shape mismatch")
     ids=[r["registry_id"] for r in records]
     if ids!=sorted(ids) or len(ids)!=len(set(ids)):raise ValueError("market registry IDs must be unique and sorted")
     return RegistrySnapshot(1,records,tuple(payload.get("provider_mappings",())),source)

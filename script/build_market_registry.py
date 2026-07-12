@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import argparse
 from datetime import date
 from pathlib import Path
 
@@ -13,6 +14,30 @@ ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "config" / "market_registry" / "registry.v1.json"
 SOURCE_DATE = date.today().isoformat()
 HEADERS = {"User-Agent": "FragarachRegistry/1.0 raymorgan@example.com"}
+
+APPROVED_FOREX_PAIRS = (
+    "AUDUSD", "AUDCAD", "AUDNZD", "AUDJPY",
+    "GBPAUD", "GBPUSD", "GBPJPY", "GBPNZD",
+    "EURAUD", "EURUSD", "EURGBP", "EURJPY",
+    "AUDCHF", "GBPCHF", "EURCHF", "CHFJPY",
+    "NZDJPY", "EURNZD", "NZDUSD",
+    "USDCAD", "USDMXN", "USDSGD",
+    "AUDSGD", "GBPSGD", "EURSGD",
+    "USDBRL", "USDSEK", "USDNOK",
+    "USDINR", "USDKRW", "USDDKK",
+)
+EVIDENCED_FOREX_MAPPINGS = {
+    "AUDUSD": "AUD/USD", "EURAUD": "EUR/AUD",
+    "EURGBP": "EUR/GBP", "NZDJPY": "NZD/JPY",
+}
+CURRENCY_NAMES = {
+    "AUD": "Australian Dollar", "BRL": "Brazilian Real", "CAD": "Canadian Dollar",
+    "CHF": "Swiss Franc", "DKK": "Danish Krone", "EUR": "Euro",
+    "GBP": "British Pound", "INR": "Indian Rupee", "JPY": "Japanese Yen",
+    "KRW": "South Korean Won", "MXN": "Mexican Peso", "NOK": "Norwegian Krone",
+    "NZD": "New Zealand Dollar", "SEK": "Swedish Krona", "SGD": "Singapore Dollar",
+    "USD": "US Dollar",
+}
 
 
 def record(registry_id, symbol, name, aliases, asset_class, instrument_type, country,
@@ -38,15 +63,55 @@ def wiki_rows(page, minimum):
     return headers, [[x.get_text(" ", strip=True) for x in row.select("th,td")] for row in table.select("tr")[1:]]
 
 
+def forex_registry_entries():
+    records, mappings = [], []
+    for pair in APPROVED_FOREX_PAIRS:
+        base, quote = pair[:3], pair[3:]
+        base_name, quote_name = CURRENCY_NAMES[base], CURRENCY_NAMES[quote]
+        entry = record(
+            f"fx:{pair.lower()}", pair, f"{base_name} / {quote_name} Spot",
+            [f"{base}/{quote}", f"{base_name} / {quote_name}"], "FX", "FX_SPOT_PAIR",
+            None, "OTC", quote, "UTC", f"{base_name} / {quote_name}", "FX_SPOT_PAIR",
+            source="Operator-approved SPEC-017A Forex universe",
+        )
+        entry.update({"base_currency": base, "quote_currency": quote, "canonical_identity": f"FX:{pair}"})
+        records.append(entry)
+        provider_symbol = EVIDENCED_FOREX_MAPPINGS.get(pair)
+        mappings.append({
+            "registry_id": f"fx:{pair.lower()}",
+            "provider": "TWELVE_DATA" if provider_symbol else None,
+            "provider_symbol": provider_symbol,
+            "mapping_state": "KNOWN_MAPPING" if provider_symbol else "UNKNOWN",
+            "supported_timeframes": ["D1"] if provider_symbol else [],
+            "evidence_source": "config/providers/mappings/TWELVE_DATA_FX_DIRECT_PAIRS_V1.json" if provider_symbol else None,
+            "last_verified": SOURCE_DATE if provider_symbol else None,
+        })
+    return records, mappings
+
+
+def refresh_forex_only():
+    snapshot = json.loads(OUT.read_text())
+    records, mappings = forex_registry_entries()
+    snapshot["records"] = sorted(
+        [item for item in snapshot["records"] if item["asset_class"] != "FX"] + records,
+        key=lambda item: item["registry_id"],
+    )
+    snapshot["provider_mappings"] = sorted(
+        [item for item in snapshot["provider_mappings"] if not item["registry_id"].startswith("fx:")] + mappings,
+        key=lambda item: (item["registry_id"], item["provider"] or ""),
+    )
+    snapshot["generated_at"] = SOURCE_DATE
+    OUT.write_text(json.dumps(snapshot, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n")
+    print(json.dumps({"path": str(OUT), "forex_records": len(records)}, sort_keys=True))
+
+
 def main():
     records = []
     mappings = []
 
-    # Reviewed direct orientations only. Exact inverse identities are generated at search time without mappings.
-    for pair in ("AUDUSD", "EURUSD", "GBPUSD", "NZDUSD", "USDJPY", "USDCHF", "USDCAD", "EURAUD", "EURGBP", "EURJPY", "GBPJPY", "AUDJPY", "NZDJPY"):
-        base, quote = pair[:3], pair[3:]
-        records.append(record(f"fx:{pair.lower()}", pair, f"{base} / {quote} Spot", [f"{base}/{quote}"], "FX", "FX_SPOT_PAIR", None, "OTC", quote, "UTC", f"{base} / {quote}", "FX_SPOT_PAIR"))
-        mappings.append({"registry_id":f"fx:{pair.lower()}","provider":"TWELVE_DATA","provider_symbol":f"{base}/{quote}","mapping_state":"KNOWN_MAPPING","supported_timeframes":["D1"],"evidence_source":"Reviewed direct-orientation catalogue","last_verified":SOURCE_DATE})
+    forex_records, forex_mappings = forex_registry_entries()
+    records.extend(forex_records)
+    mappings.extend(forex_mappings)
 
     seeds = [
         ("metal:gold:spot-usd","XAUUSD","Gold Spot / US Dollar",["XAU","XAU/USD","GOLD"],"METALS","PRECIOUS_METAL_SPOT","International gold","SPOT","OTC","USD"),
@@ -109,4 +174,8 @@ def main():
     print(json.dumps({"path":str(OUT),"records":len(records),"counts":counts},sort_keys=True))
 
 
-if __name__ == "__main__": main()
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--forex-only", action="store_true", help="replace only the approved Forex universe in the current snapshot")
+    args = parser.parse_args()
+    refresh_forex_only() if args.forex_only else main()
