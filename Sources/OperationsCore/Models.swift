@@ -94,6 +94,81 @@ public struct AuthoritySnapshot: Equatable, Sendable {
     public let readAt: Date
 }
 
+public struct TruthScoreComponent: Codable, Equatable, Sendable {
+    public let score: Int?
+    public let basis: String
+}
+
+public struct TruthExplanation: Codable, Equatable, Sendable {
+    public let method: String
+    public let components: [String: TruthScoreComponent]
+    public let limitations: [String]
+}
+
+public struct TruthCoverageRange: Codable, Equatable, Sendable {
+    public let start: String?
+    public let end: String?
+}
+
+public struct TruthCoverage: Codable, Equatable, Sendable {
+    public let earliestBar: String
+    public let latestBar: String
+    public let rowCount: Int
+    public let expectedRange: TruthCoverageRange
+    public let availableRange: TruthCoverageRange
+    public let expectedSessionCount: Int?
+    public let availableExpectedSessionCount: Int?
+    enum CodingKeys: String, CodingKey {
+        case earliestBar = "earliest_bar", latestBar = "latest_bar", rowCount = "row_count"
+        case expectedRange = "expected_range", availableRange = "available_range"
+        case expectedSessionCount = "expected_session_count", availableExpectedSessionCount = "available_expected_session_count"
+    }
+}
+
+public struct TruthProviderSummary: Codable, Equatable, Sendable {
+    public let provider: String
+    public let providerContract: String
+    public let providerSymbol: String
+    public let confidence: String
+    public let score: Int?
+    public let basis: String
+    enum CodingKeys: String, CodingKey {
+        case provider, confidence, score, basis
+        case providerContract = "provider_contract", providerSymbol = "provider_symbol"
+    }
+}
+
+public struct TruthState: Codable, Equatable, Sendable {
+    public let contract: String
+    public let engineVersion: Int
+    public let symbol: String
+    public let timeframe: String
+    public let truthScore: Int
+    public let authorityScore: Int
+    public let freshnessScore: Int?
+    public let coverageScore: Int?
+    public let continuityScore: Int?
+    public let validationScore: Int?
+    public let providerScore: Int?
+    public let authorityState: String
+    public let validationState: String
+    public let caodt: String
+    public let gapClassification: String
+    public let gapImpact: String
+    public let coverage: TruthCoverage
+    public let providerSummary: TruthProviderSummary
+    public let epoch: String
+    public let explanation: TruthExplanation
+    enum CodingKeys: String, CodingKey {
+        case contract, symbol, timeframe, caodt, coverage, epoch, explanation
+        case engineVersion = "engine_version", truthScore = "truth_score", authorityScore = "authority_score"
+        case freshnessScore = "freshness_score", coverageScore = "coverage_score", continuityScore = "continuity_score"
+        case validationScore = "validation_score", providerScore = "provider_score", authorityState = "authority_state"
+        case validationState = "validation_state", gapClassification = "gap_classification", gapImpact = "gap_impact"
+        case providerSummary = "provider_summary"
+    }
+}
+
 public enum ConsoleSection: String, CaseIterable, Identifiable, Sendable {
     case lanes = "Lanes", authority = "Authority Ledger", acquire = "Acquire", importEvidence = "Import Evidence", addInstrument = "Add Instrument", operations = "Operations"
     case integrity = "Integrity & Backup", settings = "Settings"
@@ -106,6 +181,7 @@ public enum ConsoleSection: String, CaseIterable, Identifiable, Sendable {
 public enum ConflictMode: String, CaseIterable, Sendable { case preserve, correct }
 
 public enum OperationIntent: Equatable, Sendable {
+    case readTruth(symbol: String, timeframe: String)
     case searchInstrument(query: String)
     case registerInstrument(candidate: String)
     case acquire(asset: String, from: String, through: String, mode: ConflictMode)

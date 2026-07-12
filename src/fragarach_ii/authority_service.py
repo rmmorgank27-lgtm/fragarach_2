@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .storage import open_read_only
+from .truth_engine import TruthEngineError, truth_state_for_lane
 
 
 AUTHORITY_CONTRACT = "fragarach_ii.operational_authority.v1"
@@ -94,9 +95,13 @@ def serve_historical_authority(
             "SELECT count(*) FROM provenance WHERE symbol=? AND timeframe=?",
             (canonical_symbol, normalized_timeframe),
         ).fetchone()[0]
-        return _response(
-            canonical_symbol, normalized_timeframe, registration, bars, validation, provenance_count
-        )
+        try:
+            truth_state = truth_state_for_lane(
+                database_path, symbol=canonical_symbol, timeframe=normalized_timeframe
+            )
+        except TruthEngineError as error:
+            raise AuthorityServiceError(error.code, str(error)) from error
+        return _response(canonical_symbol, normalized_timeframe, registration, bars, validation, provenance_count, truth_state)
     finally:
         connection.close()
 
@@ -120,39 +125,13 @@ def _registration_by_alias(connection, symbol: str, timeframe: str):
     return matches[0] if matches else None
 
 
-def _response(symbol, timeframe, registration, rows, validation, provenance_count):
+def _response(symbol, timeframe, registration, rows, validation, provenance_count, truth_state):
     earliest = rows[0][0]
     latest = rows[-1][0]
     caodt = _iso_utc(latest)
-    validation_state, validation_score = _validation_state(validation)
-    expected = validation.get("expected_session_count", 0) if validation else 0
-    present = validation.get("present_expected_session_count", 0) if validation else 0
-    coverage_score = round(100 * present / expected) if expected else 0
-    authority_score = 100 if registration[6] == "REGISTERED_WITH_EVIDENCE" else 75
-    freshness_score = (
-        100 if validation and validation.get("latest_expected_session_present") else 50
-    )
-    components = {
-        "authority": {"score": authority_score, "basis": registration[6]},
-        "freshness": {
-            "score": freshness_score,
-            "basis": "LATEST_EXPECTED_SESSION_PRESENT"
-            if freshness_score == 100
-            else "LATEST_EXPECTED_SESSION_NOT_CONFIRMED",
-        },
-        "validation": {"score": validation_score, "basis": validation_state},
-        "coverage": {
-            "score": coverage_score,
-            "basis": f"{present}/{expected} expected sessions" if expected else "NOT_MEASURED",
-        },
-    }
-    truth_score = round(sum(item["score"] for item in components.values()) / len(components))
-    authority_state = "GREEN" if truth_score >= 80 else "AMBER" if truth_score >= 50 else "RED"
     missing = validation.get("missing_expected_session_count", 0) if validation else None
     current = 0 if validation and validation.get("latest_expected_session_present") else (1 if validation else None)
     historical = max(0, missing - (current or 0)) if missing is not None else None
-    impact = _gap_impact(validation, missing)
-    provider_confidence = 100 if registration[6] == "REGISTERED_WITH_EVIDENCE" else 50
     return {
         "contract": AUTHORITY_CONTRACT,
         "historical_bars": [
@@ -168,15 +147,16 @@ def _response(symbol, timeframe, registration, rows, validation, provenance_coun
             for row in rows
         ],
         "caodt": caodt,
-        "authority_state": authority_state,
-        "validation_state": validation_state,
-        "truth_score": {"score": truth_score, "maximum": 100, "components": components},
+        "authority_state": truth_state["authority_state"],
+        "validation_state": truth_state["validation_state"],
+        "truth_score": {"score": truth_state["truth_score"], "maximum": 100, "components": {name: truth_state["explanation"]["components"][name] for name in ("authority", "freshness", "validation", "coverage")}},
+        "truth_state": truth_state,
         "gap_summary": {
             "current_gaps": current,
             "recent_gaps": None,
             "historical_gaps": historical,
             "total_known_gaps": missing,
-            "operational_impact": impact,
+            "operational_impact": truth_state["gap_impact"],
             "limitations": [] if validation else ["NO_PERSISTED_VALIDATION_SUMMARY"],
         },
         "provider_summary": {
@@ -184,7 +164,7 @@ def _response(symbol, timeframe, registration, rows, validation, provenance_coun
             "provider_contract": registration[4],
             "provider_symbol": registration[5],
             "provider_freshness": caodt,
-            "provider_confidence": provider_confidence,
+            "provider_confidence": truth_state["provider_score"],
             "provider_entitlement": "NOT_RECORDED",
         },
         "operational_metadata": {
@@ -197,27 +177,5 @@ def _response(symbol, timeframe, registration, rows, validation, provenance_coun
             "provenance_reference_count": provenance_count,
         },
     }
-
-
-def _validation_state(validation):
-    if validation is None:
-        return "LIMITED", 25
-    if validation.get("material_gap_count", 0) or validation.get("outside_expected_session_count", 0):
-        return "WARNING", 60
-    if validation.get("missing_expected_session_count", 0):
-        return "WARNING", 80
-    return "PASS", 100
-
-
-def _gap_impact(validation, missing):
-    if validation is None:
-        return "HIGH"
-    if not missing and not validation.get("outside_expected_session_count", 0):
-        return "NONE"
-    if validation.get("material_gap_count", 0):
-        return "HIGH" if not validation.get("latest_expected_session_present") else "MEDIUM"
-    return "LOW"
-
-
 def _iso_utc(epoch_seconds: int) -> str:
     return datetime.fromtimestamp(epoch_seconds, UTC).isoformat()
