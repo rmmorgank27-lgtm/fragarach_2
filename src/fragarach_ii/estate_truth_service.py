@@ -31,6 +31,7 @@ def estate_truth_state(database_path: str | Path) -> dict[str, object]:
               ON r.asset=l.asset AND r.timeframe=l.registration_timeframe
             LEFT JOIN lane_state s ON s.asset=l.asset AND s.timeframe=l.timeframe
             WHERE EXISTS (SELECT 1 FROM bars b WHERE b.asset=l.asset AND b.timeframe=l.timeframe)
+              AND NOT EXISTS (SELECT 1 FROM authority_events e WHERE e.event_kind='LANE_SUPERSEDED' AND json_extract(e.canonical_payload,'$.body.asset')=l.asset AND json_extract(e.canonical_payload,'$.body.timeframe')=l.timeframe)
             ORDER BY r.asset,l.timeframe
             """
         ).fetchall()

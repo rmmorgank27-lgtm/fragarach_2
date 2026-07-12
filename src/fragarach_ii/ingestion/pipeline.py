@@ -172,6 +172,8 @@ def _ensure_raw_block(connection: sqlite3.Connection, evidence: RawEvidence) -> 
 
 
 def _require_registration(connection: sqlite3.Connection, symbol: str, timeframe: str) -> None:
+    if connection.execute("SELECT 1 FROM authority_events WHERE event_kind IN ('REGISTRATION_SUPERSEDED','LANE_SUPERSEDED') AND json_extract(canonical_payload,'$.body.asset')=? AND (json_extract(canonical_payload,'$.body.scope')='WHOLE_INSTRUMENT' OR json_extract(canonical_payload,'$.body.timeframe')=?)",(symbol,timeframe)).fetchone() is not None:
+        raise ValueError(f"INSTRUMENT_RETIRED: {symbol}:{timeframe}")
     if connection.execute("""SELECT 1 FROM evidence_lanes l JOIN instrument_registrations r
       ON r.asset=l.asset AND r.timeframe=l.registration_timeframe
       WHERE l.asset=? AND l.timeframe=?""",(symbol,timeframe)).fetchone() is None:

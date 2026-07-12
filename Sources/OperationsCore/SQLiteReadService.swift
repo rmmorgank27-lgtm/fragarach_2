@@ -54,6 +54,7 @@ public final class SQLiteReadService: @unchecked Sendable {
         SELECT l.asset,l.timeframe,l.high_watermark_open_time_utc,l.state_version,l.last_ingest_run_id,l.updated_at_utc,
                count(b.open_time_utc),min(b.open_time_utc),max(b.open_time_utc),l.validation_summary
         FROM lane_state l LEFT JOIN bars b ON b.asset=l.asset AND b.timeframe=l.timeframe
+        WHERE NOT EXISTS (SELECT 1 FROM authority_events e WHERE e.event_kind='LANE_SUPERSEDED' AND json_extract(e.canonical_payload,'$.body.asset')=l.asset AND json_extract(e.canonical_payload,'$.body.timeframe')=l.timeframe)
         GROUP BY l.asset,l.timeframe ORDER BY l.asset,l.timeframe
         """
         var statement: OpaquePointer?; try prepare(db, sql, &statement); defer { sqlite3_finalize(statement) }

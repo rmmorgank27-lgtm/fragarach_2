@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .storage import open_read_only
+from .retirement import is_retired
 
 
 TRUTH_STATE_CONTRACT = "fragarach_ii.truth_state.v1"
@@ -27,6 +28,7 @@ def truth_state_for_lane(
 
     symbol = symbol.strip().upper()
     timeframe = timeframe.strip().upper()
+    if is_retired(database_path,symbol,timeframe):raise TruthEngineError("RETIRED_LANE",f"{symbol}:{timeframe}")
     connection = open_read_only(database_path)
     try:
         registration = connection.execute(
@@ -77,6 +79,7 @@ def truth_states(database_path: str | Path) -> list[dict[str, object]]:
             """
             SELECT l.asset,l.timeframe FROM evidence_lanes l
             WHERE EXISTS (SELECT 1 FROM bars b WHERE b.asset=l.asset AND b.timeframe=l.timeframe)
+              AND NOT EXISTS (SELECT 1 FROM authority_events e WHERE e.event_kind='LANE_SUPERSEDED' AND json_extract(e.canonical_payload,'$.body.asset')=l.asset AND json_extract(e.canonical_payload,'$.body.timeframe')=l.timeframe)
             ORDER BY l.asset,l.timeframe
             """
         ).fetchall()

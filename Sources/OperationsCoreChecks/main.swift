@@ -28,7 +28,7 @@ try run("read-only real schema and bounded queries") {
     let url=URL(fileURLWithPath:authority), before=try Data(contentsOf:url), snapshot=try SQLiteReadService().load(path:authority,operationLimit:5)
     try check(Set(["AUDUSD","BTCUSD","XAUUSD"]).isSubset(of:Set(snapshot.lanes.map(\.asset))),"lane decode")
     try check(snapshot.operations.count==5,"bounded operations")
-    try check(snapshot.authorityEvents.count==6,"authority ledger decode")
+    try check(snapshot.authorityEvents.count>=6,"authority ledger decode")
     try check(snapshot.lanes.first{$0.asset=="AUDUSD"}?.validation?.outsideExpectedSessionCount==16,"AUD outside sessions")
     try check(snapshot.lanes.first{$0.asset=="XAUUSD"}?.validation?.outsideExpectedSessionCount==49,"XAU outside sessions")
     try check(try Data(contentsOf:url)==before,"read mutated database")

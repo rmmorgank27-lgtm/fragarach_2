@@ -8,6 +8,7 @@ from pathlib import Path
 from .storage import open_read_only
 from .truth_engine import TruthEngineError, truth_state_for_lane
 from .fx_orientation import orientation_for
+from .retirement import retirement_state
 
 MARKET_DISCOVERY_CONTRACT = "fragarach_ii.market_discovery.v2"
 _CURRENCIES = frozenset("AUD CAD CHF CNY EUR GBP HKD JPY NZD SGD USD ZAR".split())
@@ -91,16 +92,18 @@ def discover_market(database_path:str|Path,query:str)->dict[str,object]:
 def _market_result(db,definition,reason,requested,confidence):
     registrations=_registrations(db); reps=[]; existing=[]
     for r in definition.representations:
-        reg=_registration_for(r,registrations); context=_registration_context(db,reg) if reg else None
+        reg=_registration_for(r,registrations); retired=retirement_state(db,r.symbol);context=_registration_context(db,reg,retired) if reg else None
         if context:existing.append(context)
-        plan=_registration_plan(definition,r) if not reg else None
+        plan=_registration_plan(definition,r) if not reg and not retired else None
         warning=_warning(r)
-        lanes=_timeframe_lanes(r,definition,registrations)
-        reps.append({**asdict(r),"registration_status":reg[1] if reg else "NOT_REGISTERED","provider_mapping_status":"KNOWN_MAPPING" if r.provider_symbol else "DISCOVERY_REQUIRED","acquisition_readiness":"READY_FOR_REGISTRATION" if plan else "OPEN_EXISTING" if reg else "PROVIDER_DISCOVERY_REQUIRED","warnings":tuple(filter(None,(warning,))),"registration_plan":plan,"timeframe_lanes":lanes})
+        lanes=_timeframe_lanes(r,definition,registrations,retired)
+        reps.append({**asdict(r),"registration_status":retired["lifecycle_state"] if retired else reg[1] if reg else "NOT_REGISTERED","provider_mapping_status":"KNOWN_MAPPING" if r.provider_symbol else "DISCOVERY_REQUIRED","acquisition_readiness":"HISTORICAL_ONLY" if retired else "READY_FOR_REGISTRATION" if plan else "OPEN_EXISTING" if reg else "PROVIDER_DISCOVERY_REQUIRED","warnings":tuple(filter(None,(warning,))),"registration_plan":plan,"timeframe_lanes":lanes,"retirement":retired})
     selected=requested or (None if definition.canonical_identity in {"COMPANY:ALPHABET","COMMODITY:SILVER"} else definition.default_symbol)
     recommendation=next((r for r in reps if r["symbol"]==selected),None)
     providers=tuple(_provider_mapping(r,_registration_for(r,registrations)) for r in definition.representations)
     result={"underlying_market":definition.underlying_market,"canonical_identity":definition.canonical_identity,"confidence":confidence,"market_type":definition.market_type,"asset_class":definition.asset_class,"description":definition.description,"known_aliases":definition.aliases,"representations":tuple(reps),"provider_discovery":providers,"recommendation":{"representation_type":recommendation["representation_type"] if recommendation else "OPERATOR_SELECTION_REQUIRED","symbol":recommendation["symbol"] if recommendation else "","display_name":recommendation["display_name"] if recommendation else "Select a representation","reason":reason,"alternatives":tuple(r.symbol for r in definition.representations if r.symbol!=selected)},"metadata":{"market":definition.underlying_market,"asset_class":definition.asset_class,"exchange":recommendation["exchange"] if recommendation else None,"timezone":definition.timezone,"sessions":definition.sessions,"currencies":tuple(dict.fromkeys(r.currency for r in definition.representations if r.currency)),"aliases":definition.aliases,"provider_mappings":tuple(p["known_symbol"] for p in providers if p["known_symbol"]),"registration_state":"REGISTERED" if existing else "NOT_REGISTERED"},"existing_registrations":tuple(existing),"acquisition_readiness":recommendation["acquisition_readiness"] if recommendation else "REPRESENTATION_SELECTION_REQUIRED","resolution_reason":reason,"required_operator_decisions":(() if recommendation else ("Select the intended tradable representation.",)),"available_actions":(("OPEN_EXISTING",) if recommendation and recommendation["registration_status"]!="NOT_REGISTERED" else ("ADD_TO_FRAGARACH",) if recommendation and recommendation["registration_plan"] else ())}
+    if recommendation and recommendation.get("retirement"):
+        result["available_actions"]=("VIEW_RETIREMENT",);result["acquisition_readiness"]="DISABLED_RETIRED";result["metadata"]["registration_state"]="HISTORICAL_RETIRED"
     if definition.asset_class=="FX":
         orientation=orientation_for(definition.canonical_identity.split(":",1)[1]);result["fx_orientation"]=orientation
         if orientation["orientation_state"]!="DIRECT_PROVIDER_SUPPORTED":result["available_actions"]=("OPEN_INVERSE",) if orientation["orientation_state"]=="INVERSE_ONLY" else ();result["acquisition_readiness"]=orientation["acquisition_readiness"]
@@ -114,10 +117,12 @@ def _registration_plan(m,r):
     payload=base64.urlsafe_b64encode(json.dumps(candidate,sort_keys=True,separators=(",",":")).encode()).decode()
     return {"underlying_market":m.underlying_market,"selected_representation":r.symbol,"canonical_registration_symbol":asset,"display_name":r.display_name,"asset_class":m.asset_class,"instrument_type":candidate["instrument_type"],"exchange_or_venue":r.exchange,"timezone":m.timezone,"session_authority":calendar,"base_currency":asset[:3] if r.representation_type in ("FX_SPOT_PAIR","CRYPTO_SPOT_PAIR","SPOT") and len(asset)>=6 else None,"quote_currency":r.currency,"provider_mappings":({"provider":r.provider,"symbol":r.provider_symbol,"state":"KNOWN_MAPPING"},),"known_unknowns":(),"registration_warnings":tuple(filter(None,(_warning(r),))),"candidate":payload}
 
-def _timeframe_lanes(r,m,rows):
+def _timeframe_lanes(r,m,rows,retired=None):
     orientation=orientation_for(m.canonical_identity.split(":",1)[1]) if m.asset_class=="FX" else None
     lanes=[]
     for timeframe in ("D1","H1","M30","M5"):
+        if retired and timeframe in retired["selected_lanes"]:
+            lanes.append({"timeframe":timeframe,"registration_state":"RETIRED","provider_capability":"HISTORICAL_ONLY","provider_mapping":"PRESERVED","authority_state":retired["lifecycle_state"],"acquisition_readiness":"UNSUPPORTED","reason":"Retired authority; evidence is preserved and quarantined.","selectable":False});continue
         existing=next((row for row in rows if json.loads(row[0]).get("timeframe")==timeframe and _registration_for(r,(row,))),None)
         if orientation and orientation["orientation_state"]!="DIRECT_PROVIDER_SUPPORTED":
             state="INVERSE_ONLY" if orientation["orientation_state"]=="INVERSE_ONLY" else "CAPABILITY_UNKNOWN";reason=f"Capability belongs to authoritative inverse {orientation['inverse_pair']} mapping; no direct mapping exists." if state=="INVERSE_ONLY" else "No direct or inverse provider mapping evidence exists."
@@ -145,11 +150,11 @@ def _registration_for(r,rows):
     for identity,status,version in rows:
         v=json.loads(identity)
         if names & {_normalize(str(v.get(k,""))) for k in ("asset","local_symbol","provider_symbol")}:return v,status,version
-def _registration_context(db,reg):
+def _registration_context(db,reg,retired=None):
     v,status,version=reg;truth=None
     try:truth=truth_state_for_lane(db,symbol=v["asset"],timeframe="D1")
     except TruthEngineError:pass
-    return {"canonical_symbol":v["asset"],"registration_status":status,"registration_version":version,"authority_state":truth["authority_state"] if truth else status,"truth_score":truth["truth_score"] if truth else None,"caodt":truth["caodt"] if truth else None,"validation_state":truth["validation_state"] if truth else "NOT_MEASURED","acquisition_state":"READY" if v.get("provider_symbol") else "PROVIDER_DISCOVERY_REQUIRED"}
+    return {"canonical_symbol":v["asset"],"registration_status":retired["lifecycle_state"] if retired else status,"registration_version":version,"authority_state":retired["lifecycle_state"] if retired else truth["authority_state"] if truth else status,"truth_score":truth["truth_score"] if truth else None,"caodt":truth["caodt"] if truth else None,"validation_state":truth["validation_state"] if truth else "NOT_MEASURED","acquisition_state":"DISABLED_RETIRED" if retired else "READY" if v.get("provider_symbol") else "PROVIDER_DISCOVERY_REQUIRED","retirement":retired}
 def _rank(d,q):
     if q==_normalize(d.canonical_identity):return 100,"Exact canonical identity match.",None
     for r in d.representations:

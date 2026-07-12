@@ -17,6 +17,7 @@ from fragarach_ii.ingestion.pipeline import IngestionResult
 from fragarach_ii.storage import open_read_only, registered_writer, transaction, registration_for_lane, RegistrationError, initialize_database
 from fragarach_ii.validation import validate_lane
 from fragarach_ii.fx_orientation import validate_direct_mapping
+from fragarach_ii.retirement import is_retired
 
 from .config import ProviderConfig, ProviderConfigurationError, load_provider_config
 from .http import (
@@ -102,10 +103,12 @@ def acquire_twelve_data(
     before_ingest: Callable[[], None] | None = None,
     validator: Callable[..., object] = validate_lane,
 ) -> AcquisitionResult:
-    if not credential:
-        raise AcquisitionError("MISSING_CREDENTIAL", "required provider credential is absent")
     normalized_asset = asset.strip().upper()
     normalized_timeframe = timeframe.strip().upper()
+    if is_retired(database_path,normalized_asset,normalized_timeframe):
+        raise AcquisitionError("INSTRUMENT_RETIRED",f"{normalized_asset}:{normalized_timeframe}")
+    if not credential:
+        raise AcquisitionError("MISSING_CREDENTIAL", "required provider credential is absent")
     if normalized_timeframe != "D1":
         raise AcquisitionError("UNSUPPORTED_TIMEFRAME", "provider contract supports D1 only")
     if merge_mode not in {"preserve", "correct"}:
