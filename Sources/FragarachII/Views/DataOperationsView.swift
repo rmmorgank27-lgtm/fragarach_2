@@ -24,6 +24,7 @@ struct DataOperationsView: View {
     @State private var reviewedPlan:ReviewedDataOperationPlan?
     @State private var completedPlan:ReviewedDataOperationPlan?
     @State private var fileSelectionID=UUID()
+    @State private var showRejectedRows=false
 
     private var allRegistrations: [InstrumentRegistrationRecord] { store.snapshot?.registrations ?? [] }
     private var registrations: [InstrumentRegistrationRecord] {
@@ -118,10 +119,11 @@ struct DataOperationsView: View {
     @ViewBuilder private var readableResult:some View {
         if let plan=completedPlan,plan.matches(mode:store.dataOperationsMode,instrument:registration?.asset,timeframe:registration?.timeframe,fileChecksum:file == nil ? nil:checksum),let owned=store.currentOperationResult,owned.planRevision==plan.id {
             let result=owned.result
-            GroupBox(result.exitCode==0 ? "Data Operation Complete":"Data Operation Failed") {
+            let warningResult=result.JSON?["transaction_state"] as? String == "COMPLETED_WITH_WARNINGS"
+            GroupBox(result.exitCode==0 ? (warningResult ? "Import completed with warnings":"Data Operation Complete"):"Data Operation Failed") {
                 VStack(alignment:.leading,spacing:8) {
                     Label(result.exitCode==0 ? "Authority service completed successfully":"No evidence was written.",systemImage:result.exitCode==0 ? "checkmark.circle.fill":"xmark.octagon").foregroundStyle(result.exitCode==0 ? .green:.red)
-                    if result.exitCode==0,let json=result.JSON { Facts(readableFacts(json)) }
+                    if result.exitCode==0,let json=result.JSON { Facts(readableFacts(json));if warningResult{HStack{Button("View rejected row"){showRejectedRows.toggle()};Button("Export rejection report"){exportRejections(json)}};if showRejectedRows{rejectionDetails(json)}} }
                     else { Facts([("Rows inserted","0"),("Rows unchanged","0"),("Conflicts preserved","0"),("Raw blocks created","0")]);Text(operationFailure(result,plan:plan));if plan.mode == .fetch{HStack{Button("Import CSV"){store.dataOperationsMode = .importFile};Button("Try Again"){isolateOperationState()}}} }
                     DisclosureGroup("Technical Details"){Text(result.stdout.isEmpty ? result.stderr:result.stdout).font(.caption.monospaced()).textSelection(.enabled)}
                 }
@@ -131,7 +133,7 @@ struct DataOperationsView: View {
     private func readableFacts(_ json:[String:Any])->[(String,String)] {
         let common=[("Instrument",json["asset"] as? String ?? registration?.asset ?? "—"),("Timeframe",json["timeframe"] as? String ?? registration?.timeframe ?? "—")]
         let counts=[("Rows inserted","\(json["inserted"] as? Int ?? 0)"),("Rows unchanged","\(json["unchanged"] as? Int ?? 0)"),("Conflicts preserved","\(json["conflicts_preserved"] as? Int ?? 0)"),("Raw block",json["raw_block_id"] as? String ?? "—")]
-        if store.dataOperationsMode == .importFile { return common+counts }
+        if store.dataOperationsMode == .importFile { return common+[("Valid rows","\(json["accepted"] as? Int ?? json["staged"] as? Int ?? 0)"),("Rejected rows","\(json["rejected"] as? Int ?? 0)")]+counts }
         return common+[("Requested range","\(json["from_date"] as? String ?? dateRange.fromISO) → \(json["through_date"] as? String ?? dateRange.throughISO)"),("Actual range",json["actual_range"] as? String ?? json["canonical_high_watermark"] as? String ?? "No returned bars"),("Rows received","\(json["received"] as? Int ?? 0)")]+counts+[("CAODT",truth?.truthState.caodt ?? "Refresh pending"),("Truth Score",truth.map{String($0.truthState.truthScore)} ?? "Refresh pending"),("Warnings",(json["warnings"] as? [String])?.joined(separator:", ") ?? "None")]
     }
 
@@ -156,6 +158,8 @@ struct DataOperationsView: View {
     private func runReviewed(_ plan:ReviewedDataOperationPlan){reviewing=false;reviewedPlan=nil;guard let operation=plan.intent else{localError="The reviewed operation plan is incomplete.";return};Task{await store.run(operation);if plan.matches(mode:store.dataOperationsMode,instrument:registration?.asset,timeframe:registration?.timeframe,fileChecksum:file == nil ? nil:checksum){completedPlan=plan}}}
     private func isolateOperationState(){reviewing=false;reviewedPlan=nil;completedPlan=nil;store.clearCurrentOperationResult()}
     private func operationFailure(_ result:ProcessResult,plan:ReviewedDataOperationPlan)->String{let payload=result.JSON;let reason=(payload?["error"] as? String) ?? (result.stderr.isEmpty ? result.stdout:result.stderr);return plan.mode == .importFile ? "Import rejected: \(reason)":"No provider returned valid data."}
+    @ViewBuilder private func rejectionDetails(_ json:[String:Any])->some View{if let rows=json["rejections"] as? [[String:Any]]{ForEach(Array(rows.enumerated()),id:\.offset){_,row in GroupBox("Row \(row["source_row_number"] as? Int ?? 0)"){Facts([("Code",row["code"] as? String ?? "Rejected"),("Reason",row["message"] as? String ?? "No reason recorded"),("Raw evidence","Preserved unchanged in \(json["raw_block_id"] as? String ?? "raw block")")])}}}}
+    private func exportRejections(_ json:[String:Any]){guard let rows=json["rejections"],let data=try? JSONSerialization.data(withJSONObject:["instrument":registration?.asset ?? "","timeframe":registration?.timeframe ?? "","raw_block_id":json["raw_block_id"] ?? "","rejections":rows],options:[.prettyPrinted,.sortedKeys]),PanelService.exportRejections(data)else{localError="The rejection report could not be exported.";return}}
     private func planRetirement(_ r:InstrumentRegistrationRecord){localError=nil;Task{await store.run(.retirementPlan(asset:r.asset,scope:"WHOLE_INSTRUMENT",lanes:selectedRegistrations.map(\.timeframe)));guard store.lastProcessResult?.exitCode==0,let text=store.lastProcessResult?.stdout,let impact=try? JSONDecoder().decode(RetirementImpact.self,from:Data(text.utf8))else{localError=store.operationError ?? "Retirement impact could not be loaded";return};retirementImpact=impact}}
     private func confirmRetirement(_ impact:RetirementImpact,_ reason:String,_ note:String,_ confirmation:String){retirementImpact=nil;Task{await store.run(.retireInstrument(asset:impact.canonicalInstrument,scope:impact.scope,lanes:impact.selectedLanes,reason:reason,note:note,confirmation:confirmation));guard store.lastProcessResult?.exitCode==0,let text=store.lastProcessResult?.stdout,let receipt=try? JSONDecoder().decode(RetirementReceipt.self,from:Data(text.utf8))else{localError=store.operationError ?? "Retirement failed";return};retirementReceipt=receipt}}
 }

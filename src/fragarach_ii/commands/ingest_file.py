@@ -53,9 +53,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         for key, value in result.as_dict().items():
             print(f"{key}: {value}")
-    return 0 if result.transaction_state == "committed" else 2
+    return 0 if result.transaction_state in {"committed","COMPLETED_WITH_WARNINGS"} else 2
 
 
 if __name__ == "__main__":
     sys.exit(main())
-

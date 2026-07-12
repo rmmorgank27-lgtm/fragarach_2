@@ -86,7 +86,10 @@ def ingest_staged_batch(
         apply_migrations(connection)
         if batch.bars:
             _require_registration(connection, batch.bars[0].symbol, batch.bars[0].timeframe)
-        if batch.rejections:
+        partial_allowed = bool(batch.bars) and preserve_rejected_evidence and all(
+            item.code != "CONFLICTING_DUPLICATE" for item in batch.rejections
+        )
+        if batch.rejections and not partial_allowed:
             if not preserve_rejected_evidence:
                 raise ValueError("rejected staged provider evidence is not persistable")
             with transaction(connection):
@@ -142,7 +145,8 @@ def ingest_staged_batch(
             ) from error
         return _result(
             connection, batch, counts, ingest_run_id, evidence,
-            "committed", reused, accepted=len(batch.bars)
+            "COMPLETED_WITH_WARNINGS" if batch.rejections else "committed",
+            reused, accepted=len(batch.bars)
         )
 
 

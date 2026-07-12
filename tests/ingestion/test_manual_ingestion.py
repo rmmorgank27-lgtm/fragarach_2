@@ -184,6 +184,23 @@ class ManualIngestionTests(unittest.TestCase):
         self.assertEqual(result.duplicate_identical, 1)
         self.assertEqual((result.source_rows, result.staged, result.inserted), (2, 1, 1))
 
+    def test_valid_rows_commit_while_invalid_row_is_quarantined(self) -> None:
+        source = self.write(
+            "partial.csv",
+            "2026-07-07,1,2,0,1.5,10\n"
+            "2026-07-08,2,3,1.6,1.5,11\n"
+            "2026-07-09,1.5,3,1,2,12\n",
+        )
+        payload=source.read_bytes();result=self.ingest(source)
+        self.assertEqual(result.transaction_state,"COMPLETED_WITH_WARNINGS")
+        self.assertEqual((result.source_rows,result.staged,result.accepted,result.inserted,result.rejected),(3,2,2,2,1))
+        self.assertEqual(result.rejections,({"source_row_number":3,"code":"INVALID_OHLC","message":"low is above close"},))
+        with open_read_only(self.database) as connection:
+            self.assertEqual(connection.execute("select payload from raw_blocks where raw_block_id=?",(result.raw_block_id,)).fetchone()[0],payload)
+            status,detail=connection.execute("select status,detail from ingest_runs where ingest_run_id=?",(result.ingest_run_id,)).fetchone()
+            self.assertEqual(status,"committed")
+            self.assertEqual(json.loads(detail)["rejections"],[{"code":"INVALID_OHLC","message":"low is above close","source_row_number":3}])
+
     def test_restart_preserves_all_evidence_and_history(self) -> None:
         source = self.write("restart.csv", "2026-07-09,1,2,0,1,10\n")
         result = self.ingest(source)
@@ -207,4 +224,3 @@ class ManualIngestionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
