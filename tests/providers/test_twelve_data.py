@@ -14,7 +14,7 @@ from fragarach_ii.commands.acquire import main as command_main
 from fragarach_ii.providers import AcquisitionError, acquire_twelve_data
 from fragarach_ii.providers.config import load_provider_config
 from fragarach_ii.providers.http import HttpRequest, HttpResponse, ResponseTooLarge
-from fragarach_ii.storage import open_read_only, verify_integrity
+from fragarach_ii.storage import open_read_only, verify_integrity, RegistrationCandidate, register_instrument
 from fragarach_ii.storage.schema import APPLICATION_TABLES
 
 
@@ -108,6 +108,15 @@ class TwelveDataAcquisitionTests(unittest.TestCase):
                 self.acquire(body, **values)
             self.assertEqual(raised.exception.code, code)
         self.assertEqual(_counts(self.database)[:4], (0, 0, 0, 0))
+
+    def test_fx_orientation_mismatch_stops_before_transport_or_evidence(self) -> None:
+        from fragarach_ii.storage import initialize_database
+        initialize_database(self.database)
+        candidate=RegistrationCandidate(asset="AUDEUR",timeframe="D1",instrument_family="AUDEUR",local_symbol="AUDEUR",display_name="AUD / EUR",instrument_type="FX_SPOT_PAIR",asset_class="FX",representation_type="FX_SPOT_PAIR",trading_currency="EUR",exchange_name="OTC",provider_id="TWELVE_DATA",provider_contract="TWELVE_DATA_TIME_SERIES_D1_V1",provider_symbol="EUR/AUD",provider_instrument_type="Physical Currency",calendar_id="FX_D1_V1",calendar_version=1,gap_doctrine_id="FRAGARACH_II_D1_GAP_DOCTRINE_V1",gap_doctrine_version=1)
+        register_instrument(self.database,candidate,registered_at_utc=NOW.isoformat());before=_counts(self.database);transport=FakeTransport()
+        with self.assertRaises(AcquisitionError) as raised:
+            acquire_twelve_data(self.database,asset="AUDEUR",timeframe="D1",from_date="2026-07-09",through_date="2026-07-10",credential="secret",transport=transport,sleeper=lambda _:None)
+        self.assertEqual(raised.exception.code,"PROVIDER_ORIENTATION_MISMATCH");self.assertEqual(transport.requests,[]);self.assertEqual(_counts(self.database),before)
 
     def test_provider_configuration_checksum_drift_is_detected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

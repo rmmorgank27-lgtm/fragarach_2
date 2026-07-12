@@ -16,6 +16,7 @@ from fragarach_ii.ingestion import RawEvidence, ingest_staged_batch
 from fragarach_ii.ingestion.pipeline import IngestionResult
 from fragarach_ii.storage import open_read_only, registered_writer, transaction, registration_for_lane, RegistrationError, initialize_database
 from fragarach_ii.validation import validate_lane
+from fragarach_ii.fx_orientation import validate_direct_mapping
 
 from .config import ProviderConfig, ProviderConfigurationError, load_provider_config
 from .http import (
@@ -120,6 +121,9 @@ def acquire_twelve_data(
         if registration[0] != config.provider_id or registration[1] != config.provider_contract:
             raise ProviderConfigurationError("registered provider contract mismatch")
         provider_symbol = registration[2]
+        if normalized_asset_class(database_path,normalized_asset,normalized_timeframe)=="FX":
+            try:validate_direct_mapping(normalized_asset,registration[0],provider_symbol)
+            except ValueError as error:raise AcquisitionError("PROVIDER_ORIENTATION_MISMATCH",str(error)) from error
     except (ProviderConfigurationError, RegistrationError) as error:
         raise AcquisitionError("PROVIDER_CONFIGURATION_ERROR", str(error)) from error
     days = (end - start).days + 1
@@ -232,6 +236,13 @@ def acquire_twelve_data(
         validation_result_checksum=validation_data["result_checksum"],
         read_only_verification=verified,
     )
+
+def normalized_asset_class(database_path,asset,timeframe):
+    connection=open_read_only(database_path)
+    try:
+        row=connection.execute("SELECT asset_class FROM instrument_registrations WHERE asset=? AND timeframe=?",(asset,timeframe)).fetchone()
+        return row[0] if row else None
+    finally:connection.close()
 
 
 def _request(

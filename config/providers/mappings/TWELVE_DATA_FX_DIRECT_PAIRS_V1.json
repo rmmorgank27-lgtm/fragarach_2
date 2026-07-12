@@ -1,0 +1,14 @@
+{
+  "authority_state": "CANDIDATE_AUTHORITY",
+  "evidence_timestamp": "2026-07-12",
+  "mapping_version": "TWELVE_DATA_FX_DIRECT_PAIRS_V1",
+  "provider": "TWELVE_DATA",
+  "direct_pairs": {
+    "AUDUSD": "AUD/USD",
+    "EURAUD": "EUR/AUD",
+    "EURGBP": "EUR/GBP",
+    "JPYCHF": "JPY/CHF",
+    "NZDJPY": "NZD/JPY",
+    "USDJPY": "USD/JPY"
+  }
+}

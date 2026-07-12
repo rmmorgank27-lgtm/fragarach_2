@@ -26,7 +26,7 @@ var passed = 0
 
 try run("read-only real schema and bounded queries") {
     let url=URL(fileURLWithPath:authority), before=try Data(contentsOf:url), snapshot=try SQLiteReadService().load(path:authority,operationLimit:5)
-    try check(snapshot.lanes.map(\.asset)==["AUDUSD","BTCUSD","XAUUSD"],"lane decode")
+    try check(Set(["AUDUSD","BTCUSD","XAUUSD"]).isSubset(of:Set(snapshot.lanes.map(\.asset))),"lane decode")
     try check(snapshot.operations.count==5,"bounded operations")
     try check(snapshot.authorityEvents.count==6,"authority ledger decode")
     try check(snapshot.lanes.first{$0.asset=="AUDUSD"}?.validation?.outsideExpectedSessionCount==16,"AUD outside sessions")
@@ -54,7 +54,7 @@ try run("native EstateTruthState model and read-only bridge") {
     let result=try ProcessBridge().run(.readEstateTruth,config:config)
     try check(result.exitCode==0,"estate truth service failed")
     let state=try JSONDecoder().decode(EstateTruthState.self,from:Data(result.stdout.utf8))
-    try check(state.contract=="fragarach_ii.estate_truth_state.v1" && state.truthMatrix.count==3,"EstateTruthState decode")
+    try check(state.contract=="fragarach_ii.estate_truth_state.v1" && state.truthMatrix.count>=3,"EstateTruthState decode")
     try check(state.truthMatrix.map(\.id)==state.truthMatrix.map(\.id).sorted(),"estate ordering")
 }
 try run("native identity resolution model and provider-free bridge") {

@@ -18,6 +18,7 @@ import SwiftUI
     @Published var activeOperationID: UUID?
     @Published var lastProcessResult: ProcessResult?
     @Published var operationError: String?
+    @Published var acquisitionAsset: String?
     private let reader=SQLiteReadService(); let bridge=ProcessBridge()
     var configuration: CLIConfiguration { .init(python:pythonPath,repository:repositoryPath,database:databasePath) }
     var credentialAvailable: Bool { CredentialResolver.resolve() != nil }
