@@ -269,7 +269,7 @@ public struct EstateTruthState: Codable, Equatable, Sendable {
 }
 
 public enum ConsoleSection: String, CaseIterable, Identifiable, Sendable {
-    case truth = "Truth", lanes = "Lanes", authority = "Authority Ledger", acquire = "Acquire", importEvidence = "Import Evidence", addInstrument = "Resolve Instrument", operations = "Operations"
+    case truth = "Truth", lanes = "Lanes", authority = "Authority Ledger", acquire = "Acquire", importEvidence = "Import Evidence", addInstrument = "Discover Market", operations = "Operations"
     case integrity = "Integrity & Backup", settings = "Settings"
     public var id: String { rawValue }
     public var icon: String {
@@ -283,6 +283,7 @@ public enum OperationIntent: Equatable, Sendable {
     case readEstateTruth
     case readTruth(symbol: String, timeframe: String)
     case resolveInstrument(query: String)
+    case discoverMarket(query: String)
     case searchInstrument(query: String)
     case registerInstrument(candidate: String)
     case acquire(asset: String, from: String, through: String, mode: ConflictMode)
@@ -291,6 +292,22 @@ public enum OperationIntent: Equatable, Sendable {
     case verify
     case backup(destination: String)
 }
+
+public struct MarketRepresentation: Codable, Equatable, Sendable, Identifiable {
+    public var id: String { "\(representationType):\(symbol)" }
+    public let representationType: String;public let symbol:String;public let displayName:String;public let aliases:[String]
+    public let exchange:String?;public let currency:String?;public let provider:String?;public let providerSymbol:String?;public let registrationStatus:String
+    enum CodingKeys:String,CodingKey{case symbol,aliases,exchange,currency,provider;case representationType="representation_type",displayName="display_name",providerSymbol="provider_symbol",registrationStatus="registration_status"}
+}
+public struct MarketProviderDiscovery: Codable, Equatable, Sendable, Identifiable {
+    public var id:String{"\(representationSymbol):\(provider)"};public let representationSymbol:String;public let provider:String;public let availability:String;public let supportedTimeframes:[String];public let entitlement:String;public let confidence:Int?;public let knownSymbol:String?;public let registrationStatus:String
+    enum CodingKeys:String,CodingKey{case provider,availability,entitlement,confidence;case representationSymbol="representation_symbol",supportedTimeframes="supported_timeframes",knownSymbol="known_symbol",registrationStatus="registration_status"}
+}
+public struct MarketRecommendation:Codable,Equatable,Sendable{public let representationType:String;public let symbol:String;public let displayName:String;public let reason:String;public let alternatives:[String];enum CodingKeys:String,CodingKey{case symbol,reason,alternatives;case representationType="representation_type",displayName="display_name"}}
+public struct MarketMetadata:Codable,Equatable,Sendable{public let market:String;public let assetClass:String;public let exchange:String?;public let timezone:String?;public let sessions:[String];public let currencies:[String];public let aliases:[String];public let providerMappings:[String];public let registrationState:String;enum CodingKeys:String,CodingKey{case market,exchange,timezone,sessions,currencies,aliases;case assetClass="asset_class",providerMappings="provider_mappings",registrationState="registration_state"}}
+public struct ExistingMarketRegistration:Codable,Equatable,Sendable,Identifiable{public var id:String{canonicalSymbol};public let canonicalSymbol:String;public let registrationStatus:String;public let registrationVersion:Int;public let authorityState:String;public let truthScore:Int?;public let caodt:String?;enum CodingKeys:String,CodingKey{case caodt;case canonicalSymbol="canonical_symbol",registrationStatus="registration_status",registrationVersion="registration_version",authorityState="authority_state",truthScore="truth_score"}}
+public struct DiscoveredMarket:Codable,Equatable,Sendable,Identifiable{public var id:String{canonicalIdentity};public let underlyingMarket:String;public let canonicalIdentity:String;public let confidence:Int;public let marketType:String;public let assetClass:String;public let description:String;public let knownAliases:[String];public let representations:[MarketRepresentation];public let providerDiscovery:[MarketProviderDiscovery];public let recommendation:MarketRecommendation;public let metadata:MarketMetadata;public let existingRegistrations:[ExistingMarketRegistration];public let acquisitionReadiness:String;public let resolutionReason:String;enum CodingKeys:String,CodingKey{case confidence,description,representations,recommendation,metadata;case underlyingMarket="underlying_market",canonicalIdentity="canonical_identity",marketType="market_type",assetClass="asset_class",knownAliases="known_aliases",providerDiscovery="provider_discovery",existingRegistrations="existing_registrations",acquisitionReadiness="acquisition_readiness",resolutionReason="resolution_reason"}}
+public struct MarketDiscoveryResult:Codable,Equatable,Sendable{public let contract:String;public let query:String;public let discoveryStatus:String;public let confidence:Int;public let markets:[DiscoveredMarket];public let explanation:String;public let suggestedSearches:[String];public let similarMarkets:[String];public let operatorGuidance:String;enum CodingKeys:String,CodingKey{case contract,query,confidence,markets,explanation;case discoveryStatus="discovery_status",suggestedSearches="suggested_searches",similarMarkets="similar_markets",operatorGuidance="operator_guidance"}}
 
 public struct ResolvedInstrumentIdentity: Codable, Equatable, Sendable, Identifiable {
     public var id: String { canonicalSymbol }
