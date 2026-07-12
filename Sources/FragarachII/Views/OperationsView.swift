@@ -1,10 +1,26 @@
+import Foundation
 import OperationsCore
 import SwiftUI
 
 struct OperationsView:View {
-    @EnvironmentObject var store:ConsoleStore
+    @EnvironmentObject private var store:ConsoleStore
     var filterAsset:String?=nil
-    var operations:[OperationRecord]{(store.snapshot?.operations ?? []).filter{filterAsset==nil || ($0.detailJSON?.localizedCaseInsensitiveContains(filterAsset!) == true)}}
-    var selected:OperationRecord?{store.snapshot?.operations.first{$0.id==store.selectedOperationID}}
-    var body:some View{HSplitView{VStack(alignment:.leading){Text("History").font(.title2.bold());List(operations,selection:$store.selectedOperationID){op in VStack(alignment:.leading){HStack{Text(op.kind).font(.headline);Spacer();Text(op.status)};Text(op.id).font(.caption.monospaced()).foregroundStyle(.secondary);Text("\(op.startedAt) · provenance \(op.provenanceTotal)").font(.caption).foregroundStyle(.secondary)}.tag(op.id)};Text("Latest 100 receipts · \(filterAsset ?? "all instruments")").font(.caption).foregroundStyle(.secondary)}.padding().frame(minWidth:360);ScrollView{if let op=selected{VStack(alignment:.leading,spacing:16){Text("Readable Receipt").font(.title2);Facts([("Run",op.id),("Kind",op.kind),("Status",op.status),("Started",op.startedAt),("Finished",op.finishedAt ?? "—"),("Raw block",op.rawBlockID ?? "—"),("Provenance","\(op.provenanceTotal)"),("Inserted","\(op.inserted)"),("Unchanged","\(op.unchanged)"),("Conflicts","\(op.conflicts)"),("Corrected","\(op.corrected)")]);if let detail=op.detailJSON{DisclosureGroup("Technical Details"){Text(detail).font(.caption.monospaced()).textSelection(.enabled).frame(maxWidth:.infinity,alignment:.leading)}};Button("View Ledger Evidence"){store.auditFilter=op.id;store.systemSection = .audit;store.section = .system}}.padding()}else{ContentUnavailableView("Select an operation",systemImage:"clock")}}.frame(minWidth:400)}}
+    @State private var scopeAll=true
+    private var operations:[OperationRecord]{(store.snapshot?.operations ?? []).filter{scopeAll || filterAsset==nil || $0.receiptFacts.instrument==filterAsset}}
+    private var selected:OperationRecord?{operations.first{$0.id==store.selectedOperationID}}
+    var body:some View{VStack(alignment:.leading,spacing:12){
+        HStack{VStack(alignment:.leading,spacing:3){Text("History").font(.largeTitle.bold());Text("Immutable operation receipts").foregroundStyle(.secondary)};Spacer();if let filterAsset{Picker("Instrument scope",selection:$scopeAll){Text("All Instruments").tag(true);Text(filterAsset).tag(false)}.pickerStyle(.segmented).frame(width:300)}}.padding([.horizontal,.top])
+        if operations.isEmpty{ContentUnavailableView(scopeAll ? "No operation receipts":"No receipts for \(filterAsset ?? "instrument")",systemImage:"doc.text.magnifyingglass",description:Text("Completed acquisition and import receipts will appear here without obscuring the controls."))}
+        else{VStack(spacing:4){Grid(alignment:.leading,horizontalSpacing:14){GridRow{ForEach(["Timestamp","Instrument","Lane","Operation","Source","Result","Inserted","Warnings"],id:\.self){Text($0).font(.caption.bold()).foregroundStyle(.secondary)}}}.padding(.horizontal);HSplitView{List(operations,selection:$store.selectedOperationID){op in ReceiptRow(operation:op).tag(op.id)}.frame(minWidth:760);ScrollView{if let selected{ReceiptDetail(operation:selected)}else{VStack(spacing:10){Image(systemName:"doc.text").font(.largeTitle).foregroundStyle(.secondary);Text("Select a receipt").font(.title2);Text("Choose one operation to inspect its recorded result.").foregroundStyle(.secondary)}.frame(maxWidth:.infinity,minHeight:360)}}.frame(minWidth:430)}}}
+    }.onChange(of:operations.map(\.id)){_,ids in if let id=store.selectedOperationID,!ids.contains(id){store.selectedOperationID=nil}}
+    }
+}
+
+private struct ReceiptRow:View{let operation:OperationRecord;var body:some View{let f=operation.receiptFacts;Grid(alignment:.leading,horizontalSpacing:14){GridRow{Text(operation.startedAt).font(.caption.monospaced());Text(f.instrument).fontWeight(.semibold);Text(f.timeframe);Text(operation.kind);Text(f.source);Text(operation.status).foregroundStyle(operation.status=="committed" ? .green:.orange);Text("\(operation.inserted)");Text(f.warnings)}}.accessibilityLabel("\(operation.startedAt), \(f.instrument), \(f.timeframe), \(operation.kind), \(f.source), \(operation.status), \(operation.inserted) inserted, \(f.warnings)")}}
+
+private struct ReceiptDetail:View{@EnvironmentObject var store:ConsoleStore;let operation:OperationRecord;var body:some View{let f=operation.receiptFacts;VStack(alignment:.leading,spacing:16){Text("Readable Receipt").font(.title2.bold());Facts([("Timestamp",operation.startedAt),("Instrument",f.instrument),("Timeframe",f.timeframe),("Operation type",operation.kind),("Source",f.source),("Result",operation.status),("Rows inserted","\(operation.inserted)"),("Rows unchanged","\(operation.unchanged)"),("Conflicts preserved","\(operation.conflicts)"),("Warnings",f.warnings),("Raw block",operation.rawBlockID ?? "—")]);if let detail=operation.detailJSON{DisclosureGroup("Technical Details"){Text(detail).font(.caption.monospaced()).textSelection(.enabled).frame(maxWidth:.infinity,alignment:.leading)}};Button("View Ledger Evidence"){store.auditFilter=operation.id;store.systemSection = .audit;store.section = .system}}.padding()}}
+
+private struct ReceiptFacts{let instrument:String;let timeframe:String;let source:String;let warnings:String}
+private extension OperationRecord{
+    var receiptFacts:ReceiptFacts{let warnings=((try? JSONSerialization.jsonObject(with:Data(warningsJSON.utf8))) as? [String])?.joined(separator:", ");return .init(instrument:instrument,timeframe:timeframe,source:source,warnings:(warnings?.isEmpty==false ? warnings!:"None"))}
 }

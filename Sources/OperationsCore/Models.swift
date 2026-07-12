@@ -68,6 +68,10 @@ public struct OperationRecord: Identifiable, Equatable, Sendable {
     public let unchanged: Int
     public let conflicts: Int
     public let corrected: Int
+    public let instrument: String
+    public let timeframe: String
+    public let source: String
+    public let warningsJSON: String
 }
 
 public struct AuthorityEventRecord: Identifiable, Equatable, Sendable {
@@ -141,9 +145,9 @@ public struct TruthCoverage: Codable, Equatable, Sendable {
 }
 
 public struct TruthProviderSummary: Codable, Equatable, Sendable {
-    public let provider: String
-    public let providerContract: String
-    public let providerSymbol: String
+    public let provider: String?
+    public let providerContract: String?
+    public let providerSymbol: String?
     public let confidence: String
     public let score: Int?
     public let basis: String
@@ -222,7 +226,7 @@ public struct EstateSearchMetadata: Codable, Equatable, Sendable {
     public let market: String
     public let assetClass: String
     public let exchange: String
-    public let providerFamily: String
+    public let providerFamily: String?
     enum CodingKeys: String, CodingKey {
         case canonicalSymbol = "canonical_symbol", displayName = "display_name", aliases, market
         case assetClass = "asset_class", exchange, providerFamily = "provider_family"
@@ -230,9 +234,9 @@ public struct EstateSearchMetadata: Codable, Equatable, Sendable {
 }
 
 public struct EstateProviderSummary: Codable, Equatable, Sendable {
-    public let provider: String
-    public let providerContract: String
-    public let providerSymbol: String
+    public let provider: String?
+    public let providerContract: String?
+    public let providerSymbol: String?
     public let providerFreshness: String
     public let providerConfidence: String
     public let entitlement: String
@@ -339,7 +343,7 @@ public struct MarketRegistrationProvider:Codable,Equatable,Sendable{public let p
 extension MarketRegistrationPlan: Identifiable { public var id: String { candidate } }
 public struct MarketRegistrationPlan:Codable,Equatable,Sendable{public let underlyingMarket:String;public let selectedRepresentation:String;public let canonicalRegistrationSymbol:String;public let displayName:String;public let assetClass:String;public let instrumentType:String;public let exchangeOrVenue:String?;public let timezone:String?;public let sessionAuthority:String;public let baseCurrency:String?;public let quoteCurrency:String?;public let providerMappings:[MarketRegistrationProvider];public let knownUnknowns:[String];public let registrationWarnings:[String];public let candidate:String;enum CodingKeys:String,CodingKey{case timezone,candidate;case underlyingMarket="underlying_market",selectedRepresentation="selected_representation",canonicalRegistrationSymbol="canonical_registration_symbol",displayName="display_name",assetClass="asset_class",instrumentType="instrument_type",exchangeOrVenue="exchange_or_venue",sessionAuthority="session_authority",baseCurrency="base_currency",quoteCurrency="quote_currency",providerMappings="provider_mappings",knownUnknowns="known_unknowns",registrationWarnings="registration_warnings"}}
 public struct MarketProviderDiscovery: Codable, Equatable, Sendable, Identifiable {
-    public var id:String{"\(representationSymbol):\(provider)"};public let representationSymbol:String;public let provider:String;public let availability:String;public let supportedTimeframes:[String];public let entitlement:String;public let confidence:Int?;public let knownSymbol:String?;public let registrationStatus:String
+    public var id:String{"\(representationSymbol):\(provider ?? "unmapped")"};public let representationSymbol:String;public let provider:String?;public let availability:String;public let supportedTimeframes:[String];public let entitlement:String;public let confidence:Int?;public let knownSymbol:String?;public let registrationStatus:String
     enum CodingKeys:String,CodingKey{case provider,availability,entitlement,confidence;case representationSymbol="representation_symbol",supportedTimeframes="supported_timeframes",knownSymbol="known_symbol",registrationStatus="registration_status"}
 }
 public struct MarketRecommendation:Codable,Equatable,Sendable{public let representationType:String;public let symbol:String;public let displayName:String;public let reason:String;public let alternatives:[String];enum CodingKeys:String,CodingKey{case symbol,reason,alternatives;case representationType="representation_type",displayName="display_name"}}

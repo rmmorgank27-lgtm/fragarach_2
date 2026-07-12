@@ -55,6 +55,7 @@ class AcquisitionResult:
     provider_symbol: str
     from_date: str
     through_date: str
+    actual_range: str
     request_target: str
     response_count: int
     response_checksums: tuple[str, ...]
@@ -79,6 +80,7 @@ class AcquisitionResult:
     validation_outside_expected: int
     validation_result_checksum: str
     read_only_verification: bool
+    warnings: tuple[str, ...]
 
     def as_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -214,6 +216,7 @@ def acquire_twelve_data(
         provider_symbol=provider_symbol,
         from_date=from_date,
         through_date=through_date,
+        actual_range=(f"{datetime.fromtimestamp(batch.bars[0].timestamp,UTC).date().isoformat()} → {datetime.fromtimestamp(batch.bars[-1].timestamp,UTC).date().isoformat()}" if batch.bars else "No returned bars"),
         request_target=request.target,
         response_count=1,
         response_checksums=(checksum,),
@@ -238,6 +241,7 @@ def acquire_twelve_data(
         validation_outside_expected=validation_data["outside_expected_session_count"],
         validation_result_checksum=validation_data["result_checksum"],
         read_only_verification=verified,
+        warnings=(),
     )
 
 def normalized_asset_class(database_path,asset,timeframe):

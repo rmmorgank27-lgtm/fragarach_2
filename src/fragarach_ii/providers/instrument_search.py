@@ -51,7 +51,7 @@ def candidate_from_dict(value: dict[str,object]) -> RegistrationCandidate:
 def _existing(database_path: str, query: str):
     normalized=query.strip().upper();connection=open_read_only(database_path)
     try:
-        row=connection.execute("""SELECT identity_json,registration_status FROM instrument_registrations r WHERE r.asset=? OR r.local_symbol=? OR upper(r.display_name)=? OR upper(r.provider_symbol)=? OR EXISTS(SELECT 1 FROM json_each(r.aliases_json) WHERE json_extract(value,'$.normalized_alias')=?) ORDER BY r.asset LIMIT 1""",(normalized,normalized,normalized,normalized,normalized)).fetchone()
+        row=connection.execute("""SELECT identity_json,registration_status FROM instrument_registrations r WHERE r.asset=? OR r.local_symbol=? OR upper(r.display_name)=? OR upper(coalesce(r.provider_symbol,''))=? OR EXISTS(SELECT 1 FROM json_each(r.aliases_json) WHERE json_extract(value,'$.normalized_alias')=?) ORDER BY r.asset LIMIT 1""",(normalized,normalized,normalized,normalized,normalized)).fetchone()
         if not row:return None
         identity=json.loads(row[0]);names=set(RegistrationCandidate.__dataclass_fields__);return candidate_from_dict({k:v for k,v in identity.items() if k in names}),row[1]
     finally:connection.close()

@@ -9,6 +9,7 @@ from .storage import open_read_only
 from .truth_engine import TruthEngineError, truth_state_for_lane
 from .fx_orientation import orientation_for
 from .retirement import retirement_state
+from .market_registry import load_registry,provider_mapping,search_registry
 
 MARKET_DISCOVERY_CONTRACT = "fragarach_ii.market_discovery.v2"
 _CURRENCIES = frozenset("AUD CAD CHF CNY EUR GBP HKD JPY NZD SGD USD ZAR".split())
@@ -66,7 +67,13 @@ _MARKETS=(
 def discover_market(database_path:str|Path,query:str)->dict[str,object]:
     raw=query.strip()
     if not raw: raise ValueError("market discovery query is required")
-    normalized=_normalize(raw); dynamic=_currency_market(normalized); definitions=(*_MARKETS,*((dynamic,) if dynamic else ()))
+    normalized=_normalize(raw);snapshot=load_registry();registry_records=search_registry(raw,snapshot);registry_definitions=[]
+    for record in registry_records:
+        legacy=next((market for market in _MARKETS if any(_normalize(rep.symbol)==_normalize(record["canonical_symbol"]) for rep in market.representations)),None)
+        definition=legacy or _registry_market(record,provider_mapping(snapshot,record["registry_id"]))
+        if definition.canonical_identity not in {d.canonical_identity for d in registry_definitions}:registry_definitions.append(definition)
+    dynamic=_currency_market(normalized);legacy_exact=any(_rank(m,normalized)[0]>=90 for m in _MARKETS)
+    definitions=(*_MARKETS,*((dynamic,) if dynamic else ())) if legacy_exact or not registry_definitions else tuple(registry_definitions)
     if normalized=="OIL":
         chosen=[(95,"Generic oil-family alias; operator selection required.",None,d) for d in definitions if d.canonical_identity in {"COMMODITY:WTI","COMMODITY:BRENT"}]
         markets=tuple(_market_result(database_path,x[3],x[1],x[2],x[0]) for x in chosen)
@@ -106,16 +113,18 @@ def _market_result(db,definition,reason,requested,confidence):
         result["available_actions"]=("VIEW_RETIREMENT",);result["acquisition_readiness"]="DISABLED_RETIRED";result["metadata"]["registration_state"]="HISTORICAL_RETIRED"
     if definition.asset_class=="FX":
         orientation=orientation_for(definition.canonical_identity.split(":",1)[1]);result["fx_orientation"]=orientation
-        if orientation["orientation_state"]!="DIRECT_PROVIDER_SUPPORTED":result["available_actions"]=("OPEN_INVERSE",) if orientation["orientation_state"]=="INVERSE_ONLY" else ();result["acquisition_readiness"]=orientation["acquisition_readiness"]
+        if orientation["orientation_state"]!="DIRECT_PROVIDER_SUPPORTED":
+            if recommendation and recommendation["registration_status"]=="NOT_REGISTERED":result["available_actions"]=("ADD_TO_FRAGARACH","OPEN_INVERSE") if orientation["orientation_state"]=="INVERSE_ONLY" else ("ADD_TO_FRAGARACH",)
+            result["acquisition_readiness"]="READY_FOR_UNMAPPED_REGISTRATION" if recommendation and recommendation.get("registration_plan") else orientation["acquisition_readiness"]
     return result
 
 def _registration_plan(m,r):
-    if not r.provider_symbol:return None
-    calendar="FX_D1_V1" if r.representation_type=="FX_SPOT_PAIR" else "CRYPTO_D1_V1" if r.representation_type=="CRYPTO_SPOT_PAIR" else "METALS_D1_V1" if m.asset_class=="METALS" else "US_EQUITIES_D1_V1" if m.asset_class=="US_EQUITIES" else "INDICES_D1_V1"
+    calendar="FX_D1_V1" if r.representation_type=="FX_SPOT_PAIR" else "CRYPTO_D1_V1" if r.representation_type=="CRYPTO_SPOT_PAIR" else "METALS_D1_V1" if m.asset_class=="METALS" else "REGISTRY_D1_V1"
     asset=re.sub(r"[^A-Z0-9._-]","",r.symbol.upper())
-    candidate={"asset":asset,"timeframe":"D1","instrument_family":asset,"local_symbol":asset,"display_name":r.display_name,"instrument_type":r.provider_instrument_type.upper().replace(" ","_") if r.provider_instrument_type else r.representation_type,"asset_class":m.asset_class,"representation_type":r.representation_type,"trading_currency":r.currency or "USD","exchange_name":r.exchange or "UNKNOWN","provider_id":r.provider,"provider_contract":"TWELVE_DATA_TIME_SERIES_D1_V1","provider_symbol":r.provider_symbol,"provider_instrument_type":r.provider_instrument_type or r.representation_type,"calendar_id":calendar,"calendar_version":1,"gap_doctrine_id":_GAP,"gap_doctrine_version":1,"aliases":[],"underlying_reference":m.canonical_identity,"contract_or_series":r.contract_or_share_class,"jurisdiction":None,"exchange_mic":None,"provider_exchange":None if r.exchange=="OTC" else r.exchange,"provider_country":None}
+    candidate={"asset":asset,"timeframe":"D1","instrument_family":asset,"local_symbol":asset,"display_name":r.display_name,"instrument_type":r.provider_instrument_type.upper().replace(" ","_") if r.provider_instrument_type else r.representation_type,"asset_class":m.asset_class,"representation_type":r.representation_type,"trading_currency":r.currency or "USD","exchange_name":r.exchange or "UNKNOWN","provider_id":r.provider,"provider_contract":"TWELVE_DATA_TIME_SERIES_D1_V1" if r.provider else None,"provider_symbol":r.provider_symbol,"provider_instrument_type":r.provider_instrument_type if r.provider else None,"calendar_id":calendar,"calendar_version":1,"gap_doctrine_id":_GAP,"gap_doctrine_version":1,"aliases":[],"underlying_reference":m.canonical_identity,"contract_or_series":r.contract_or_share_class,"jurisdiction":None,"exchange_mic":None,"provider_exchange":None if not r.provider or r.exchange=="OTC" else r.exchange,"provider_country":None}
     payload=base64.urlsafe_b64encode(json.dumps(candidate,sort_keys=True,separators=(",",":")).encode()).decode()
-    return {"underlying_market":m.underlying_market,"selected_representation":r.symbol,"canonical_registration_symbol":asset,"display_name":r.display_name,"asset_class":m.asset_class,"instrument_type":candidate["instrument_type"],"exchange_or_venue":r.exchange,"timezone":m.timezone,"session_authority":calendar,"base_currency":asset[:3] if r.representation_type in ("FX_SPOT_PAIR","CRYPTO_SPOT_PAIR","SPOT") and len(asset)>=6 else None,"quote_currency":r.currency,"provider_mappings":({"provider":r.provider,"symbol":r.provider_symbol,"state":"KNOWN_MAPPING"},),"known_unknowns":(),"registration_warnings":tuple(filter(None,(_warning(r),))),"candidate":payload}
+    mappings=({"provider":r.provider,"symbol":r.provider_symbol,"state":"KNOWN_MAPPING"},) if r.provider_symbol else ()
+    return {"underlying_market":m.underlying_market,"selected_representation":r.symbol,"canonical_registration_symbol":asset,"display_name":r.display_name,"asset_class":m.asset_class,"instrument_type":candidate["instrument_type"],"exchange_or_venue":r.exchange,"timezone":m.timezone,"session_authority":calendar,"base_currency":asset[:3] if r.representation_type in ("FX_SPOT_PAIR","CRYPTO_SPOT_PAIR","SPOT") and len(asset)>=6 else None,"quote_currency":r.currency,"provider_mappings":mappings,"known_unknowns":(() if r.provider_symbol else ("Provider mapping required",)),"registration_warnings":tuple(filter(None,(_warning(r),))),"candidate":payload}
 
 def _timeframe_lanes(r,m,rows,retired=None):
     orientation=orientation_for(m.canonical_identity.split(":",1)[1]) if m.asset_class=="FX" else None
@@ -131,16 +140,23 @@ def _timeframe_lanes(r,m,rows,retired=None):
         if timeframe=="D1": capability="SUPPORTED" if mapped else "MAPPING_REQUIRED"; reason="Approved D1 provider contract and calendar authority." if mapped else "Provider mapping required."
         elif m.asset_class in {"FX","CRYPTO"} and mapped: capability="SUPPORTED";reason=f"Approved TWELVE_DATA_TIME_SERIES_{timeframe}_V1 provider contract; registration schema remains D1-only."
         else: capability="CAPABILITY_UNKNOWN";reason="No approved representation-specific intraday calendar assignment is registered."
-        registration="EXISTING" if existing else "MISSING" if timeframe=="D1" and capability=="SUPPORTED" else "IMPLEMENTATION_INCOMPATIBILITY" if capability=="SUPPORTED" else "MISSING"
+        registration="EXISTING" if existing else "MISSING" if timeframe=="D1" else "IMPLEMENTATION_INCOMPATIBILITY" if capability=="SUPPORTED" else "MISSING"
         acquisition="NOT_YET_ACQUIRED" if existing else "REGISTRATION_REQUIRED" if registration=="MISSING" and capability=="SUPPORTED" else "CAPABILITY_UNKNOWN" if capability=="CAPABILITY_UNKNOWN" else "MAPPING_REQUIRED" if capability=="MAPPING_REQUIRED" else "IMPLEMENTATION_INCOMPATIBILITY"
-        lanes.append({"timeframe":timeframe,"registration_state":registration,"provider_capability":capability,"provider_mapping":"KNOWN_MAPPING" if mapped else "MAPPING_REQUIRED","authority_state":"D1_REGISTRATION_AUTHORITY" if timeframe=="D1" else "IMPLEMENTATION_NARROWER_THAN_RATIFIED_AUTHORITY" if capability=="SUPPORTED" else "AUTHORITY_PRESENT_CAPABILITY_UNKNOWN","acquisition_readiness":acquisition,"reason":reason,"selectable":timeframe=="D1" and registration=="MISSING" and capability=="SUPPORTED"})
+        lanes.append({"timeframe":timeframe,"registration_state":registration,"provider_capability":capability,"provider_mapping":"KNOWN_MAPPING" if mapped else "MAPPING_REQUIRED","authority_state":"D1_REGISTRATION_AUTHORITY" if timeframe=="D1" else "IMPLEMENTATION_NARROWER_THAN_RATIFIED_AUTHORITY" if capability=="SUPPORTED" else "AUTHORITY_PRESENT_CAPABILITY_UNKNOWN","acquisition_readiness":acquisition,"reason":reason,"selectable":timeframe=="D1" and registration=="MISSING"})
     return tuple(lanes)
 
 def _warning(r):
     if r.representation_type=="FUTURES":return "Futures family recognised. Contract selection or continuous-series policy required."
-    if not r.provider_symbol:return "Provider mapping and entitlement remain unresolved; registration is unavailable."
+    if not r.provider_symbol:return "Provider mapping required; canonical registration and file import remain available."
     return "Provider entitlement is unknown and must be checked before acquisition."
-def _provider_mapping(r,registration):return {"representation_symbol":r.symbol,"provider":r.provider or "UNRESOLVED","availability":"KNOWN_MAPPING" if r.provider_symbol else "DISCOVERY_REQUIRED","mapping_state":"KNOWN_MAPPING" if r.provider_symbol else "DISCOVERY_REQUIRED","supported_timeframes":("D1",) if r.provider_symbol else (),"entitlement":"NOT_MEASURED","readiness":"PARTIALLY_READY" if r.provider_symbol else "DISCOVERY_REQUIRED","confidence":100 if r.provider_symbol else None,"known_symbol":r.provider_symbol,"evidence_source":"Deterministic Fragarach catalogue" if r.provider_symbol else "None","registration_status":registration[1] if registration else "NOT_REGISTERED"}
+def _provider_mapping(r,registration):return {"representation_symbol":r.symbol,"provider":r.provider,"availability":"KNOWN_MAPPING" if r.provider_symbol else "MAPPING_REQUIRED","mapping_state":"KNOWN_MAPPING" if r.provider_symbol else "MAPPING_REQUIRED","supported_timeframes":("D1",) if r.provider_symbol else (),"entitlement":"NOT_MEASURED","readiness":"PARTIALLY_READY" if r.provider_symbol else "MAPPING_REQUIRED","confidence":100 if r.provider_symbol else None,"known_symbol":r.provider_symbol,"evidence_source":"Reviewed registry mapping" if r.provider_symbol else None,"registration_status":registration[1] if registration else "NOT_REGISTERED"}
+
+def _registry_market(record,mapping):
+    provider=mapping.get("provider") if mapping else None;provider_symbol=mapping.get("provider_symbol") if mapping else None;provider_type=(mapping.get("provider_instrument_type") or ("Physical Currency" if record["asset_class"]=="FX" else record["instrument_type"])) if mapping else None
+    rep=R(record["representation_type"],record["canonical_symbol"],record["display_name"],*record["aliases"],exchange=record["exchange_or_venue"],currency=record["currency"],detail=record["share_class_or_contract_family"],provider=provider,provider_symbol=provider_symbol,provider_type=provider_type)
+    identity=f"FX:{re.sub(r'[^A-Z]','',record['canonical_symbol'])}" if record["asset_class"]=="FX" else f"REGISTRY:{record['registry_id']}"
+    market_type="FOREIGN_EXCHANGE" if record["asset_class"]=="FX" else record["instrument_type"]
+    return M(record["underlying_market"],identity,market_type,record["asset_class"],f"Canonical registry identity from {record['source_name']}.",tuple(record["aliases"]),(rep,),record["canonical_symbol"],record["timezone"] or "UTC")
 def _registrations(db):
     c=open_read_only(db)
     try:return c.execute("SELECT identity_json,registration_status,registration_contract_version FROM instrument_registrations ORDER BY asset,timeframe").fetchall()

@@ -36,8 +36,8 @@ class Alias:
 class RegistrationCandidate:
     asset: str; timeframe: str; instrument_family: str; local_symbol: str
     display_name: str; instrument_type: str; asset_class: str; representation_type: str
-    trading_currency: str; exchange_name: str; provider_id: str; provider_contract: str
-    provider_symbol: str; provider_instrument_type: str; calendar_id: str
+    trading_currency: str; exchange_name: str; provider_id: str | None; provider_contract: str | None
+    provider_symbol: str | None; provider_instrument_type: str | None; calendar_id: str
     calendar_version: int; gap_doctrine_id: str; gap_doctrine_version: int
     aliases: tuple[Alias, ...] = (); underlying_reference: str | None = None
     contract_or_series: str | None = None; jurisdiction: str | None = None
@@ -48,7 +48,7 @@ class RegistrationCandidate:
 @dataclass(frozen=True, slots=True)
 class RegistrationResult:
     operation_contract: str; outcome: str; asset: str; timeframe: str
-    identity_checksum_sha256: str; provider_identity_key: str; registration_status: str
+    identity_checksum_sha256: str; provider_identity_key: str | None; registration_status: str
     def as_json(self) -> str: return json.dumps(asdict(self), sort_keys=True, separators=(",", ":"))
 
 
@@ -56,8 +56,9 @@ def canonical_registration(candidate: RegistrationCandidate) -> tuple[str, str, 
     _validate(candidate)
     aliases = sorted((asdict(a) for a in candidate.aliases), key=lambda a: (a["normalized_alias"], a["alias_type"]))
     aliases_json = json.dumps(aliases, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    mapped=candidate.provider_id is not None
     provider_key = json.dumps([candidate.provider_id, candidate.provider_symbol, candidate.provider_exchange,
-        candidate.provider_instrument_type, candidate.trading_currency, candidate.provider_country], separators=(",", ":"), ensure_ascii=False)
+        candidate.provider_instrument_type, candidate.trading_currency, candidate.provider_country], separators=(",", ":"), ensure_ascii=False) if mapped else None
     identity = {
         "aliases": aliases, "asset": candidate.asset, "asset_class": candidate.asset_class,
         "calendar_id": candidate.calendar_id, "calendar_version": candidate.calendar_version,
@@ -69,8 +70,8 @@ def canonical_registration(candidate: RegistrationCandidate) -> tuple[str, str, 
         "provider_contract": candidate.provider_contract, "provider_country": candidate.provider_country,
         "provider_exchange": candidate.provider_exchange, "provider_id": candidate.provider_id,
         "provider_identity_key": provider_key, "provider_instrument_type": candidate.provider_instrument_type,
-        "provider_symbol": candidate.provider_symbol, "registration_contract": "INSTRUMENT_REGISTRATION_V1",
-        "registration_contract_version": 1, "representation_type": candidate.representation_type,
+        "provider_symbol": candidate.provider_symbol, "registration_contract": "INSTRUMENT_REGISTRATION_V1" if mapped else "INSTRUMENT_REGISTRATION_V2",
+        "registration_contract_version": 1 if mapped else 2, "representation_type": candidate.representation_type,
         "semantic_equivalence": "DISTINCT_INSTRUMENT", "timeframe": candidate.timeframe,
         "trading_currency": candidate.trading_currency, "underlying_reference": candidate.underlying_reference,
     }
@@ -80,12 +81,13 @@ def canonical_registration(candidate: RegistrationCandidate) -> tuple[str, str, 
 
 def register_instrument(database_path: str | Path, candidate: RegistrationCandidate, *, registered_at_utc: str) -> RegistrationResult:
     aliases_json, provider_key, identity_json, checksum = canonical_registration(candidate)
-    values = (candidate.asset,candidate.timeframe,"INSTRUMENT_REGISTRATION_V1",1,candidate.instrument_family,candidate.local_symbol,
+    mapped=candidate.provider_id is not None; contract="INSTRUMENT_REGISTRATION_V1" if mapped else "INSTRUMENT_REGISTRATION_V2";version=1 if mapped else 2;status="REGISTERED_NO_EVIDENCE" if mapped else "REGISTERED_UNMAPPED"
+    values = (candidate.asset,candidate.timeframe,contract,version,candidate.instrument_family,candidate.local_symbol,
         aliases_json,candidate.display_name,candidate.instrument_type,candidate.asset_class,candidate.representation_type,
         candidate.underlying_reference,candidate.contract_or_series,"DISTINCT_INSTRUMENT",candidate.jurisdiction,candidate.trading_currency,
         candidate.exchange_name,candidate.exchange_mic,candidate.provider_id,candidate.provider_contract,candidate.provider_symbol,
         candidate.provider_exchange,candidate.provider_country,candidate.provider_instrument_type,provider_key,candidate.calendar_id,
-        candidate.calendar_version,candidate.gap_doctrine_id,candidate.gap_doctrine_version,"REGISTERED_NO_EVIDENCE",registered_at_utc,None,identity_json,checksum)
+        candidate.calendar_version,candidate.gap_doctrine_id,candidate.gap_doctrine_version,status,registered_at_utc,None,identity_json,checksum)
     with registered_writer(database_path) as connection:
         apply_migrations(connection)
         with transaction(connection):
@@ -96,7 +98,7 @@ def register_instrument(database_path: str | Path, candidate: RegistrationCandid
             else:
                 try: connection.execute("INSERT INTO instrument_registrations VALUES ("+",".join("?" for _ in values)+")",values)
                 except sqlite3.IntegrityError as error: raise RegistrationError("PROVIDER_OR_NAME_COLLISION",str(error)) from error
-                outcome, status = "INSERTED", "REGISTERED_NO_EVIDENCE"
+                outcome = "INSERTED"
             connection.execute("""INSERT OR IGNORE INTO evidence_lanes
               (asset,timeframe,registration_timeframe,lane_contract,lane_contract_version,created_at_utc)
               VALUES (?, 'D1', 'D1', 'EVIDENCE_LANE_V1', 1, ?)""",(candidate.asset,registered_at_utc))
@@ -122,9 +124,14 @@ def _validate(c: RegistrationCandidate) -> None:
         value=getattr(c,name)
         if not _CODE.fullmatch(value): raise RegistrationError("INVALID_CODE",name)
     if c.timeframe!="D1": raise RegistrationError("UNSUPPORTED_TIMEFRAME",c.timeframe)
-    for name in ("display_name","instrument_type","asset_class","exchange_name","provider_id","provider_contract","provider_symbol","provider_instrument_type","calendar_id","gap_doctrine_id"):
+    for name in ("display_name","instrument_type","asset_class","exchange_name","calendar_id","gap_doctrine_id"):
         value=getattr(c,name)
         if not value or value != value.strip(): raise RegistrationError("INVALID_FIELD",name)
+    provider_values=(c.provider_id,c.provider_contract,c.provider_symbol,c.provider_instrument_type)
+    if any(v is None for v in provider_values) and not all(v is None for v in provider_values):raise RegistrationError("INVALID_PROVIDER_MAPPING","mapping must be complete or absent")
+    if all(v is not None for v in provider_values):
+        for value in provider_values:
+            if not value or value != value.strip():raise RegistrationError("INVALID_PROVIDER_MAPPING","blank provider field")
     if c.representation_type not in _REPRESENTATIONS or (c.representation_type=="FUTURES" and not c.contract_or_series): raise RegistrationError("INVALID_REPRESENTATION",c.representation_type)
     if not _CURRENCY.fullmatch(c.trading_currency): raise RegistrationError("INVALID_CURRENCY",c.trading_currency)
     if c.exchange_mic is not None and not _MIC.fullmatch(c.exchange_mic): raise RegistrationError("INVALID_MIC",c.exchange_mic)

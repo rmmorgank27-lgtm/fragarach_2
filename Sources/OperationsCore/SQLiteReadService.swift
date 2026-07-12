@@ -23,7 +23,7 @@ public final class SQLiteReadService: @unchecked Sendable {
         let tables = Set(try strings(db, "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'"))
         guard tables == foundationTables else { throw AuthorityReadError.incompatibleDatabase("exact ten-table identity failed") }
         let migrations = try int(db, "SELECT count(*) FROM schema_migrations")
-        guard migrations == 6 else { throw AuthorityReadError.incompatibleDatabase("expected six recognized migrations") }
+        guard (6...7).contains(migrations) else { throw AuthorityReadError.incompatibleDatabase("expected six or seven recognized migrations") }
         let registrations = try queryRegistrations(db)
         let lanes = try queryLanes(db)
         let authorityEvents = try queryAuthorityEvents(db)
@@ -34,7 +34,7 @@ public final class SQLiteReadService: @unchecked Sendable {
     private func queryRegistrations(_ db: OpaquePointer) throws -> [InstrumentRegistrationRecord] {
         let sql = """
         SELECT r.asset,r.timeframe,r.display_name,r.asset_class,r.representation_type,
-               r.provider_id,r.provider_contract,r.provider_symbol,r.registration_status,
+               coalesce(r.provider_id,''),coalesce(r.provider_contract,''),coalesce(r.provider_symbol,''),r.registration_status,
                EXISTS(SELECT 1 FROM authority_events e WHERE e.event_kind='LANE_SUPERSEDED'
                  AND json_extract(e.canonical_payload,'$.body.asset')=r.asset
                  AND json_extract(e.canonical_payload,'$.body.timeframe')=r.timeframe)
@@ -92,14 +92,17 @@ public final class SQLiteReadService: @unchecked Sendable {
                sum(CASE WHEN p.merge_action='INSERT' THEN 1 ELSE 0 END),
                sum(CASE WHEN p.merge_action='UNCHANGED' THEN 1 ELSE 0 END),
                sum(CASE WHEN p.merge_action='CONFLICT_PRESERVED' THEN 1 ELSE 0 END),
-               sum(CASE WHEN p.merge_action='CORRECTED' THEN 1 ELSE 0 END)
+               sum(CASE WHEN p.merge_action='CORRECTED' THEN 1 ELSE 0 END),
+               coalesce(min(p.symbol),'—'),coalesce(min(p.timeframe),'—'),
+               coalesce(json_extract(r.detail,'$.provider'),json_extract(r.detail,'$.source_name'),upper(r.kind)),
+               coalesce(json_extract(r.detail,'$.warnings'),'[]')
         FROM ingest_runs r LEFT JOIN provenance p ON p.ingest_run_id=r.ingest_run_id
         GROUP BY r.ingest_run_id ORDER BY r.started_at_utc DESC LIMIT ?
         """
         var statement: OpaquePointer?; try prepare(db, sql, &statement); sqlite3_bind_int(statement,1,Int32(limit)); defer { sqlite3_finalize(statement) }
         var result: [OperationRecord] = []
         while sqlite3_step(statement) == SQLITE_ROW {
-            result.append(OperationRecord(id:text(statement,0),kind:text(statement,1),status:text(statement,2),startedAt:text(statement,3),finishedAt:optionalText(statement,4),rawBlockID:optionalText(statement,5),detailJSON:optionalText(statement,6),provenanceTotal:Int(sqlite3_column_int64(statement,7)),inserted:Int(sqlite3_column_int64(statement,8)),unchanged:Int(sqlite3_column_int64(statement,9)),conflicts:Int(sqlite3_column_int64(statement,10)),corrected:Int(sqlite3_column_int64(statement,11))))
+            result.append(OperationRecord(id:text(statement,0),kind:text(statement,1),status:text(statement,2),startedAt:text(statement,3),finishedAt:optionalText(statement,4),rawBlockID:optionalText(statement,5),detailJSON:optionalText(statement,6),provenanceTotal:Int(sqlite3_column_int64(statement,7)),inserted:Int(sqlite3_column_int64(statement,8)),unchanged:Int(sqlite3_column_int64(statement,9)),conflicts:Int(sqlite3_column_int64(statement,10)),corrected:Int(sqlite3_column_int64(statement,11)),instrument:text(statement,12),timeframe:text(statement,13),source:text(statement,14),warningsJSON:text(statement,15)))
         }
         return result
     }

@@ -184,8 +184,10 @@ def _confirm_registration_evidence(connection: sqlite3.Connection, symbol: str, 
     row=connection.execute("SELECT registration_status FROM instrument_registrations WHERE asset=? AND timeframe=?",(symbol,timeframe)).fetchone()
     if row == ("REGISTERED_NO_EVIDENCE",):
         connection.execute("UPDATE instrument_registrations SET registration_status='REGISTERED_WITH_EVIDENCE',evidence_confirmed_at_utc=? WHERE asset=? AND timeframe=?",(observed_at,symbol,timeframe))
+    elif row == ("REGISTERED_UNMAPPED",):
+        connection.execute("UPDATE instrument_registrations SET evidence_confirmed_at_utc=? WHERE asset=? AND timeframe=?",(observed_at,symbol,timeframe))
     mismatch=connection.execute("""SELECT 1 FROM instrument_registrations r WHERE r.asset=? AND r.timeframe=? AND
-      ((r.registration_status='REGISTERED_WITH_EVIDENCE') <> EXISTS(SELECT 1 FROM bars b WHERE b.asset=r.asset AND b.timeframe=r.timeframe))""",(symbol,timeframe)).fetchone()
+      ((r.registration_status IN ('REGISTERED_WITH_EVIDENCE','REGISTERED_UNMAPPED') AND r.evidence_confirmed_at_utc IS NOT NULL) <> EXISTS(SELECT 1 FROM bars b WHERE b.asset=r.asset AND b.timeframe=r.timeframe))""",(symbol,timeframe)).fetchone()
     if mismatch: raise RuntimeError("registration evidence status invariant failed")
 
 

@@ -880,3 +880,127 @@ MIGRATION_6_STATEMENTS = (
 def migration_6_checksum() -> str:
     source = "\n-- statement --\n".join(statement.strip() for statement in MIGRATION_6_STATEMENTS)
     return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
+MIGRATION_7_NAME = "SPEC-017 provider-independent registration contract amendment"
+
+MIGRATION_7_STATEMENTS = (
+    """
+    CREATE TABLE instrument_registrations_v2 (
+        asset TEXT NOT NULL, timeframe TEXT NOT NULL,
+        registration_contract TEXT NOT NULL, registration_contract_version INTEGER NOT NULL,
+        instrument_family TEXT NOT NULL, local_symbol TEXT NOT NULL, aliases_json TEXT NOT NULL,
+        display_name TEXT NOT NULL, instrument_type TEXT NOT NULL, asset_class TEXT NOT NULL,
+        representation_type TEXT NOT NULL, underlying_reference TEXT, contract_or_series TEXT,
+        semantic_equivalence TEXT NOT NULL, jurisdiction TEXT, trading_currency TEXT NOT NULL,
+        exchange_name TEXT NOT NULL, exchange_mic TEXT,
+        provider_id TEXT, provider_contract TEXT, provider_symbol TEXT,
+        provider_exchange TEXT, provider_country TEXT, provider_instrument_type TEXT,
+        provider_identity_key TEXT,
+        calendar_id TEXT NOT NULL, calendar_version INTEGER NOT NULL,
+        gap_doctrine_id TEXT NOT NULL, gap_doctrine_version INTEGER NOT NULL,
+        registration_status TEXT NOT NULL, registered_at_utc TEXT NOT NULL,
+        evidence_confirmed_at_utc TEXT, identity_json TEXT NOT NULL,
+        identity_checksum_sha256 TEXT NOT NULL,
+        PRIMARY KEY (asset,timeframe),
+        UNIQUE (provider_identity_key,timeframe), UNIQUE (identity_checksum_sha256),
+        CHECK (length(asset)>0 AND asset=trim(asset) AND asset=upper(asset) AND asset NOT GLOB '*[^A-Z0-9._-]*'),
+        CHECK (timeframe='D1'),
+        CHECK ((registration_contract='INSTRUMENT_REGISTRATION_V1' AND registration_contract_version=1)
+            OR (registration_contract='INSTRUMENT_REGISTRATION_V2' AND registration_contract_version=2)),
+        CHECK (length(instrument_family)>0 AND instrument_family=trim(instrument_family) AND instrument_family=upper(instrument_family) AND instrument_family NOT GLOB '*[^A-Z0-9._-]*'),
+        CHECK (length(local_symbol)>0 AND local_symbol=trim(local_symbol) AND local_symbol=upper(local_symbol) AND local_symbol NOT GLOB '*[^A-Z0-9._-]*'),
+        CHECK (json_valid(aliases_json) AND json_type(aliases_json)='array'),
+        CHECK (length(display_name)>0 AND display_name=trim(display_name)),
+        CHECK (length(instrument_type)>0 AND length(asset_class)>0),
+        CHECK (representation_type IN ('CFD','INDEX','ETF','FUTURES','SPOT','FX_SPOT_PAIR','CRYPTO_SPOT_PAIR','COMMON_STOCK')),
+        CHECK (semantic_equivalence='DISTINCT_INSTRUMENT'),
+        CHECK (length(trading_currency)>0 AND trading_currency=trim(trading_currency) AND trading_currency=upper(trading_currency) AND trading_currency NOT GLOB '*[^A-Z0-9]*'),
+        CHECK (length(exchange_name)>0 AND exchange_name=trim(exchange_name)),
+        CHECK (exchange_mic IS NULL OR (length(exchange_mic)=4 AND exchange_mic=upper(exchange_mic) AND exchange_mic NOT GLOB '*[^A-Z0-9]*')),
+        CHECK ((registration_status='REGISTERED_UNMAPPED' AND registration_contract='INSTRUMENT_REGISTRATION_V2'
+                AND provider_id IS NULL AND provider_contract IS NULL AND provider_symbol IS NULL
+                AND provider_instrument_type IS NULL AND provider_identity_key IS NULL)
+            OR (registration_status IN ('REGISTERED_NO_EVIDENCE','REGISTERED_WITH_EVIDENCE')
+                AND provider_id IS NOT NULL AND length(provider_id)>0 AND provider_contract IS NOT NULL AND length(provider_contract)>0
+                AND provider_symbol IS NOT NULL AND length(provider_symbol)>0 AND provider_instrument_type IS NOT NULL
+                AND length(provider_instrument_type)>0 AND provider_identity_key IS NOT NULL AND length(provider_identity_key)>0)),
+        CHECK (length(calendar_id)>0 AND calendar_version>0 AND length(gap_doctrine_id)>0 AND gap_doctrine_version>0),
+        CHECK (registered_at_utc=trim(registered_at_utc) AND julianday(registered_at_utc) IS NOT NULL AND substr(registered_at_utc,-6)='+00:00'),
+        CHECK ((registration_status='REGISTERED_NO_EVIDENCE' AND evidence_confirmed_at_utc IS NULL)
+            OR (registration_status IN ('REGISTERED_WITH_EVIDENCE','REGISTERED_UNMAPPED')
+                AND (evidence_confirmed_at_utc IS NULL OR (julianday(evidence_confirmed_at_utc) IS NOT NULL AND substr(evidence_confirmed_at_utc,-6)='+00:00')))),
+        CHECK (json_valid(identity_json)),
+        CHECK (length(identity_checksum_sha256)=64 AND identity_checksum_sha256 NOT GLOB '*[^0-9a-f]*'),
+        CHECK (representation_type<>'FUTURES' OR contract_or_series IS NOT NULL),
+        CHECK (instr(asset,'.')=0 OR asset=instrument_family||'.'||local_symbol)
+    ) STRICT, WITHOUT ROWID
+    """,
+    "INSERT INTO instrument_registrations_v2 SELECT * FROM instrument_registrations",
+    """
+    CREATE TABLE evidence_lanes_v2 (
+        asset TEXT NOT NULL,timeframe TEXT NOT NULL,registration_timeframe TEXT NOT NULL,
+        lane_contract TEXT NOT NULL,lane_contract_version INTEGER NOT NULL,created_at_utc TEXT NOT NULL,
+        PRIMARY KEY (asset,timeframe),
+        FOREIGN KEY (asset,registration_timeframe) REFERENCES instrument_registrations_v2(asset,timeframe) ON UPDATE RESTRICT ON DELETE RESTRICT,
+        CHECK (length(asset)>0 AND asset=trim(asset) AND asset=upper(asset)),
+        CHECK (length(timeframe)>0 AND timeframe=trim(timeframe) AND timeframe=upper(timeframe)),
+        CHECK (registration_timeframe='D1'),CHECK (lane_contract='EVIDENCE_LANE_V1' AND lane_contract_version=1),
+        CHECK (created_at_utc=trim(created_at_utc) AND julianday(created_at_utc) IS NOT NULL AND substr(created_at_utc,-6)='+00:00')
+    ) STRICT, WITHOUT ROWID
+    """,
+    "INSERT INTO evidence_lanes_v2 SELECT * FROM evidence_lanes",
+    "DROP TRIGGER evidence_lanes_no_update","DROP TRIGGER evidence_lanes_no_delete",
+    "DROP TRIGGER bars_require_evidence_lane_insert","DROP TRIGGER bars_require_evidence_lane_update",
+    "DROP TABLE evidence_lanes",
+    "DROP TRIGGER instrument_registrations_alias_insert","DROP TRIGGER instrument_registrations_no_delete","DROP TRIGGER instrument_registrations_update",
+    "DROP TABLE instrument_registrations",
+    "ALTER TABLE instrument_registrations_v2 RENAME TO instrument_registrations",
+    "ALTER TABLE evidence_lanes_v2 RENAME TO evidence_lanes",
+    """CREATE TRIGGER evidence_lanes_no_update BEFORE UPDATE ON evidence_lanes BEGIN SELECT RAISE(ABORT,'evidence lanes are immutable'); END""",
+    """CREATE TRIGGER evidence_lanes_no_delete BEFORE DELETE ON evidence_lanes BEGIN SELECT RAISE(ABORT,'evidence lanes cannot be deleted'); END""",
+    """CREATE TRIGGER bars_require_evidence_lane_insert BEFORE INSERT ON bars BEGIN SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM evidence_lanes l WHERE l.asset=NEW.asset AND l.timeframe=NEW.timeframe) THEN RAISE(ABORT,'canonical evidence requires evidence lane') END; END""",
+    """CREATE TRIGGER bars_require_evidence_lane_update BEFORE UPDATE OF asset,timeframe ON bars BEGIN SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM evidence_lanes l WHERE l.asset=NEW.asset AND l.timeframe=NEW.timeframe) THEN RAISE(ABORT,'canonical evidence requires evidence lane') END; END""",
+    """
+    CREATE TRIGGER instrument_registrations_alias_insert BEFORE INSERT ON instrument_registrations BEGIN
+      SELECT CASE WHEN EXISTS (SELECT 1 FROM json_each(NEW.aliases_json) a
+        WHERE json_type(a.value)<>'object' OR json_type(a.value,'$.alias')<>'text'
+          OR json_type(a.value,'$.normalized_alias')<>'text' OR json_extract(a.value,'$.alias_type') NOT IN ('OPERATOR_SYMBOL','COMMON_NAME','PLATFORM_SYMBOL','LEGACY_SYMBOL'))
+      THEN RAISE(ABORT,'invalid aliases') END;
+      SELECT CASE WHEN EXISTS (SELECT 1 FROM instrument_registrations r WHERE r.asset IN (NEW.asset,NEW.local_symbol)
+        OR r.local_symbol IN (NEW.asset,NEW.local_symbol)
+        OR EXISTS (SELECT 1 FROM json_each(r.aliases_json) WHERE json_extract(value,'$.normalized_alias') IN (NEW.asset,NEW.local_symbol))
+        OR EXISTS (SELECT 1 FROM json_each(NEW.aliases_json) n WHERE json_extract(n.value,'$.normalized_alias') IN (r.asset,r.local_symbol)
+          OR EXISTS (SELECT 1 FROM json_each(r.aliases_json) e WHERE json_extract(e.value,'$.normalized_alias')=json_extract(n.value,'$.normalized_alias'))))
+      THEN RAISE(ABORT,'registration naming collision') END;
+    END
+    """,
+    """CREATE TRIGGER instrument_registrations_no_delete BEFORE DELETE ON instrument_registrations BEGIN SELECT RAISE(ABORT,'instrument registrations cannot be deleted'); END""",
+    """
+    CREATE TRIGGER instrument_registrations_update BEFORE UPDATE ON instrument_registrations BEGIN
+      SELECT CASE WHEN NEW.asset IS NOT OLD.asset OR NEW.timeframe IS NOT OLD.timeframe OR NEW.registration_contract IS NOT OLD.registration_contract
+        OR NEW.registration_contract_version IS NOT OLD.registration_contract_version OR NEW.instrument_family IS NOT OLD.instrument_family
+        OR NEW.local_symbol IS NOT OLD.local_symbol OR NEW.aliases_json IS NOT OLD.aliases_json OR NEW.display_name IS NOT OLD.display_name
+        OR NEW.instrument_type IS NOT OLD.instrument_type OR NEW.asset_class IS NOT OLD.asset_class OR NEW.representation_type IS NOT OLD.representation_type
+        OR NEW.underlying_reference IS NOT OLD.underlying_reference OR NEW.contract_or_series IS NOT OLD.contract_or_series
+        OR NEW.semantic_equivalence IS NOT OLD.semantic_equivalence OR NEW.jurisdiction IS NOT OLD.jurisdiction OR NEW.trading_currency IS NOT OLD.trading_currency
+        OR NEW.exchange_name IS NOT OLD.exchange_name OR NEW.exchange_mic IS NOT OLD.exchange_mic OR NEW.provider_id IS NOT OLD.provider_id
+        OR NEW.provider_contract IS NOT OLD.provider_contract OR NEW.provider_symbol IS NOT OLD.provider_symbol OR NEW.provider_exchange IS NOT OLD.provider_exchange
+        OR NEW.provider_country IS NOT OLD.provider_country OR NEW.provider_instrument_type IS NOT OLD.provider_instrument_type
+        OR NEW.provider_identity_key IS NOT OLD.provider_identity_key OR NEW.calendar_id IS NOT OLD.calendar_id OR NEW.calendar_version IS NOT OLD.calendar_version
+        OR NEW.gap_doctrine_id IS NOT OLD.gap_doctrine_id OR NEW.gap_doctrine_version IS NOT OLD.gap_doctrine_version
+        OR NEW.registered_at_utc IS NOT OLD.registered_at_utc OR NEW.identity_json IS NOT OLD.identity_json OR NEW.identity_checksum_sha256 IS NOT OLD.identity_checksum_sha256
+      THEN RAISE(ABORT,'instrument registration identity is immutable') END;
+      SELECT CASE WHEN NOT ((OLD.registration_status='REGISTERED_NO_EVIDENCE' AND NEW.registration_status='REGISTERED_WITH_EVIDENCE'
+          AND OLD.evidence_confirmed_at_utc IS NULL AND NEW.evidence_confirmed_at_utc IS NOT NULL)
+        OR (OLD.registration_status='REGISTERED_UNMAPPED' AND NEW.registration_status='REGISTERED_UNMAPPED'
+          AND OLD.evidence_confirmed_at_utc IS NULL AND NEW.evidence_confirmed_at_utc IS NOT NULL))
+        OR NOT EXISTS(SELECT 1 FROM bars WHERE asset=OLD.asset AND timeframe=OLD.timeframe)
+      THEN RAISE(ABORT,'invalid registration status transition') END;
+    END
+    """,
+)
+
+def migration_7_checksum() -> str:
+    source="\n-- statement --\n".join(statement.strip() for statement in MIGRATION_7_STATEMENTS)
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
