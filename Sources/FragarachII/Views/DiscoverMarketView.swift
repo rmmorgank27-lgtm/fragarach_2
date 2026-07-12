@@ -21,7 +21,15 @@ struct DiscoverMarketView:View {
         else{VStack(alignment:.leading,spacing:12){Text("Select the intended underlying market").font(.headline);Picker("Market",selection:$selectedMarketID){ForEach(result.markets){Text($0.underlyingMarket).tag(Optional($0.id))}}.pickerStyle(.segmented);if let market=selectedMarket{ScrollView{MarketDetail(market:market,selection:$selectedRepresentationID,registeredSymbol:registeredSymbol,registeredStatus:registeredStatus,onAdd:{reviewPlan=$0},onOpen:openExisting,onAcquire:continueToAcquire,onOpenInverse:openInverse,onRetire:planRetirement,onHistory:openHistory)}}}}
     }
     private func discover(){discovery=nil;registeredSymbol=nil;registeredStatus=nil;error=nil;Task{await store.run(.discoverMarket(query:query));guard store.lastProcessResult?.exitCode==0,let text=store.lastProcessResult?.stdout,let data=text.data(using:.utf8),let decoded=try? JSONDecoder().decode(MarketDiscoveryResult.self,from:data)else{error=store.operationError ?? "Market discovery failed";return};discovery=decoded;selectedMarketID=decoded.markets.count==1 ? decoded.markets.first?.id:nil;let m=decoded.markets.count==1 ? decoded.markets.first:nil;selectedRepresentationID=m?.recommendation.symbol.isEmpty==false ? m?.representations.first(where:{$0.symbol==m?.recommendation.symbol})?.id:nil}}
-    private func confirm(_ plan:MarketRegistrationPlan){reviewPlan=nil;Task{await store.run(.registerInstrument(candidate:plan.candidate));guard store.lastProcessResult?.exitCode==0 else{error=store.operationError ?? "Registration failed";return};registeredSymbol=plan.canonicalRegistrationSymbol;registeredStatus=store.lastProcessResult?.JSON?["registration_status"] as? String}}
+    private func confirm(_ plan:MarketRegistrationPlan){reviewPlan=nil;Task{await store.run(.registerInstrument(candidate:plan.candidate));guard store.lastProcessResult?.exitCode==0 else{error=readableRegistrationError();return};registeredSymbol=plan.canonicalRegistrationSymbol;registeredStatus=store.lastProcessResult?.JSON?["registration_status"] as? String}}
+    private func readableRegistrationError()->String{
+        guard let payload=store.lastProcessResult?.JSON else {
+            return "Registration could not be completed. " + (store.operationError ?? "Check the configured authority database and try again.")
+        }
+        let code=(payload["code"] as? String ?? "REGISTRATION_REJECTED").replacingOccurrences(of:"_",with:" ").lowercased()
+        let detail=(payload["error"] as? String ?? "The registration was rejected.").replacingOccurrences(of:"_",with:" ").lowercased()
+        return "Registration could not be completed (" + code + "): " + detail + "."
+    }
     private func openExisting(_ symbol:String){store.selectedTruthLaneID="\(symbol):D1";store.section = .truth}
     private func continueToAcquire(_ symbol:String){store.acquisitionAsset=symbol;store.section = .dataOperations}
     private func openInverse(_ symbol:String){query=symbol;discover()}

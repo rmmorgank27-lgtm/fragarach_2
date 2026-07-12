@@ -3,10 +3,14 @@ import tempfile
 from datetime import UTC,datetime
 from pathlib import Path
 import base64,json
+from contextlib import redirect_stdout
+from io import StringIO
 from fragarach_ii.market_registry import load_registry,provider_mapping,search_registry
 from fragarach_ii.market_discovery import discover_market
+from fragarach_ii.commands.register_instrument import main as register_command
 from fragarach_ii.providers.instrument_search import candidate_from_dict
-from fragarach_ii.storage import initialize_database,open_read_only,register_instrument
+from fragarach_ii.storage import initialize_database,open_read_only,registered_writer,register_instrument
+from fragarach_ii.storage.migrations import apply_migrations
 
 APPROVED_FOREX_PAIRS = {
     "AUDUSD", "AUDCAD", "AUDNZD", "AUDJPY", "GBPAUD", "GBPUSD", "GBPJPY", "GBPNZD",
@@ -68,3 +72,25 @@ def test_forex_provider_mappings_are_known_only_where_evidenced():
         candidate=json.loads(base64.urlsafe_b64decode(representation["registration_plan"]["candidate"]))
         result=register_instrument(db,candidate_from_dict(candidate),registered_at_utc=datetime.now(UTC).isoformat())
         assert result.registration_status=="REGISTERED_UNMAPPED"
+
+def test_registration_command_migrates_v6_and_accepts_unmapped_fx():
+    with tempfile.TemporaryDirectory() as tmp:
+        db=Path(tmp)/"authority.sqlite3"
+        with registered_writer(db) as connection:apply_migrations(connection,target_version=6)
+        plan=discover_market(db,"EURUSD")["markets"][0]["representations"][0]["registration_plan"]
+        output=StringIO()
+        with redirect_stdout(output):exit_code=register_command(["--database",str(db),"--candidate",plan["candidate"],"--json"])
+        assert exit_code==0
+        assert json.loads(output.getvalue())["registration_status"]=="REGISTERED_UNMAPPED"
+        with open_read_only(db) as connection:
+            assert connection.execute("select max(version) from schema_migrations").fetchone()[0]==7
+            assert connection.execute("select provider_id,registration_status from instrument_registrations where asset='EURUSD'").fetchone()==(None,"REGISTERED_UNMAPPED")
+
+def test_registration_command_keeps_mapped_fx_registration_available():
+    with tempfile.TemporaryDirectory() as tmp:
+        db=Path(tmp)/"authority.sqlite3";initialize_database(db)
+        plan=discover_market(db,"EURAUD")["markets"][0]["representations"][0]["registration_plan"]
+        output=StringIO()
+        with redirect_stdout(output):exit_code=register_command(["--database",str(db),"--candidate",plan["candidate"],"--json"])
+        assert exit_code==0
+        assert json.loads(output.getvalue())["registration_status"]=="REGISTERED_NO_EVIDENCE"
