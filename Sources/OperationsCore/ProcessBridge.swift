@@ -13,6 +13,7 @@ public struct CLIConfiguration: Equatable, Sendable {
 public enum ArgumentBuilder {
     public static func arguments(for intent: OperationIntent, database: String) -> [String] {
         switch intent {
+        case .readEstateTruth: ["-m","fragarach_ii.commands.estate_truth","--database",database,"--json"]
         case .readTruth(let symbol,let timeframe): ["-m","fragarach_ii.commands.truth_state","--database",database,"--symbol",symbol,"--timeframe",timeframe,"--json"]
         case .searchInstrument(let query): ["-m","fragarach_ii.commands.search_instrument","--database",database,"--query",query,"--json"]
         case .registerInstrument(let candidate): ["-m","fragarach_ii.commands.register_instrument","--database",database,"--candidate",candidate,"--json"]

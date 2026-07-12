@@ -169,6 +169,105 @@ public struct TruthState: Codable, Equatable, Sendable {
     }
 }
 
+public struct EstateAggregation: Codable, Equatable, Sendable {
+    public let truthScore: String
+    public let authorityState: String
+    public let caodt: String
+    public let generatedAt: String
+    enum CodingKeys: String, CodingKey {
+        case truthScore = "truth_score", authorityState = "authority_state", caodt
+        case generatedAt = "generated_at"
+    }
+}
+
+public struct EstateSummary: Codable, Equatable, Sendable {
+    public let overallTruthScore: Int?
+    public let overallAuthorityState: String
+    public let overallCAODT: String?
+    public let totalSymbols: Int
+    public let totalLanes: Int
+    public let greenCount: Int
+    public let amberCount: Int
+    public let redCount: Int
+    public let authorityVersion: Int
+    public let generatedAt: String?
+    public let aggregation: EstateAggregation
+    enum CodingKeys: String, CodingKey {
+        case overallTruthScore = "overall_truth_score", overallAuthorityState = "overall_authority_state"
+        case overallCAODT = "overall_caodt", totalSymbols = "total_symbols", totalLanes = "total_lanes"
+        case greenCount = "green_count", amberCount = "amber_count", redCount = "red_count"
+        case authorityVersion = "authority_version", generatedAt = "generated_at", aggregation
+    }
+}
+
+public struct EstateSearchMetadata: Codable, Equatable, Sendable {
+    public let canonicalSymbol: String
+    public let displayName: String
+    public let aliases: [InstrumentAlias]
+    public let market: String
+    public let assetClass: String
+    public let exchange: String
+    public let providerFamily: String
+    enum CodingKeys: String, CodingKey {
+        case canonicalSymbol = "canonical_symbol", displayName = "display_name", aliases, market
+        case assetClass = "asset_class", exchange, providerFamily = "provider_family"
+    }
+}
+
+public struct EstateProviderSummary: Codable, Equatable, Sendable {
+    public let provider: String
+    public let providerContract: String
+    public let providerSymbol: String
+    public let providerFreshness: String
+    public let providerConfidence: String
+    public let entitlement: String
+    public let unknownValues: [String]
+    enum CodingKeys: String, CodingKey {
+        case provider, entitlement
+        case providerContract = "provider_contract", providerSymbol = "provider_symbol"
+        case providerFreshness = "provider_freshness", providerConfidence = "provider_confidence"
+        case unknownValues = "unknown_values"
+    }
+}
+
+public struct EstateGapSummary: Codable, Equatable, Sendable {
+    public let currentGapCount: Int?
+    public let recentGapCount: Int?
+    public let historicalGapCount: Int?
+    public let totalGapCount: Int?
+    public let gapClassification: String
+    public let operationalImpact: String
+    enum CodingKeys: String, CodingKey {
+        case currentGapCount = "current_gap_count", recentGapCount = "recent_gap_count"
+        case historicalGapCount = "historical_gap_count", totalGapCount = "total_gap_count"
+        case gapClassification = "gap_classification", operationalImpact = "operational_impact"
+    }
+}
+
+public struct EstateTruthLane: Codable, Equatable, Sendable, Identifiable {
+    public var id: String { "\(symbol):\(timeframe)" }
+    public let symbol: String
+    public let timeframe: String
+    public let truthState: TruthState
+    public let searchMetadata: EstateSearchMetadata
+    public let providerSummary: EstateProviderSummary
+    public let gapSummary: EstateGapSummary
+    enum CodingKeys: String, CodingKey {
+        case symbol, timeframe
+        case truthState = "truth_state", searchMetadata = "search_metadata"
+        case providerSummary = "provider_summary", gapSummary = "gap_summary"
+    }
+}
+
+public struct EstateTruthState: Codable, Equatable, Sendable {
+    public let contract: String
+    public let estateSummary: EstateSummary
+    public let truthMatrix: [EstateTruthLane]
+    enum CodingKeys: String, CodingKey {
+        case contract, estateSummary = "estate_summary", truthMatrix = "truth_matrix"
+    }
+}
+
 public enum ConsoleSection: String, CaseIterable, Identifiable, Sendable {
     case lanes = "Lanes", authority = "Authority Ledger", acquire = "Acquire", importEvidence = "Import Evidence", addInstrument = "Add Instrument", operations = "Operations"
     case integrity = "Integrity & Backup", settings = "Settings"
@@ -181,6 +280,7 @@ public enum ConsoleSection: String, CaseIterable, Identifiable, Sendable {
 public enum ConflictMode: String, CaseIterable, Sendable { case preserve, correct }
 
 public enum OperationIntent: Equatable, Sendable {
+    case readEstateTruth
     case readTruth(symbol: String, timeframe: String)
     case searchInstrument(query: String)
     case registerInstrument(candidate: String)
