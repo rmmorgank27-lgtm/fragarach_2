@@ -18,3 +18,12 @@ public enum ControlledDateParser {
 
 public struct OperationPlanIdentity:Equatable,Sendable { public let revision:UUID;public let registrationID:String?;public let timeframe:String?;public let mode:DataOperationsMode;public init(revision:UUID=UUID(),registrationID:String?,timeframe:String?,mode:DataOperationsMode){self.revision=revision;self.registrationID=registrationID;self.timeframe=timeframe;self.mode=mode} }
 public struct OwnedOperationResult:Equatable,Sendable { public let planRevision:UUID;public let result:ProcessResult;public init(planRevision:UUID,result:ProcessResult){self.planRevision=planRevision;self.result=result} }
+
+public struct ReviewedDataOperationPlan:Identifiable,Equatable,Sendable {
+    public let id:UUID;public let mode:DataOperationsMode;public let instrument:String;public let timeframe:String
+    public let filePath:String?;public let fileChecksum:String?;public let fileSelectionID:UUID?
+    public let from:String?;public let through:String?;public let conflict:ConflictMode
+    public init(id:UUID,mode:DataOperationsMode,instrument:String,timeframe:String,filePath:String?=nil,fileChecksum:String?=nil,fileSelectionID:UUID?=nil,from:String?=nil,through:String?=nil,conflict:ConflictMode){self.id=id;self.mode=mode;self.instrument=instrument;self.timeframe=timeframe;self.filePath=filePath;self.fileChecksum=fileChecksum;self.fileSelectionID=fileSelectionID;self.from=from;self.through=through;self.conflict=conflict}
+    public var intent:OperationIntent? { switch mode { case .importFile: guard let filePath else{return nil};return .importCSV(file:filePath,symbol:instrument,timeframe:timeframe,mode:conflict);case .fetch:guard let from,let through else{return nil};return .acquire(asset:instrument,from:from,through:through,mode:conflict);default:return nil } }
+    public func matches(mode:DataOperationsMode,instrument:String?,timeframe:String?,fileChecksum:String?)->Bool { self.mode==mode && self.instrument==instrument && self.timeframe==timeframe && (mode != .importFile || self.fileChecksum==fileChecksum) }
+}

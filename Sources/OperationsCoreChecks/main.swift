@@ -1,5 +1,6 @@
 import Foundation
 import OperationsCore
+import Darwin
 
 enum CheckFailure: Error { case failed(String) }
 func check(_ condition: @autoclosure () throws -> Bool, _ message: String) throws { if try !condition() { throw CheckFailure.failed(message) } }
@@ -23,6 +24,19 @@ try check(migrator.terminationStatus == 0, "migrated fixture creation failed")
 try check(FileManager.default.fileExists(atPath: authority), "migrated fixture file missing")
 var passed = 0
 @MainActor func run(_ name: String, _ body: () throws -> Void) throws { try body(); passed += 1; print("PASS \(name)") }
+func checkImportDispatch() throws {
+    let id=UUID(),fileID=UUID()
+    let plan=ReviewedDataOperationPlan(id:id,mode:.importFile,instrument:"USDJPY",timeframe:"D1",filePath:"/tmp/FX_USDJPY.csv",fileChecksum:"abc123",fileSelectionID:fileID,conflict:.preserve)
+    try check(plan.intent == .importCSV(file:"/tmp/FX_USDJPY.csv",symbol:"USDJPY",timeframe:"D1",mode:.preserve),"import dispatched outside ingest_file")
+    try check(plan.matches(mode:.importFile,instrument:"USDJPY",timeframe:"D1",fileChecksum:"abc123"),"matching import plan rejected")
+    try check(!plan.matches(mode:.fetch,instrument:"USDJPY",timeframe:"D1",fileChecksum:"abc123"),"fetch result leaked into import")
+    try check(!plan.matches(mode:.importFile,instrument:"USDJPY",timeframe:"D1",fileChecksum:"changed"),"stale file checksum accepted")
+}
+if ProcessInfo.processInfo.environment["FOCUSED_IMPORT_DISPATCH"] == "1" {
+    try run("import plans dispatch only immutable CSV ingestion and isolate results",checkImportDispatch)
+    print("OperationsCoreChecks: \(passed) focused checks passed")
+    exit(EXIT_SUCCESS)
+}
 
 try run("read-only real schema and bounded queries") {
     let url=URL(fileURLWithPath:authority), before=try Data(contentsOf:url), snapshot=try SQLiteReadService().load(path:authority,operationLimit:5)
@@ -148,5 +162,8 @@ try run("operation results are owned by one plan revision") {
     let owned=OwnedOperationResult(planRevision:first,result:result)
     try check(owned.planRevision==first && owned.planRevision != second,"result ownership")
     try check(owned.result.exitCode==1 && owned.result.JSON?["evidence_committed"] as? Bool == false,"pre-mutation failure")
+}
+try run("import plans dispatch only immutable CSV ingestion and isolate results") {
+    try checkImportDispatch()
 }
 print("OperationsCoreChecks: \(passed) checks passed")
