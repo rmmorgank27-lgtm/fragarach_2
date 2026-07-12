@@ -4,7 +4,7 @@ import Foundation
 import OperationsCore
 import SwiftUI
 
-private enum FetchIntent: String, CaseIterable { case maximum = "Maximum Available", update = "Update to Current", custom = "Custom Range" }
+private enum FetchIntent: String, CaseIterable, Hashable { case maximum = "Maximum Available", update = "Update to Current", custom = "Custom Range" }
 
 struct DataOperationsView: View {
     @EnvironmentObject private var store: ConsoleStore
@@ -52,7 +52,7 @@ struct DataOperationsView: View {
             Divider()
             ScrollView { VStack(alignment:.leading,spacing:16) {
                 WorkspaceHeader(title:"Data Operations",purpose:"Add, update, import, retire, and review evidence.")
-                Picker("Mode",selection:$store.dataOperationsMode){ForEach(DataOperationsMode.allCases){Text($0.rawValue)}}.pickerStyle(.segmented)
+                Picker("Mode",selection:$store.dataOperationsMode){ForEach(DataOperationsMode.allCases){Text($0.rawValue).tag($0)}}.pickerStyle(.segmented)
                 if store.dataOperationsMode == .history { OperationsView(filterAsset:registration?.asset) }
                 else if let r=registration {
                     header(r)
@@ -86,11 +86,11 @@ struct DataOperationsView: View {
 
     private func fetchView(_ r:InstrumentRegistrationRecord)->some View { VStack(alignment:.leading,spacing:14) {
         laneMatrix(r)
-        Picker("Intent",selection:$intent){ForEach(FetchIntent.allCases,id:\.self){Text($0.rawValue)}}.pickerStyle(.segmented)
+        Picker("Intent",selection:$intent){ForEach(FetchIntent.allCases,id:\.self){Text($0.rawValue).tag($0)}}.pickerStyle(.segmented)
         if intent == .maximum { unavailableCapability(title:"Maximum history cannot yet be proven.",reason:"Terminal-boundary proof and resume behavior are not implemented.") }
         else if intent == .update { unavailableCapability(title:"Automatic update range is unavailable.",reason:"The correction-overlap resolver is not implemented.");Facts([("Latest stored",latestText),("Latest completed D1",latestCompletedD1)]) }
         else { customRangeControls }
-        Picker("Conflict policy",selection:$conflict){ForEach(ConflictMode.allCases,id:\.self){Text($0.rawValue.capitalized)}}
+        Picker("Conflict policy",selection:$conflict){ForEach(ConflictMode.allCases,id:\.self){Text($0.rawValue.capitalized).tag($0)}}
         Text("Preserve keeps prior evidence and records the conflicting candidate without silent overwrite.").font(.caption).foregroundStyle(.secondary)
         Button("Review Data Operation"){store.clearCurrentOperationResult();reviewing=true}.buttonStyle(.borderedProminent).disabled(!customPlanValid)
         if intent == .custom,!customPlanValid { Label(customValidationMessage,systemImage:"exclamationmark.triangle").foregroundStyle(.red) }
@@ -103,7 +103,7 @@ struct DataOperationsView: View {
     private func importView(_ r:InstrumentRegistrationRecord)->some View { VStack(alignment:.leading,spacing:14) {
         laneMatrix(r);Button("Choose CSV…"){file=PanelService.chooseCSV()}
         if let file { GroupBox("Import Preview") { Facts([("File Name",file.lastPathComponent),("Byte Size","\((try? file.resourceValues(forKeys:[.fileSizeKey]).fileSize) ?? 0)"),("Checksum",checksum),("Detected Format","CSV"),("Selected Instrument",r.asset),("Selected Timeframe",r.timeframe),("Detected Row Count",rowCount(file)),("Timestamp Range","Validated by existing ingestion authority")]) } }
-        Picker("Conflict policy",selection:$conflict){ForEach(ConflictMode.allCases,id:\.self){Text($0.rawValue.capitalized)}}
+        Picker("Conflict policy",selection:$conflict){ForEach(ConflictMode.allCases,id:\.self){Text($0.rawValue.capitalized).tag($0)}}
         Button("Review Import"){reviewing=true}.buttonStyle(.borderedProminent).disabled(!canMutate || file==nil)
     } }
 
@@ -126,11 +126,11 @@ struct DataOperationsView: View {
     private func rowCount(_ url:URL)->String{guard let text=try? String(contentsOf:url,encoding:.utf8)else{return "Unknown"};return String(max(0,text.split(whereSeparator:\.isNewline).count-1))}
     private func reconcileSelection(){selection.reconcile(visibleRegistrationIDs:Set(registrations.map(\.id)))}
     private func applyNavigationContext(){guard let asset=store.acquisitionAsset else{return};store.acquisitionAsset=nil;let id=registrations.first(where:{$0.asset==asset})?.id;selection.applyNavigationContext(id,visibleRegistrationIDs:Set(registrations.map(\.id)))}
-    private func resetInstrumentContext(){intent=(lane?.barCount ?? 0)>0 ? .update:.maximum;throughDate=latestCompletedBoundary;fromDate=Calendar.current.date(byAdding:.year,value:-1,to:throughDate)!;file=nil;reviewing=false;retirementImpact=nil;retirementReceipt=nil;localError=nil;dateInterpretation=nil;conflict = .preserve;store.clearCurrentOperationResult()}
+    private func resetInstrumentContext(){intent=(lane?.barCount ?? 0)>0 ? .update:.maximum;throughDate=latestCompletedBoundary;fromDate=Calendar.current.date(byAdding:.year,value:-1,to:throughDate)!;file=nil;reviewing=false;retirementImpact=nil;localError=nil;dateInterpretation=nil;conflict = .preserve;store.clearCurrentOperationResult()}
     private func runReviewed(_ r:InstrumentRegistrationRecord){reviewing=false;store.clearCurrentOperationResult();Task{if store.dataOperationsMode == .fetch{await store.run(.acquire(asset:r.asset,from:dateRange.fromISO,through:dateRange.throughISO,mode:conflict))}else if let file{await store.run(.importCSV(file:file.path,symbol:r.asset,timeframe:r.timeframe,mode:conflict))}}}
     private func planRetirement(_ r:InstrumentRegistrationRecord){localError=nil;Task{await store.run(.retirementPlan(asset:r.asset,scope:"WHOLE_INSTRUMENT",lanes:selectedRegistrations.map(\.timeframe)));guard store.lastProcessResult?.exitCode==0,let text=store.lastProcessResult?.stdout,let impact=try? JSONDecoder().decode(RetirementImpact.self,from:Data(text.utf8))else{localError=store.operationError ?? "Retirement impact could not be loaded";return};retirementImpact=impact}}
     private func confirmRetirement(_ impact:RetirementImpact,_ reason:String,_ note:String,_ confirmation:String){retirementImpact=nil;Task{await store.run(.retireInstrument(asset:impact.canonicalInstrument,scope:impact.scope,lanes:impact.selectedLanes,reason:reason,note:note,confirmation:confirmation));guard store.lastProcessResult?.exitCode==0,let text=store.lastProcessResult?.stdout,let receipt=try? JSONDecoder().decode(RetirementReceipt.self,from:Data(text.utf8))else{localError=store.operationError ?? "Retirement failed";return};retirementReceipt=receipt}}
 }
 
-private struct RetirementOperationReview:View { let impact:RetirementImpact;let onConfirm:(RetirementImpact,String,String,String)->Void;@Environment(\.dismiss) var dismiss;@State private var reason="INCORRECT_INSTRUMENT_IDENTITY";@State private var note="";@State private var confirmation="";let reasons=["INCORRECT_INSTRUMENT_IDENTITY","INCORRECT_PAIR_ORIENTATION","INCORRECT_PROVIDER_MAPPING","WRONG_SYMBOL","DUPLICATE_REGISTRATION","ERRONEOUS_OPERATOR_REGISTRATION","INVALID_VENUE_OR_LISTING","PROVIDER_EVIDENCE_MISMATCH","OTHER_REVIEWED_REASON"];var body:some View{VStack(alignment:.leading,spacing:14){Text("Retire \(impact.canonicalInstrument)").font(.title);Text("SPEC-013 Impact Review").font(.headline);Picker("Controlled reason",selection:$reason){ForEach(reasons,id:\.self){Text($0.replacingOccurrences(of:"_",with:" ").capitalized)}};TextField("Operator note",text:$note);Facts([("Active lanes",impact.activeTimeframeLanes.joined(separator:", ")),("Evidence counts","\(impact.canonicalBars) bars · \(impact.rawEvidenceBlocks) raw blocks"),("Acquisition history","\(impact.completedAcquisitionRuns) completed runs"),("Truth state",impact.currentServingState),("Operational effects","Acquisition disabled; active serving excluded"),("Preservation guarantees","Raw evidence and audit history preserved")]);if impact.typedConfirmationRequired{Text("Type \(impact.requiredConfirmation ?? "") to confirm").fontWeight(.semibold);TextField(impact.requiredConfirmation ?? "",text:$confirmation)};HStack{Button("Cancel",role:.cancel){dismiss()};Spacer();Button("Confirm Retirement",role:.destructive){dismiss();onConfirm(impact,reason,note,confirmation)}.disabled(impact.typedConfirmationRequired && confirmation.trimmingCharacters(in:.whitespaces).uppercased() != impact.requiredConfirmation)}}.padding(24).frame(minWidth:680)}}
+private struct RetirementOperationReview:View { let impact:RetirementImpact;let onConfirm:(RetirementImpact,String,String,String)->Void;@Environment(\.dismiss) var dismiss;@State private var reason="INCORRECT_INSTRUMENT_IDENTITY";@State private var note="";@State private var confirmation="";let reasons=["INCORRECT_INSTRUMENT_IDENTITY","INCORRECT_PAIR_ORIENTATION","INCORRECT_PROVIDER_MAPPING","WRONG_SYMBOL","DUPLICATE_REGISTRATION","ERRONEOUS_OPERATOR_REGISTRATION","INVALID_VENUE_OR_LISTING","PROVIDER_EVIDENCE_MISMATCH","OTHER_REVIEWED_REASON"];var body:some View{VStack(alignment:.leading,spacing:14){Text("Retire \(impact.canonicalInstrument)").font(.title);Text("SPEC-013 Impact Review").font(.headline);Picker("Controlled reason",selection:$reason){ForEach(reasons,id:\.self){Text($0.replacingOccurrences(of:"_",with:" ").capitalized).tag($0)}};TextField("Operator note",text:$note);Facts([("Active lanes",impact.activeTimeframeLanes.joined(separator:", ")),("Evidence counts","\(impact.canonicalBars) bars · \(impact.rawEvidenceBlocks) raw blocks"),("Acquisition history","\(impact.completedAcquisitionRuns) completed runs"),("Truth state",impact.currentServingState),("Operational effects","Acquisition disabled; active serving excluded"),("Preservation guarantees","Raw evidence and audit history preserved")]);if impact.typedConfirmationRequired{Text("Type \(impact.requiredConfirmation ?? "") to confirm").fontWeight(.semibold);TextField(impact.requiredConfirmation ?? "",text:$confirmation)};HStack{Button("Cancel",role:.cancel){dismiss()};Spacer();Button("Confirm Retirement",role:.destructive){dismiss();onConfirm(impact,reason,note,confirmation)}.disabled(impact.typedConfirmationRequired && confirmation.trimmingCharacters(in:.whitespaces).uppercased() != impact.requiredConfirmation)}}.padding(24).frame(minWidth:680)}}
 private struct RetirementOperationSuccess:View { let receipt:RetirementReceipt;let done:()->Void;@Environment(\.dismiss) var dismiss;var body:some View{VStack(alignment:.leading,spacing:14){Text("\(receipt.canonicalInstrument) Retired").font(.title);Label("Acquisition disabled; evidence preserved; active serving removed",systemImage:"checkmark.circle.fill").foregroundStyle(.green);Facts([("Retirement ID",receipt.retirementID),("Reason",receipt.reason),("Authority",receipt.newAuthorityState),("Completed",receipt.completedTimestamp)]);Button("Done"){dismiss();done()}.buttonStyle(.borderedProminent)}.padding(24).frame(minWidth:620)}}

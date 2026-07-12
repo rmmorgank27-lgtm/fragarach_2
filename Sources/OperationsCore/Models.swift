@@ -291,8 +291,8 @@ public enum ConsoleSection: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-public enum DataOperationsMode: String, CaseIterable, Identifiable, Sendable { case fetch="Fetch / Update",importFile="Import File",retire="Retire",history="History";public var id:String{rawValue} }
-public enum SystemSection: String, CaseIterable, Identifiable, Sendable { case status="Status",backups="Backups",settings="Settings",audit="Audit";public var id:String{rawValue} }
+public enum DataOperationsMode: String, CaseIterable, Identifiable, Hashable, Sendable { case fetch="Fetch / Update",importFile="Import File",retire="Retire",history="History";public var id:String{rawValue} }
+public enum SystemSection: String, CaseIterable, Identifiable, Hashable, Sendable { case status="Status",backups="Backups",settings="Settings",audit="Audit";public var id:String{rawValue} }
 public enum LegacyRoute: String, Sendable { case lanes,authorityLedger,operations,integrityBackup,settings,acquire,importEvidence }
 public struct NavigationDestination:Equatable,Sendable { public let workspace:ConsoleSection;public let dataMode:DataOperationsMode?;public let systemSection:SystemSection?;public init(workspace:ConsoleSection,dataMode:DataOperationsMode?,systemSection:SystemSection?){self.workspace=workspace;self.dataMode=dataMode;self.systemSection=systemSection} }
 public enum NavigationRedirect {

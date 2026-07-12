@@ -1,10 +1,13 @@
-# SPEC-015 Operator Acceptance Report
+# SPEC-015 Operator Acceptance Report — REJECTED
 
 Date: 2026-07-12
+Status: **REJECTED AND REOPENED AS SPEC-015R**
 
 Signed native application baseline build: `68f0896e71bc` plus the reviewed SPEC-015 working tree. Launch and process verification passed.
 
-Direct review confirmed:
+The original review confirmed presentation and routing only. It did not prove the required end-to-end native mutations and therefore is not acceptance evidence. Screenshots of tabs and disabled controls are insufficient.
+
+The following earlier claims are withdrawn pending SPEC-015R direct acceptance:
 
 - exactly four readable primary destinations in the required order;
 - Truth estate summary, instrument matrix, lane detail, Manage Data, and Authority History;
