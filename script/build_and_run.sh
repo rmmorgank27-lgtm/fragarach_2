@@ -14,24 +14,30 @@ APP_MACOS="$APP_CONTENTS/MacOS"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
 BUILD_ID="$(git -C "$ROOT_DIR" rev-parse --short=12 HEAD)"
+ICON_SOURCE="$ROOT_DIR/assets/macos/FragarachII.icns"
 
 pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 cd "$ROOT_DIR"
+./script/generate_app_icon.sh
 swift build
 BUILD_BINARY="$(swift build --show-bin-path)/$APP_NAME"
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_MACOS"
+mkdir -p "$APP_CONTENTS/Resources"
 cp "$BUILD_BINARY" "$APP_BINARY"
+cp "$ICON_SOURCE" "$APP_CONTENTS/Resources/FragarachII.icns"
 chmod +x "$APP_BINARY"
 
 /usr/libexec/PlistBuddy -c 'Clear dict' "$INFO_PLIST" 2>/dev/null || true
 /usr/libexec/PlistBuddy -c "Add :CFBundleExecutable string $APP_NAME" "$INFO_PLIST"
 /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string $BUNDLE_ID" "$INFO_PLIST"
 /usr/libexec/PlistBuddy -c "Add :CFBundleName string $BUNDLE_NAME" "$INFO_PLIST"
+/usr/libexec/PlistBuddy -c 'Add :CFBundleIconFile string FragarachII.icns' "$INFO_PLIST"
 /usr/libexec/PlistBuddy -c 'Add :CFBundlePackageType string APPL' "$INFO_PLIST"
 /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $BUILD_ID" "$INFO_PLIST"
 /usr/libexec/PlistBuddy -c "Add :LSMinimumSystemVersion string $MIN_SYSTEM_VERSION" "$INFO_PLIST"
 /usr/libexec/PlistBuddy -c 'Add :NSPrincipalClass string NSApplication' "$INFO_PLIST"
+/usr/bin/codesign --force --deep --sign - "$APP_BUNDLE"
 
 open_app() { /usr/bin/open -n "$APP_BUNDLE"; }
 case "$MODE" in
