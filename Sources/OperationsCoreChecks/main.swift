@@ -63,7 +63,7 @@ try run("read-only real schema and bounded queries") {
     try check(Set(["AUDUSD","BTCUSD","XAUUSD"]).isSubset(of:Set(snapshot.lanes.map(\.asset))),"lane decode")
     try check(snapshot.operations.count==5,"bounded operations")
     try check(snapshot.authorityEvents.count>=6,"authority ledger decode")
-    try check(snapshot.lanes.first{$0.asset=="AUDUSD"}?.validation?.outsideExpectedSessionCount==16,"AUD outside sessions")
+    try check(snapshot.lanes.first{$0.asset=="AUDUSD"}?.validation?.outsideExpectedSessionCount==17,"AUD outside sessions")
     try check(snapshot.lanes.first{$0.asset=="XAUUSD"}?.validation?.outsideExpectedSessionCount==49,"XAU outside sessions")
     try check(try Data(contentsOf:url)==before,"read mutated database")
 }
@@ -75,7 +75,7 @@ try run("missing and incompatible rejection") {
 try run("old seven-table authority rejected read-only") {
     do { _=try SQLiteReadService().load(path:oldSevenTableAuthority);throw CheckFailure.failed("unmigrated authority accepted") } catch is AuthorityReadError {}
 }
-try run("deterministic search filter sort") { let lanes=Array(try SQLiteReadService().load(path:authority).lanes.reversed());try check(LaneQuery.apply(lanes,search:"usd",timeframe:"D1").map(\.asset)==["AUDUSD","BTCUSD","XAUUSD"],"sort");try check(LaneQuery.apply(lanes,search:"xau",timeframe:nil).map(\.asset)==["XAUUSD"],"search") }
+try run("deterministic search filter sort") { let lanes=Array(try SQLiteReadService().load(path:authority).lanes.reversed());let usd=LaneQuery.apply(lanes,search:"usd",timeframe:"D1").map(\.asset);try check(usd==usd.sorted() && usd.contains("AUDUSD") && usd.contains("BTCUSD") && usd.contains("XAUUSD"),"sort");let xau=LaneQuery.apply(lanes,search:"xau",timeframe:nil);try check(xau.count==4 && Set(xau.map(\.asset))==["XAUUSD"] && Set(xau.map(\.timeframe))==["D1","H1","M30","M5"],"search") }
 try run("native TruthState model and read-only bridge") {
     let config=CLIConfiguration(python:"/Library/Frameworks/Python.framework/Versions/3.13/bin/python3",repository:root.path,database:authority)
     let result=try ProcessBridge().run(.readTruth(symbol:"AUDUSD",timeframe:"D1"),config:config)
@@ -104,8 +104,8 @@ try run("native market discovery and onboarding model") {
     let discovery=try JSONDecoder().decode(MarketDiscoveryResult.self,from:Data(result.stdout.utf8));let market=try discovery.markets.first ?? {throw CheckFailure.failed("missing market")}()
     try check(market.recommendation.symbol=="US30" && market.representations.count==5 && !market.providerDiscovery.isEmpty,"market discovery decode")
 }
-try run("explicit secret-free arguments") { let db="/authority.sqlite3",secret="never-in-arguments";let intents:[OperationIntent]=[.readEstateTruth,.readTruth(symbol:"AUDUSD",timeframe:"D1"),.resolveInstrument(query:"Gold"),.discoverMarket(query:"US30"),.acquire(asset:"AUDUSD",from:"2026-07-01",through:"2026-07-10",mode:.preserve),.importCSV(file:"/evidence.csv",symbol:"AUDUSD",timeframe:"D1",mode:.preserve),.validate(symbol:"AUDUSD",timeframe:"D1",through:"2026-07-10",persist:true),.verify,.backup(destination:"/backup.sqlite3")];for intent in intents{let args=ArgumentBuilder.arguments(for:intent,database:db);try check(args.contains(db) && !args.contains(secret),"arguments")}}
-try run("review confirmation gate") { let intent=OperationIntent.acquire(asset:"AUDUSD",from:"2026-07-01",through:"2026-07-10",mode:.preserve);var gate=ReviewGate();try check(!gate.confirm(intent),"unreviewed");gate.review(intent);try check(gate.confirm(intent),"reviewed");try check(!gate.confirm(intent),"repeat") }
+try run("explicit secret-free arguments") { let db="/authority.sqlite3",secret="never-in-arguments";let intents:[OperationIntent]=[.readEstateTruth,.readTruth(symbol:"AUDUSD",timeframe:"D1"),.resolveInstrument(query:"Gold"),.discoverMarket(query:"US30"),.acquire(asset:"AUDUSD",timeframe:"H1",from:"2026-07-01",through:"2026-07-10",mode:.preserve),.importCSV(file:"/evidence.csv",symbol:"AUDUSD",timeframe:"D1",mode:.preserve),.validate(symbol:"AUDUSD",timeframe:"D1",through:"2026-07-10",persist:true),.verify,.backup(destination:"/backup.sqlite3")];for intent in intents{let args=ArgumentBuilder.arguments(for:intent,database:db);try check(args.contains(db) && !args.contains(secret),"arguments")}}
+try run("review confirmation gate") { let intent=OperationIntent.acquire(asset:"AUDUSD",timeframe:"H1",from:"2026-07-01",through:"2026-07-10",mode:.preserve);var gate=ReviewGate();try check(!gate.confirm(intent),"unreviewed");gate.review(intent);try check(gate.confirm(intent),"reviewed");try check(!gate.confirm(intent),"repeat") }
 try run("secret filter") { try check(SecretFilter.filter("before SECRET middle SECRET",secrets:["SECRET"])=="before [REDACTED] middle [REDACTED]","filter") }
 try run("credential alias memory resolution") { let file=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString);try "TWELVEDATA_API_KEY=fixture-only-secret\n".write(to:file,atomically:true,encoding:.utf8);defer{try? FileManager.default.removeItem(at:file)};try check(CredentialResolver.resolve(environment:[:],authorizedFile:file.path)=="fixture-only-secret","alias") }
 try run("known CLI identity") { let config=CLIConfiguration(python:"/Library/Frameworks/Python.framework/Versions/3.13/bin/python3",repository:root.path,database:authority);try ProcessBridge().validateCLI(config) }

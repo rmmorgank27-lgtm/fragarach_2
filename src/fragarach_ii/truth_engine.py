@@ -35,9 +35,9 @@ def truth_state_for_lane(
         registration = connection.execute(
             """
             SELECT provider_id,provider_contract,provider_symbol,registration_status
-            FROM instrument_registrations WHERE asset=? AND timeframe=?
+            FROM instrument_registrations WHERE asset=? AND timeframe='D1'
             """,
-            (symbol, timeframe),
+            (symbol,),
         ).fetchone()
         if registration is None:
             raise TruthEngineError("UNREGISTERED_LANE", f"{symbol}:{timeframe}")
@@ -46,7 +46,7 @@ def truth_state_for_lane(
         ).fetchone() is None:
             raise TruthEngineError("UNDECLARED_LANE", f"{symbol}:{timeframe}")
         range_row = connection.execute(
-            "SELECT count(*),min(open_time_utc),max(open_time_utc) FROM bars WHERE asset=? AND timeframe=?",
+            "SELECT count(*),min(open_time_utc),max(open_time_utc),max(close_time_utc) FROM bars WHERE asset=? AND timeframe=?",
             (symbol, timeframe),
         ).fetchone()
         if not range_row or range_row[0] == 0:
@@ -60,11 +60,11 @@ def truth_state_for_lane(
             """
             SELECT canonical_payload FROM authority_events
             WHERE entity_kind='EVIDENCE_LANE'
-              AND json_extract(canonical_payload,'$.body.legacy_key.asset')=?
-              AND json_extract(canonical_payload,'$.body.legacy_key.timeframe')=?
+              AND (json_extract(canonical_payload,'$.body.legacy_key.asset')=? OR json_extract(canonical_payload,'$.body.asset')=?)
+              AND (json_extract(canonical_payload,'$.body.legacy_key.timeframe')=? OR json_extract(canonical_payload,'$.body.timeframe')=?)
             ORDER BY effective_from_utc DESC,recorded_at_utc DESC,authority_event_id DESC LIMIT 1
             """,
-            (symbol, timeframe),
+            (symbol,symbol,timeframe,timeframe),
         ).fetchone()
         return _calculate(symbol, timeframe, registration, range_row, validation, ledger)
     finally:
@@ -90,21 +90,23 @@ def truth_states(database_path: str | Path) -> list[dict[str, object]]:
 
 
 def _calculate(symbol, timeframe, registration, range_row, validation, ledger):
-    row_count, earliest, latest = range_row
-    caodt = _iso_utc(latest)
+    row_count, earliest, latest, latest_close = range_row
+    caodt = _iso_utc(latest if timeframe=="D1" else latest_close)
     authority_score = 100 if registration[3] == "REGISTERED_WITH_EVIDENCE" and ledger else 90 if registration[3] == "REGISTERED_WITH_EVIDENCE" else 75
     authority_basis = f"{registration[3]};" + ("LEDGER_BOUND" if ledger else "LEDGER_BINDING_NOT_PRESENT")
     validation_state, validation_score = _validation(validation)
-    expected = validation.get("expected_session_count") if validation else None
-    present = validation.get("present_expected_session_count") if validation else None
-    missing = validation.get("missing_expected_session_count") if validation else None
+    intraday=bool(validation and validation.get("format")=="fragarach_ii.lane_validation_summary.v2")
+    expected = validation.get("expected_interval_count" if intraday else "expected_session_count") if validation else None
+    present = validation.get("present_expected_interval_count" if intraday else "present_expected_session_count") if validation else None
+    missing = validation.get("missing_expected_interval_count" if intraday else "missing_expected_session_count") if validation else None
     coverage_score = round(100 * present / expected) if expected else None
     continuity_score = round(100 * (expected - missing) / expected) if expected is not None and expected > 0 else None
-    freshness_score = 100 if validation and validation.get("latest_expected_session_present") else (50 if validation else None)
+    freshness_key="latest_expected_closed_interval_present" if intraday else "latest_expected_session_present"
+    freshness_score = 100 if validation and validation.get(freshness_key) else (50 if validation else None)
     gap_classification, gap_impact = _gaps(validation)
     provider_summary = {
         "provider": registration[0],
-        "provider_contract": registration[1],
+        "provider_contract": registration[1] if timeframe=="D1" else f"TWELVE_DATA_TIME_SERIES_{timeframe}_V1",
         "provider_symbol": registration[2],
         "confidence": "NOT_MEASURED",
         "score": None,
@@ -143,7 +145,7 @@ def _calculate(symbol, timeframe, registration, range_row, validation, ledger):
             "earliest_bar": _iso_utc(earliest),
             "latest_bar": caodt,
             "row_count": row_count,
-            "expected_range": {"start": _iso_utc(earliest), "end": validation.get("latest_expected_session") if validation else None},
+            "expected_range": {"start": _iso_utc(earliest), "end": validation.get("latest_expected_closed_interval_end_utc" if intraday else "latest_expected_session") if validation else None},
             "available_range": {"start": _iso_utc(earliest), "end": caodt},
             "expected_session_count": expected,
             "available_expected_session_count": present,
@@ -166,9 +168,11 @@ def _calculate(symbol, timeframe, registration, range_row, validation, ledger):
 def _validation(validation: dict[str, Any] | None) -> tuple[str, int | None]:
     if validation is None:
         return "LIMITED", None
-    if validation.get("material_gap_count", 0) or validation.get("outside_expected_session_count", 0):
+    outside=validation.get("outside_expected_interval_count",validation.get("outside_expected_session_count",0))
+    missing=validation.get("missing_expected_interval_count",validation.get("missing_expected_session_count",0))
+    if validation.get("material_gap_count", 0) or outside:
         return "WARNING", 60
-    if validation.get("missing_expected_session_count", 0):
+    if missing:
         return "WARNING", 80
     return "PASS", 100
 
@@ -176,11 +180,11 @@ def _validation(validation: dict[str, Any] | None) -> tuple[str, int | None]:
 def _gaps(validation: dict[str, Any] | None) -> tuple[str, str]:
     if validation is None:
         return "NOT_MEASURED", "HIGH"
-    missing = validation.get("missing_expected_session_count", 0)
-    outside = validation.get("outside_expected_session_count", 0)
+    missing = validation.get("missing_expected_interval_count",validation.get("missing_expected_session_count", 0))
+    outside = validation.get("outside_expected_interval_count",validation.get("outside_expected_session_count", 0))
     if not missing and not outside:
         return "NONE", "NONE"
-    if not validation.get("latest_expected_session_present"):
+    if not validation.get("latest_expected_closed_interval_present",validation.get("latest_expected_session_present")):
         return "CURRENT", "HIGH"
     if validation.get("material_gap_count", 0):
         return "RECENT", "MEDIUM"

@@ -5,10 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from datetime import date
+from datetime import UTC,date,datetime
 
 from fragarach_ii.ingestion.validation import RowValidationError, deduplicate_bars, stage_record
 from fragarach_ii.staging import StagingBatch, StagingRejection
+from fragarach_ii.validation.intraday_profiles import canonical_open,profile_for,iso,is_expected_open
 
 
 _D1_DATETIME = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:[ T]00:00:00)?(?:Z)?$")
@@ -29,6 +30,9 @@ def stage_twelve_data_response(
     through_date: date,
     raw_block_id: str,
     received_at: str,
+    timeframe: str="D1",
+    asset_class: str="FX",
+    observed_at: datetime|None=None,
 ) -> StagingBatch:
     try:
         payload = json.loads(body.decode("utf-8"))
@@ -42,7 +46,8 @@ def stage_twelve_data_response(
         raise ProviderPayloadError("NO_USABLE_OBSERVATIONS", "response has no observation array")
     if meta.get("symbol") != provider_symbol:
         raise ProviderPayloadError("SYMBOL_MISMATCH", "provider response symbol mismatch")
-    if meta.get("interval") != "1day":
+    expected_interval={"D1":"1day","H1":"1h","M30":"30min","M5":"5min"}[timeframe]
+    if meta.get("interval") != expected_interval:
         raise ProviderPayloadError("INTERVAL_MISMATCH", "provider response interval mismatch")
     bars = []
     row_rejections = []
@@ -50,14 +55,22 @@ def stage_twelve_data_response(
         if not isinstance(observation, dict):
             raise ProviderPayloadError("INVALID_OBSERVATION", f"observation {index} is not an object")
         timestamp_text = observation.get("datetime")
-        match = _D1_DATETIME.fullmatch(timestamp_text) if isinstance(timestamp_text, str) else None
-        if match is None:
-            raise ProviderPayloadError("INVALID_TIMESTAMP", f"observation {index} has invalid D1 datetime")
-        normalized_date = date.fromisoformat(match.group(1))
-        if not from_date <= normalized_date <= through_date:
-            raise ProviderPayloadError("OUT_OF_RANGE_OBSERVATION", f"observation {index} is outside request")
+        try:
+            if timeframe=="D1":
+                match=_D1_DATETIME.fullmatch(timestamp_text) if isinstance(timestamp_text,str) else None
+                if match is None:raise ValueError("INVALID_D1_TIMESTAMP")
+                normalized_date=date.fromisoformat(match.group(1));canonical=normalized_date.isoformat()
+            else:
+                profile=profile_for(asset_class,timeframe);epoch=canonical_open(str(timestamp_text),profile)
+                if not is_expected_open(epoch,profile):raise ValueError("OUTSIDE_EXPECTED_SESSION")
+                normalized_date=datetime.fromtimestamp(epoch,UTC).date();canonical=iso(epoch)
+                now=(observed_at or datetime.now(UTC)).astimezone(UTC)
+                if epoch+profile.seconds>int(now.timestamp()):raise ValueError("INCOMPLETE_CURRENT_INTERVAL")
+            if not from_date<=normalized_date<=through_date:raise ValueError("OUT_OF_RANGE_OBSERVATION")
+        except (ValueError,TypeError) as error:
+            row_rejections.append(StagingRejection(index,str(error),f"observation {index}: {error}"));continue
         fields = {
-            "timestamp": normalized_date.isoformat(),
+            "timestamp": canonical,
             "open": observation.get("open"),
             "high": observation.get("high"),
             "low": observation.get("low"),
@@ -65,25 +78,22 @@ def stage_twelve_data_response(
             "volume": observation.get("volume"),
         }
         if any(fields[name] is None for name in ("open", "high", "low", "close")):
-            raise ProviderPayloadError("MISSING_OHLC", f"observation {index} lacks OHLC")
+            row_rejections.append(StagingRejection(index,"MISSING_OHLC",f"observation {index} lacks OHLC"));continue
         try:
             bars.append(
                 stage_record(
                     {key: str(value) if value is not None else "" for key, value in fields.items()},
                     explicit_symbol=asset,
-                    explicit_timeframe="D1",
+                    explicit_timeframe=timeframe,
                     provider="TWELVE_DATA",
-                    source="TWELVE_DATA_TIME_SERIES_D1_V1",
+                    source=f"TWELVE_DATA_TIME_SERIES_{timeframe}_V1",
                     raw_block_id=raw_block_id,
                     source_row_number=index,
                     received_at=received_at,
                 )
             )
         except RowValidationError as error:
-            if error.code == "INVALID_OHLC":
-                row_rejections.append(StagingRejection(index, error.code, str(error)))
-                continue
-            raise ProviderPayloadError(error.code, f"observation {index}: {error}") from error
+            row_rejections.append(StagingRejection(index,error.code,str(error)));continue
     ordered, rejections, identical, conflicting = deduplicate_bars(bars)
     if rejections:
         raise ProviderPayloadError("CONFLICTING_DUPLICATE", rejections[0].message)

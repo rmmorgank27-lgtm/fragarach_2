@@ -278,12 +278,16 @@ public struct EstateTruthLane: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
+public struct TimeframeCapability:Codable,Equatable,Sendable,Identifiable{public var id:String{timeframe};public let timeframe:String;public let policyState:String;public let authorityState:String;public let providerMappingState:String;public let providerContract:String?;public let entitlementState:String;public let evidenceState:String;public let validationState:String;public let truthState:String;public let servable:Bool;public let reasonCodes:[String];enum CodingKeys:String,CodingKey{case timeframe,servable;case policyState="policy_state",authorityState="authority_state",providerMappingState="provider_mapping_state",providerContract="provider_contract",entitlementState="entitlement_state",evidenceState="evidence_state",validationState="validation_state",truthState="truth_state",reasonCodes="reason_codes"}}
+public struct SymbolTimeframeCapability:Codable,Equatable,Sendable,Identifiable{public var id:String{symbol};public let symbol:String;public let assetClass:String;public let authorisedTimeframes:[String];public let declaredTimeframes:[String];public let activeTimeframes:[String];public let servableTimeframes:[String];public let intentionallyDeferredTimeframes:[String];public let blockedTimeframes:[String];public let timeframes:[TimeframeCapability];enum CodingKeys:String,CodingKey{case symbol,timeframes;case assetClass="asset_class",authorisedTimeframes="authorised_timeframes",declaredTimeframes="declared_timeframes",activeTimeframes="active_timeframes",servableTimeframes="servable_timeframes",intentionallyDeferredTimeframes="intentionally_deferred_timeframes",blockedTimeframes="blocked_timeframes"}}
+
 public struct EstateTruthState: Codable, Equatable, Sendable {
     public let contract: String
     public let estateSummary: EstateSummary
     public let truthMatrix: [EstateTruthLane]
+    public let timeframeCapabilities:[SymbolTimeframeCapability]?
     enum CodingKeys: String, CodingKey {
-        case contract, estateSummary = "estate_summary", truthMatrix = "truth_matrix"
+        case contract, estateSummary = "estate_summary", truthMatrix = "truth_matrix",timeframeCapabilities="timeframe_capabilities"
     }
 }
 
@@ -325,7 +329,7 @@ public enum OperationIntent: Equatable, Sendable {
     case reactivateInstrument(asset:String)
     case permanentRemovalPlan(asset:String)
     case permanentlyRemoveInstrument(asset:String,confirmation:String)
-    case acquire(asset: String, from: String, through: String, mode: ConflictMode)
+    case acquire(asset: String,timeframe:String,from: String, through: String, mode: ConflictMode)
     case importCSV(file: String, symbol: String, timeframe: String, mode: ConflictMode)
     case validate(symbol: String, timeframe: String, through: String, persist: Bool)
     case verify

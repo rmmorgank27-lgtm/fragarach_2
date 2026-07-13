@@ -98,7 +98,7 @@ class TwelveDataAcquisitionTests(unittest.TestCase):
         body = _fixture("audusd_d1_2026-07-09_2026-07-10.json")
         cases = (
             ({"asset": "EURUSD"}, "PROVIDER_CONFIGURATION_ERROR"),
-            ({"timeframe": "H1"}, "UNSUPPORTED_TIMEFRAME"),
+            ({"timeframe": "M15"}, "UNSUPPORTED_TIMEFRAME"),
             ({"from_date": "2026-07-11"}, "INVALID_BOUNDARY"),
             ({"from_date": "07/09/2026"}, "INVALID_FROM_DATE"),
             ({"from_date": "2000-01-01"}, "RANGE_TOO_LARGE"),
@@ -129,6 +129,13 @@ class TwelveDataAcquisitionTests(unittest.TestCase):
             path.write_text(json.dumps(data), encoding="utf-8")
             with self.assertRaisesRegex(RuntimeError, "checksum drift"):
                 load_provider_config(root)
+
+    def test_each_core_timeframe_loads_its_checksummed_authority_contract(self) -> None:
+        expected={"D1":"1day","H1":"1h","M30":"30min","M5":"5min"}
+        for timeframe,interval in expected.items():
+            config=load_provider_config(timeframe=timeframe)
+            self.assertEqual((config.provider_contract,config.interval,config.request_ceiling),(f"TWELVE_DATA_TIME_SERIES_{timeframe}_V1",interval,4000))
+            self.assertEqual(len(config.contract_checksum),64)
 
     def test_request_is_deterministic_and_secret_free(self) -> None:
         body = _fixture("audusd_d1_2026-07-09_2026-07-10.json")
@@ -177,13 +184,10 @@ class TwelveDataAcquisitionTests(unittest.TestCase):
 
     def test_invalid_payload_contracts_leave_no_authority(self) -> None:
         base = json.loads(_fixture("audusd_d1_2026-07-09_2026-07-10.json"))
-        mutations = []
-        value = json.loads(json.dumps(base)); value["meta"]["symbol"] = "EUR/USD"; mutations.append((value, "SYMBOL_MISMATCH"))
-        value = json.loads(json.dumps(base)); value["meta"]["interval"] = "1h"; mutations.append((value, "INTERVAL_MISMATCH"))
-        value = json.loads(json.dumps(base)); value["values"][0]["datetime"] = "2026-07-11"; mutations.append((value, "OUT_OF_RANGE_OBSERVATION"))
-        value = json.loads(json.dumps(base)); value["values"][0]["high"] = "NaN"; mutations.append((value, "NON_FINITE_NUMERIC"))
-        value = json.loads(json.dumps(base)); del value["values"][0]["open"]; mutations.append((value, "MISSING_OHLC"))
-        for payload, code in mutations:
+        fatal = []
+        value = json.loads(json.dumps(base)); value["meta"]["symbol"] = "EUR/USD"; fatal.append((value, "SYMBOL_MISMATCH"))
+        value = json.loads(json.dumps(base)); value["meta"]["interval"] = "1h"; fatal.append((value, "INTERVAL_MISMATCH"))
+        for payload, code in fatal:
             database = self.root / f"{code}.sqlite3"
             with self.assertRaises(AcquisitionError) as raised:
                 acquire_twelve_data(
@@ -194,6 +198,14 @@ class TwelveDataAcquisitionTests(unittest.TestCase):
                 )
             self.assertEqual(raised.exception.code, code)
             self.assertEqual(_counts(database)[:4], (0, 0, 0, 0))
+        rows=[]
+        value=json.loads(json.dumps(base));value["values"][0]["datetime"]="2026-07-11";rows.append((value,"OUT_OF_RANGE_OBSERVATION"))
+        value=json.loads(json.dumps(base));value["values"][0]["high"]="NaN";rows.append((value,"NON_FINITE_NUMERIC"))
+        value=json.loads(json.dumps(base));del value["values"][0]["open"];rows.append((value,"MISSING_OHLC"))
+        for payload,code in rows:
+            database=self.root/f"row-{code}.sqlite3"
+            result=acquire_twelve_data(database,asset="AUDUSD",timeframe="D1",from_date="2026-07-09",through_date="2026-07-10",credential="secret",transport=FakeTransport(_response(json.dumps(payload).encode())),clock=lambda:NOW,sleeper=lambda _:None)
+            self.assertEqual((result.inserted,result.rejected),(1,1))
 
     def test_invalid_provider_ohlc_row_is_rejected_without_weakening_validation(self) -> None:
         payload = json.loads(_fixture("audusd_d1_2026-07-09_2026-07-10.json"))
@@ -204,7 +216,10 @@ class TwelveDataAcquisitionTests(unittest.TestCase):
 
         self.assertEqual((result.received, result.staged, result.inserted, result.rejected), (2, 1, 1, 1))
         self.assertEqual(result.ingest_state, "COMPLETED_WITH_WARNINGS")
-        self.assertEqual(result.warnings, ("1 provider observation(s) rejected by structural OHLC validation.",))
+        self.assertEqual(
+            result.warnings,
+            ("1 row-local provider observation(s) quarantined; valid observations were preserved.",),
+        )
         with open_read_only(self.database) as connection:
             detail = json.loads(connection.execute("SELECT detail FROM ingest_runs").fetchone()[0])
             self.assertEqual(detail["rejections"], [{"code":"INVALID_OHLC","message":"high is below low","source_row_number":1}])

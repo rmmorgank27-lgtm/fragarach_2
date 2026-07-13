@@ -7,7 +7,9 @@ from fragarach_ii.storage import open_read_only
 from .twelve_data import AcquisitionError,acquire_twelve_data
 from .yahoo_finance import acquire_yahoo,yahoo_symbol
 
-def acquire_resolved(database_path:str|Path,*,asset:str,from_date:str,through_date:str,merge_mode:str,credential:str|None,twelve_transport=None,yahoo_fetch=None)->dict:
+def acquire_resolved(database_path:str|Path,*,asset:str,timeframe:str="D1",from_date:str,through_date:str,merge_mode:str,credential:str|None,twelve_transport=None,yahoo_fetch=None)->dict:
+    from fragarach_ii.lane_commissioning import ensure_commissioned_lane
+    ensure_commissioned_lane(database_path,asset,timeframe)
     registration=_registration(database_path,asset);asset_class=registration[0];attempts=[]
     confirmed=_confirmed_mapping(database_path,asset) or ((registration[1],registration[2]) if registration[1] and registration[2] else None)
     candidates=[]
@@ -19,9 +21,11 @@ def acquire_resolved(database_path:str|Path,*,asset:str,from_date:str,through_da
         try:
             if provider=="TWELVE_DATA":
                 end=date.fromisoformat(through_date);start=max(date.fromisoformat(from_date),end-timedelta(days=4999))
-                result=acquire_twelve_data(database_path,asset=asset,timeframe="D1",from_date=start.isoformat(),through_date=through_date,merge_mode=merge_mode,credential=credential,transport=twelve_transport,provider_symbol_override=symbol if not registration[1] else None).as_dict()
+                result=acquire_twelve_data(database_path,asset=asset,timeframe=timeframe,from_date=start.isoformat(),through_date=through_date,merge_mode=merge_mode,credential=credential,transport=twelve_transport,provider_symbol_override=symbol if not registration[1] else None).as_dict()
                 result["warnings"]=[*result.get("warnings",[]),*(["Twelve Data best-available history is limited to 5,000 calendar days."] if start>date.fromisoformat(from_date) else [])]
-            else:result=acquire_yahoo(database_path,asset=asset,asset_class=asset_class,from_date=from_date,through_date=through_date,merge_mode=merge_mode,fetch=yahoo_fetch)
+            else:
+                if timeframe!="D1":raise AcquisitionError("NO_APPROVED_FALLBACK",f"Yahoo fallback is D1-only for {asset}:{timeframe}")
+                result=acquire_yahoo(database_path,asset=asset,asset_class=asset_class,from_date=from_date,through_date=through_date,merge_mode=merge_mode,fetch=yahoo_fetch)
             result["provider_attempts"]=attempts+[{"provider":provider,"result":"SUCCESS"}];return result
         except Exception as error:attempts.append({"provider":provider,"result":"FAILED","reason":str(error)})
     raise AcquisitionError("NO_PROVIDER_RETURNED_VALID_DATA",json.dumps({"message":"No provider returned valid data.","attempts":attempts},separators=(",",":")))

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .storage import open_read_only
 from .truth_engine import truth_state_for_lane
+from .lane_commissioning import market_policy
 
 
 ESTATE_TRUTH_CONTRACT = "fragarach_ii.estate_truth_state.v1"
@@ -46,6 +47,8 @@ def estate_truth_state(database_path: str | Path) -> dict[str, object]:
             )
             """
         ).fetchone()[0]
+        registrations=connection.execute("SELECT asset,asset_class,provider_id,provider_contract,provider_symbol FROM instrument_registrations WHERE timeframe='D1' ORDER BY asset").fetchall()
+        lane_facts={(r[0],r[1]):r[2] for r in connection.execute("SELECT l.asset,l.timeframe,(SELECT count(*) FROM bars b WHERE b.asset=l.asset AND b.timeframe=l.timeframe) FROM evidence_lanes l").fetchall()}
     finally:
         connection.close()
 
@@ -97,7 +100,17 @@ def estate_truth_state(database_path: str | Path) -> dict[str, object]:
         "contract": ESTATE_TRUTH_CONTRACT,
         "estate_summary": _estate_summary(lanes, generated_at),
         "truth_matrix": lanes,
+        "timeframe_capabilities":[_capability(row,lane_facts) for row in registrations],
     }
+
+def _capability(row,lane_facts):
+    asset,asset_class,provider,contract,symbol=row;items=[]
+    for timeframe in ("D1","H1","M30","M5"):
+        policy=market_policy(asset_class,timeframe);count=lane_facts.get((asset,timeframe));deferred=policy=="INTENTIONALLY_DEFERRED";blocked=timeframe!="D1" and asset_class in {"ENERGY","INDICES","CRYPTO"}
+        state="INTENTIONALLY_DEFERRED" if deferred else "BLOCKED" if blocked else "ACTIVE" if count else "ACTIVE_NO_EVIDENCE" if count==0 else "CAPABILITY_UNKNOWN"
+        reasons=["POLICY_INTENTIONALLY_DEFERRED"] if deferred else [f"{asset_class}_AUTHORITY_FACTS_REQUIRED"] if blocked else []
+        items.append({"timeframe":timeframe,"policy_state":policy,"authority_state":state,"provider_mapping_state":"KNOWN_MAPPING" if provider else "MAPPING_REQUIRED","provider_contract":contract if timeframe=="D1" else f"TWELVE_DATA_TIME_SERIES_{timeframe}_V1" if provider and not deferred and not blocked else None,"entitlement_state":"NOT_MEASURED","evidence_state":"PRESENT" if count else "NO_EVIDENCE","validation_state":"AVAILABLE" if count else "NOT_APPLICABLE" if deferred else "BLOCKED" if blocked else "NOT_MEASURED","truth_state":"AVAILABLE" if count else "NOT_APPLICABLE" if deferred else "BLOCKED" if blocked else "NOT_MEASURED","servable":bool(count),"reason_codes":reasons})
+    return {"symbol":asset,"asset_class":asset_class,"authorised_timeframes":[x["timeframe"] for x in items if x["policy_state"]=="REQUIRED"],"declared_timeframes":[x["timeframe"] for x in items if (asset,x["timeframe"]) in lane_facts],"active_timeframes":[x["timeframe"] for x in items if x["authority_state"] in {"ACTIVE","ACTIVE_NO_EVIDENCE"}],"servable_timeframes":[x["timeframe"] for x in items if x["servable"]],"intentionally_deferred_timeframes":[x["timeframe"] for x in items if x["policy_state"]=="INTENTIONALLY_DEFERRED"],"blocked_timeframes":[x["timeframe"] for x in items if x["authority_state"]=="BLOCKED"],"timeframes":items}
 
 
 class EstateTruthCache:
@@ -120,8 +133,9 @@ class EstateTruthCache:
 def _gap_counts(validation):
     if validation is None:
         return {"current_gap_count": None, "recent_gap_count": None, "historical_gap_count": None}
-    missing = validation.get("missing_expected_session_count", 0)
-    current = 0 if validation.get("latest_expected_session_present") else min(1, missing)
+    missing = validation.get("missing_expected_interval_count",validation.get("missing_expected_session_count", 0))
+    present=validation.get("latest_expected_closed_interval_present",validation.get("latest_expected_session_present"))
+    current = 0 if present else min(1, missing)
     material = validation.get("material_gap_count", 0)
     recent = min(max(0, missing - current), material)
     historical = max(0, missing - current - recent)

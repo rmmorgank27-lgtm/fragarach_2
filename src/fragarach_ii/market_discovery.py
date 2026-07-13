@@ -10,6 +10,7 @@ from .truth_engine import TruthEngineError, truth_state_for_lane
 from .fx_orientation import orientation_for
 from .retirement import removal_state,retirement_state
 from .market_registry import load_registry,provider_mapping,search_registry
+from .lane_commissioning import market_policy
 
 MARKET_DISCOVERY_CONTRACT = "fragarach_ii.market_discovery.v2"
 _CURRENCIES = frozenset("AUD CAD CHF CNY EUR GBP HKD JPY NZD SGD USD ZAR".split())
@@ -138,13 +139,14 @@ def _timeframe_lanes(r,m,rows,retired=None):
         if orientation and orientation["orientation_state"]!="DIRECT_PROVIDER_SUPPORTED":
             state="INVERSE_ONLY" if orientation["orientation_state"]=="INVERSE_ONLY" else "CAPABILITY_UNKNOWN";reason=f"Capability belongs to authoritative inverse {orientation['inverse_pair']} mapping; no direct mapping exists." if state=="INVERSE_ONLY" else "No direct or inverse provider mapping evidence exists."
             lanes.append({"timeframe":timeframe,"registration_state":"REGISTERED_UNMAPPED" if existing else "IMPLEMENTATION_INCOMPATIBILITY","provider_capability":state,"provider_mapping":state,"authority_state":orientation["orientation_state"],"acquisition_readiness":"MAPPING_REQUIRED","reason":reason+" Canonical identity and unrelated operations remain available.","selectable":False});continue
-        mapped=bool(r.provider_symbol)
-        if timeframe=="D1": capability="SUPPORTED" if mapped else "MAPPING_REQUIRED"; reason="Approved D1 provider contract and calendar authority." if mapped else "Provider mapping required."
-        elif m.asset_class in {"FX","CRYPTO"} and mapped: capability="SUPPORTED";reason=f"Approved TWELVE_DATA_TIME_SERIES_{timeframe}_V1 provider contract; registration schema remains D1-only."
-        else: capability="CAPABILITY_UNKNOWN";reason="No approved representation-specific intraday calendar assignment is registered."
+        mapped=bool(r.provider_symbol);policy=market_policy(m.asset_class,timeframe)
+        if policy=="INTENTIONALLY_DEFERRED":capability="INTENTIONALLY_DEFERRED";reason="Market policy is intentionally D1-only; no intraday warning or acquisition action applies."
+        elif timeframe=="D1": capability="SUPPORTED" if mapped else "MAPPING_REQUIRED"; reason="Approved D1 provider contract and calendar authority." if mapped else "Provider mapping required."
+        elif m.asset_class in {"FX","METALS"} and mapped: capability="SUPPORTED";reason=f"Approved TWELVE_DATA_TIME_SERIES_{timeframe}_V1 provider contract; lane uses the canonical D1 registration anchor."
+        else: capability="CAPABILITY_UNKNOWN";reason="Required representation-specific authority facts remain a local commissioning stop."
         registration="EXISTING" if existing else "MISSING" if timeframe=="D1" else "IMPLEMENTATION_INCOMPATIBILITY" if capability=="SUPPORTED" else "MISSING"
-        acquisition="NOT_YET_ACQUIRED" if existing else "REGISTRATION_REQUIRED" if registration=="MISSING" and capability=="SUPPORTED" else "CAPABILITY_UNKNOWN" if capability=="CAPABILITY_UNKNOWN" else "MAPPING_REQUIRED" if capability=="MAPPING_REQUIRED" else "IMPLEMENTATION_INCOMPATIBILITY"
-        lanes.append({"timeframe":timeframe,"registration_state":registration,"provider_capability":capability,"provider_mapping":"KNOWN_MAPPING" if mapped else "MAPPING_REQUIRED","authority_state":"D1_REGISTRATION_AUTHORITY" if timeframe=="D1" else "IMPLEMENTATION_NARROWER_THAN_RATIFIED_AUTHORITY" if capability=="SUPPORTED" else "AUTHORITY_PRESENT_CAPABILITY_UNKNOWN","acquisition_readiness":acquisition,"reason":reason,"selectable":timeframe=="D1" and registration=="MISSING"})
+        acquisition="INTENTIONALLY_DEFERRED" if policy=="INTENTIONALLY_DEFERRED" else "NOT_YET_ACQUIRED" if capability=="SUPPORTED" else "CAPABILITY_UNKNOWN" if capability=="CAPABILITY_UNKNOWN" else "MAPPING_REQUIRED" if capability=="MAPPING_REQUIRED" else "IMPLEMENTATION_INCOMPATIBILITY"
+        lanes.append({"timeframe":timeframe,"policy_state":policy,"registration_state":registration,"provider_capability":capability,"provider_mapping":"KNOWN_MAPPING" if mapped else "MAPPING_REQUIRED","authority_state":"D1_REGISTRATION_AUTHORITY" if timeframe=="D1" else "INTENTIONALLY_DEFERRED" if policy=="INTENTIONALLY_DEFERRED" else "READY_FOR_LANE_COMMISSIONING" if capability=="SUPPORTED" else "AUTHORITY_PRESENT_CAPABILITY_UNKNOWN","acquisition_readiness":acquisition,"reason":reason,"selectable":policy=="REQUIRED" and capability=="SUPPORTED"})
     return tuple(lanes)
 
 def _warning(r):

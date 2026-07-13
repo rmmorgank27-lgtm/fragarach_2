@@ -101,3 +101,14 @@ def _require_iso_date(value: str, name: str) -> None:
         raise ValueError(f"{name} must be an ISO calendar date") from error
     if parsed.isoformat() != value:
         raise ValueError(f"{name} must use canonical ISO calendar-date text")
+
+@dataclass(frozen=True, slots=True)
+class IntradayLaneValidationSummary:
+    symbol:str;timeframe:str;calendar_id:str;calendar_version:int;calendar_checksum:str
+    session_profile_id:str;session_profile_version:int;session_profile_checksum:str
+    gap_doctrine_id:str;gap_doctrine_version:int;gap_doctrine_checksum:str;validator_version:str;boundary_utc:str
+    expected_interval_count:int;present_expected_interval_count:int;missing_expected_interval_count:int;outside_expected_interval_count:int
+    latest_expected_closed_interval_open_utc:str;latest_expected_closed_interval_end_utc:str;latest_expected_closed_interval_present:bool
+    material_gap_count:int;non_material_gap_count:int;result_checksum:str;validation_observed_at:str
+    def as_dict(self):return {"format":"fragarach_ii.lane_validation_summary.v2",**asdict(self)}
+    def as_json(self):return json.dumps(self.as_dict(),sort_keys=True,separators=(",",":"),ensure_ascii=False)

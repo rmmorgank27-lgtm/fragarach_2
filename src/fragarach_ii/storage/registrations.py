@@ -121,7 +121,9 @@ def register_instrument(database_path: str | Path, candidate: RegistrationCandid
 def registration_for_lane(database_path: str | Path, asset: str, timeframe: str) -> sqlite3.Row | tuple:
     connection=open_read_only(database_path)
     try:
-        row=connection.execute("SELECT provider_id,provider_contract,provider_symbol,calendar_id,calendar_version,gap_doctrine_id,gap_doctrine_version,registration_status,identity_checksum_sha256 FROM instrument_registrations WHERE asset=? AND timeframe=?",(asset,timeframe)).fetchone()
+        row=connection.execute("""SELECT r.provider_id,r.provider_contract,r.provider_symbol,r.calendar_id,r.calendar_version,r.gap_doctrine_id,r.gap_doctrine_version,r.registration_status,r.identity_checksum_sha256
+          FROM evidence_lanes l JOIN instrument_registrations r ON r.asset=l.asset AND r.timeframe=l.registration_timeframe
+          WHERE l.asset=? AND l.timeframe=?""",(asset,timeframe)).fetchone()
         if row is None: raise RegistrationError("UNREGISTERED_LANE",f"{asset}:{timeframe}")
         return row
     finally: connection.close()

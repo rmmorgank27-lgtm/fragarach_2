@@ -21,6 +21,7 @@ class StagedBar:
     source_row_number: int
     source_timestamp_text: str
     received_at: str
+    close_timestamp: int | None = None
 
     @property
     def canonical_key(self) -> tuple[str, str, int]:
@@ -45,4 +46,3 @@ class StagingBatch:
     source_rows: int
     duplicate_identical: int
     duplicate_conflicting: int
-

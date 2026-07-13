@@ -41,7 +41,7 @@ def merge_staged_bars(
     for bar in sorted(bars, key=lambda value: value.canonical_key):
         current = connection.execute(
             """
-            SELECT open, high, low, close, volume, updated_by_ingest_run_id
+            SELECT close_time_utc,open,high,low,close,volume,updated_by_ingest_run_id
             FROM bars
             WHERE asset = ? AND timeframe = ? AND open_time_utc = ?
             """,
@@ -52,11 +52,11 @@ def merge_staged_bars(
             connection.execute(
                 """
                 INSERT INTO bars (
-                    asset, timeframe, open_time_utc, open, high, low, close, volume,
+                    asset, timeframe, open_time_utc, close_time_utc, open, high, low, close, volume,
                     created_by_ingest_run_id, updated_by_ingest_run_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (*bar.canonical_key, *bar.values, ingest_run_id, ingest_run_id),
+                (*bar.canonical_key,bar.close_timestamp,*bar.values,ingest_run_id,ingest_run_id),
             )
             _append_event(
                 connection,
@@ -71,8 +71,8 @@ def merge_staged_bars(
             inserted += 1
             continue
 
-        prior = tuple(current[:5])
-        if prior == bar.values:
+        prior = tuple(current[1:6])
+        if (current[0],*prior) == (bar.close_timestamp,*bar.values):
             action = "UNCHANGED"
             unchanged += 1
             supersedes = None
@@ -92,7 +92,7 @@ def merge_staged_bars(
                 ORDER BY recorded_at DESC, provenance_event_id DESC
                 LIMIT 1
                 """,
-                (*bar.canonical_key, current[5]),
+                (*bar.canonical_key, current[6]),
             ).fetchone()
             if supersedes_row is None:
                 raise RuntimeError(
@@ -102,11 +102,11 @@ def merge_staged_bars(
             connection.execute(
                 """
                 UPDATE bars
-                SET open = ?, high = ?, low = ?, close = ?, volume = ?,
+                SET close_time_utc=?,open = ?, high = ?, low = ?, close = ?, volume = ?,
                     updated_by_ingest_run_id = ?
                 WHERE asset = ? AND timeframe = ? AND open_time_utc = ?
                 """,
-                (*bar.values, ingest_run_id, *bar.canonical_key),
+                (bar.close_timestamp,*bar.values,ingest_run_id,*bar.canonical_key),
             )
             corrected += 1
         _append_event(
@@ -157,4 +157,3 @@ def _append_event(
             recorded_at,
         ),
     )
-

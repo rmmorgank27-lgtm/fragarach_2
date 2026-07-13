@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from fragarach_ii.storage import LaneValidationSummary
+from fragarach_ii.storage import LaneValidationSummary,IntradayLaneValidationSummary
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,8 +34,11 @@ class ValidationResult:
             self.as_dict(), sort_keys=True, separators=(",", ":"), ensure_ascii=False
         )
 
-    def lane_summary(self) -> LaneValidationSummary:
+    def lane_summary(self):
         value = self.as_dict()
+        if value["format"]=="fragarach_ii.intraday_validation.v1":
+            names=("symbol","timeframe","calendar_id","calendar_version","calendar_checksum","session_profile_id","session_profile_version","session_profile_checksum","gap_doctrine_id","gap_doctrine_version","gap_doctrine_checksum","validator_version","boundary_utc","expected_interval_count","present_expected_interval_count","missing_expected_interval_count","outside_expected_interval_count","latest_expected_closed_interval_open_utc","latest_expected_closed_interval_end_utc","latest_expected_closed_interval_present","material_gap_count","non_material_gap_count","result_checksum","validation_observed_at")
+            return IntradayLaneValidationSummary(**{name:value[name] for name in names})
         return LaneValidationSummary(
             symbol=value["symbol"],
             timeframe=value["timeframe"],

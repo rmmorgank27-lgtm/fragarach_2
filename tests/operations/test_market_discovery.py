@@ -56,10 +56,10 @@ class MarketDiscoveryTests(unittest.TestCase):
         correction=discover_market(self.db,"solanna");self.assertEqual(correction["discovery_status"],"PARTIAL");self.assertEqual(correction["explanation"],"Did you mean Solana?")
         self.assertEqual(discover_market(self.db,"golanna")["discovery_status"],"UNKNOWN")
     def test_timeframe_capability_is_explicit_and_schema_blocked(self):
-        for query in ("JPYCHF","SOLUSD"):
-            lanes=self.market(query)["representations"][0]["timeframe_lanes"];self.assertEqual([l["timeframe"] for l in lanes],["D1","H1","M30","M5"])
-            self.assertEqual(lanes[0]["provider_capability"],"SUPPORTED");self.assertTrue(all(l["provider_capability"]=="SUPPORTED" for l in lanes));self.assertTrue(all(l["registration_state"]=="IMPLEMENTATION_INCOMPATIBILITY" for l in lanes[1:]));self.assertTrue(all(l["authority_state"]=="IMPLEMENTATION_NARROWER_THAN_RATIFIED_AUTHORITY" for l in lanes[1:]))
-        apple=self.market("Apple")["representations"][0]["timeframe_lanes"];self.assertTrue(all(l["provider_capability"]=="CAPABILITY_UNKNOWN" for l in apple[1:]))
+        lanes=self.market("JPYCHF")["representations"][0]["timeframe_lanes"];self.assertEqual([l["timeframe"] for l in lanes],["D1","H1","M30","M5"])
+        self.assertEqual(lanes[0]["provider_capability"],"SUPPORTED");self.assertTrue(all(l["provider_capability"]=="SUPPORTED" for l in lanes));self.assertTrue(all(l["registration_state"]=="IMPLEMENTATION_INCOMPATIBILITY" for l in lanes[1:]));self.assertTrue(all(l["authority_state"]=="READY_FOR_LANE_COMMISSIONING" for l in lanes[1:]))
+        crypto=self.market("SOLUSD")["representations"][0]["timeframe_lanes"];self.assertTrue(all(l["provider_capability"]=="CAPABILITY_UNKNOWN" for l in crypto[1:]));self.assertTrue(all(not l["selectable"] for l in crypto[1:]))
+        apple=self.market("Apple")["representations"][0]["timeframe_lanes"];self.assertTrue(all(l["provider_capability"]=="INTENTIONALLY_DEFERRED" for l in apple[1:]));self.assertTrue(all(l["policy_state"]=="INTENTIONALLY_DEFERRED" for l in apple[1:]));self.assertTrue(all(not l["selectable"] for l in apple[1:]))
     def test_fx_orientation_is_exact_and_ordered(self):
         direct=self.market("EUR/AUD");inverse=self.market("AUD-EUR");spaced=self.market("AUD EUR")
         self.assertEqual((direct["canonical_identity"],direct["fx_orientation"]["orientation_state"],direct["fx_orientation"]["requested_provider_symbol"]),("FX:EURAUD","DIRECT_PROVIDER_SUPPORTED","EUR/AUD"))

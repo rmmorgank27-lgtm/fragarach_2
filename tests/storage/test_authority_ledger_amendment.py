@@ -64,10 +64,10 @@ class AuthorityLedgerAmendmentTests(unittest.TestCase):
         other=append_authority_event(self.db,manifest(entity="lane:METALS:D1"),recorded_at_utc="2026-07-11T03:00:00+00:00")
         self.assertEqual(len(inspect_authority(self.db)),3);self.assertNotEqual(accepted.authority_event_id,other.authority_event_id)
 
-    def test_all_timeframes_declared_but_intraday_cannot_activate(self):
+    def test_all_timeframes_declared_and_intraday_activation_is_explicit(self):
         for tf in ("D1","H1","M30","M5"):append_authority_event(self.db,manifest(entity=f"lane:FX:{tf}",timeframe=tf),recorded_at_utc="2026-07-11T01:00:00+00:00")
         active=manifest(entity="lane:FX:H1-active",timeframe="H1");active=AuthorityEventManifest(**{**{f:getattr(active,f) for f in active.__dataclass_fields__},"body":{**active.body,"activation_state":"ACTIVE"}})
-        with self.assertRaises(AuthorityLedgerError):prepare_authority_event(active)
+        self.assertEqual(prepare_authority_event(active).event_kind,"LANE_DECLARED")
 
     def test_bootstrap_exact_replay_preserves_legacy(self):
         c=open_read_only(self.db)

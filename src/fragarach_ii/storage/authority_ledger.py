@@ -225,8 +225,7 @@ def _validate_manifest(m: AuthorityEventManifest) -> None:
     if m.compatibility_state!="COMPATIBLE" and not m.compatibility_reasons: raise AuthorityLedgerError("MISSING_COMPATIBILITY_REASON",m.entity_id)
     if m.event_kind in {"REGISTRATION_DECLARED","REGISTRATION_REVISED","PROVIDER_MAPPING_APPROVED","LANE_DECLARED","LANE_REVISED"} and m.compatibility_state!="COMPATIBLE":
         raise AuthorityLedgerError("UNRESOLVED_MATERIAL_FACT",m.entity_id)
-    if m.event_kind=="LANE_DECLARED" and m.body.get("activation_state") not in {"DECLARED","ACTIVE","AMBER"}: raise AuthorityLedgerError("INVALID_ACTIVATION_STATE",m.entity_id)
-    if m.event_kind=="LANE_DECLARED" and m.body.get("timeframe") in {"H1","M30","M5"} and m.body.get("activation_state")!="DECLARED": raise AuthorityLedgerError("INTRADAY_ACTIVATION_FORBIDDEN",m.entity_id)
+    if m.event_kind=="LANE_DECLARED" and m.body.get("activation_state") not in {"DECLARED","ACTIVE_NO_EVIDENCE","ACTIVE","AMBER"}: raise AuthorityLedgerError("INVALID_ACTIVATION_STATE",m.entity_id)
     for binding in m.authority_bindings:
         if set(binding)!={"document_id","path","sha256","version"}: raise AuthorityLedgerError("INVALID_AUTHORITY_BINDING",m.entity_id)
 

@@ -11,8 +11,9 @@ from .truth_engine import TruthEngineError, truth_state_for_lane
 
 
 CONTRACT = "fragarach_ii.external_consumer_history.v1"
-CATALOG_CONTRACT = "fragarach_ii.external_consumer_catalog.v1"
-SUPPORTED_TIMEFRAME = "D1"
+INTRADAY_CONTRACT="fragarach_ii.external_consumer_history.v2"
+CATALOG_CONTRACT = "fragarach_ii.external_consumer_catalog.v2"
+SUPPORTED_TIMEFRAMES={"D1","H1","M30","M5"}
 DATABASE_ENVIRONMENT_VARIABLE = "FRAGARACH_AUTHORITY_DATABASE"
 DEFAULT_DATABASE = (
     Path(__file__).resolve().parents[2]
@@ -62,9 +63,9 @@ class HistoryService:
             raise ExternalConsumerServiceError(
                 "INVALID_REQUEST", "symbol and timeframe are required"
             )
-        if requested_timeframe != SUPPORTED_TIMEFRAME:
+        if requested_timeframe not in SUPPORTED_TIMEFRAMES:
             raise ExternalConsumerServiceError(
-                "UNSUPPORTED_TIMEFRAME", "SPEC-018 serves D1 only"
+                "UNSUPPORTED_TIMEFRAME",requested_timeframe
             )
 
         connection = open_read_only(self.database_path)
@@ -79,6 +80,12 @@ class HistoryService:
                     requested_timeframe,
                     f"{requested_symbol}:{requested_timeframe} is not registered",
                 )
+            asset_class=connection.execute("SELECT asset_class FROM instrument_registrations WHERE asset=? AND timeframe='D1'",(canonical_symbol,)).fetchone()[0]
+            from .lane_commissioning import market_policy
+            policy=market_policy(asset_class,requested_timeframe)
+            if policy=="INTENTIONALLY_DEFERRED":return _unavailable("INTENTIONALLY_DEFERRED",canonical_symbol,requested_timeframe,"Stock intraday authority is intentionally deferred")
+            if connection.execute("SELECT 1 FROM evidence_lanes WHERE asset=? AND timeframe=?",(canonical_symbol,requested_timeframe)).fetchone() is None:
+                return _unavailable("TIMEFRAME_NOT_ACTIVE",canonical_symbol,requested_timeframe,f"{canonical_symbol}:{requested_timeframe} is not active")
 
             rows = connection.execute(
                 """
@@ -116,7 +123,7 @@ class HistoryService:
         authority = str(truth["authority_state"])
         reason = _authority_reason(truth) if authority == "RED" else None
         return {
-            "contract": CONTRACT,
+            "contract": CONTRACT if requested_timeframe=="D1" else INTRADAY_CONTRACT,
             "status": "AVAILABLE",
             "authority": authority,
             "reason": reason,
@@ -147,11 +154,10 @@ class HistoryService:
                 """
                 SELECT asset,timeframe,count(*),min(open_time_utc),max(open_time_utc)
                 FROM bars
-                WHERE timeframe=?
+                WHERE timeframe IN ('D1','H1','M30','M5')
                 GROUP BY asset,timeframe
                 ORDER BY asset,timeframe
                 """,
-                (SUPPORTED_TIMEFRAME,),
             ).fetchall()
         finally:
             connection.close()
@@ -176,17 +182,19 @@ class HistoryService:
                     "bar_count": count,
                 }
             )
+        from .estate_truth_service import estate_truth_state
         return {
             "contract": CATALOG_CONTRACT,
             "status": "AVAILABLE",
             "histories": histories,
+            "capabilities":estate_truth_state(self.database_path)["timeframe_capabilities"],
         }
 
 
 def _registered_symbol(connection, symbol: str, timeframe: str) -> str | None:
     direct = connection.execute(
-        "SELECT asset FROM instrument_registrations WHERE asset=? AND timeframe=?",
-        (symbol, timeframe),
+        "SELECT asset FROM instrument_registrations WHERE asset=? AND timeframe='D1'",
+        (symbol,),
     ).fetchone()
     if direct:
         return str(direct[0])
@@ -199,7 +207,7 @@ def _registered_symbol(connection, symbol: str, timeframe: str) -> str | None:
           AND json_extract(alias.value,'$.normalized_alias')=?
         ORDER BY r.asset
         """,
-        (timeframe, symbol),
+        ("D1", symbol),
     ).fetchall()
     if len(aliases) > 1:
         raise ExternalConsumerServiceError("AMBIGUOUS_SYMBOL", symbol)
@@ -210,7 +218,7 @@ def _unavailable(
     status: str, symbol: str, timeframe: str, reason: str
 ) -> dict[str, object]:
     return {
-        "contract": CONTRACT,
+        "contract": CONTRACT if timeframe=="D1" else INTRADAY_CONTRACT,
         "status": status,
         "authority": None,
         "reason": reason,

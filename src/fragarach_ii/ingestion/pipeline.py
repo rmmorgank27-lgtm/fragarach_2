@@ -192,13 +192,14 @@ def _require_registration(connection: sqlite3.Connection, symbol: str, timeframe
 
 
 def _confirm_registration_evidence(connection: sqlite3.Connection, symbol: str, timeframe: str, observed_at: str) -> None:
-    row=connection.execute("SELECT registration_status,evidence_confirmed_at_utc FROM instrument_registrations WHERE asset=? AND timeframe=?",(symbol,timeframe)).fetchone()
+    if timeframe!="D1":return
+    row=connection.execute("SELECT registration_status,evidence_confirmed_at_utc FROM instrument_registrations WHERE asset=? AND timeframe='D1'",(symbol,)).fetchone()
     if row and row[0] == "REGISTERED_NO_EVIDENCE":
-        connection.execute("UPDATE instrument_registrations SET registration_status='REGISTERED_WITH_EVIDENCE',evidence_confirmed_at_utc=? WHERE asset=? AND timeframe=?",(observed_at,symbol,timeframe))
+        connection.execute("UPDATE instrument_registrations SET registration_status='REGISTERED_WITH_EVIDENCE',evidence_confirmed_at_utc=? WHERE asset=? AND timeframe='D1'",(observed_at,symbol))
     elif row == ("REGISTERED_UNMAPPED", None):
-        connection.execute("UPDATE instrument_registrations SET evidence_confirmed_at_utc=? WHERE asset=? AND timeframe=?",(observed_at,symbol,timeframe))
-    mismatch=connection.execute("""SELECT 1 FROM instrument_registrations r WHERE r.asset=? AND r.timeframe=? AND
-      ((r.registration_status IN ('REGISTERED_WITH_EVIDENCE','REGISTERED_UNMAPPED') AND r.evidence_confirmed_at_utc IS NOT NULL) <> EXISTS(SELECT 1 FROM bars b WHERE b.asset=r.asset AND b.timeframe=r.timeframe))""",(symbol,timeframe)).fetchone()
+        connection.execute("UPDATE instrument_registrations SET evidence_confirmed_at_utc=? WHERE asset=? AND timeframe='D1'",(observed_at,symbol))
+    mismatch=connection.execute("""SELECT 1 FROM instrument_registrations r WHERE r.asset=? AND r.timeframe='D1' AND
+      ((r.registration_status IN ('REGISTERED_WITH_EVIDENCE','REGISTERED_UNMAPPED') AND r.evidence_confirmed_at_utc IS NOT NULL) <> EXISTS(SELECT 1 FROM bars b WHERE b.asset=r.asset AND b.timeframe=r.timeframe))""",(symbol,)).fetchone()
     if mismatch: raise RuntimeError("registration evidence status invariant failed")
 
 

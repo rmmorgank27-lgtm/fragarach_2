@@ -1004,3 +1004,27 @@ MIGRATION_7_STATEMENTS = (
 def migration_7_checksum() -> str:
     source="\n-- statement --\n".join(statement.strip() for statement in MIGRATION_7_STATEMENTS)
     return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+MIGRATION_8_NAME = "SPEC-025 intraday validation summary coexistence amendment"
+_V2_KEYS=("format","symbol","timeframe","calendar_id","calendar_version","calendar_checksum","session_profile_id","session_profile_version","session_profile_checksum","gap_doctrine_id","gap_doctrine_version","gap_doctrine_checksum","validator_version","boundary_utc","expected_interval_count","present_expected_interval_count","missing_expected_interval_count","outside_expected_interval_count","latest_expected_closed_interval_open_utc","latest_expected_closed_interval_end_utc","latest_expected_closed_interval_present","material_gap_count","non_material_gap_count","result_checksum","validation_observed_at")
+_V2_KEY_SQL=", ".join(f"'{key}'" for key in _V2_KEYS)
+_V2_CASE=f"""CASE
+WHEN (SELECT count(*) FROM json_each(NEW.validation_summary))<>{len(_V2_KEYS)} OR EXISTS(SELECT 1 FROM json_each(NEW.validation_summary) WHERE key NOT IN ({_V2_KEY_SQL})) THEN RAISE(ABORT,'invalid intraday validation summary keys')
+WHEN json_extract(NEW.validation_summary,'$.symbol')<>NEW.asset OR json_extract(NEW.validation_summary,'$.timeframe')<>NEW.timeframe THEN RAISE(ABORT,'intraday validation summary identity mismatch')
+WHEN json_type(NEW.validation_summary,'$.calendar_version')<>'integer' OR json_type(NEW.validation_summary,'$.session_profile_version')<>'integer' OR json_type(NEW.validation_summary,'$.gap_doctrine_version')<>'integer' THEN RAISE(ABORT,'invalid intraday validation authority version')
+WHEN length(json_extract(NEW.validation_summary,'$.calendar_checksum'))<>64 OR length(json_extract(NEW.validation_summary,'$.session_profile_checksum'))<>64 OR length(json_extract(NEW.validation_summary,'$.gap_doctrine_checksum'))<>64 OR length(json_extract(NEW.validation_summary,'$.result_checksum'))<>64 THEN RAISE(ABORT,'invalid intraday validation checksum')
+WHEN julianday(json_extract(NEW.validation_summary,'$.boundary_utc')) IS NULL OR julianday(json_extract(NEW.validation_summary,'$.latest_expected_closed_interval_open_utc')) IS NULL OR julianday(json_extract(NEW.validation_summary,'$.latest_expected_closed_interval_end_utc')) IS NULL OR julianday(json_extract(NEW.validation_summary,'$.validation_observed_at')) IS NULL THEN RAISE(ABORT,'invalid intraday validation timestamp')
+WHEN json_type(NEW.validation_summary,'$.expected_interval_count')<>'integer' OR json_type(NEW.validation_summary,'$.present_expected_interval_count')<>'integer' OR json_type(NEW.validation_summary,'$.missing_expected_interval_count')<>'integer' OR json_type(NEW.validation_summary,'$.outside_expected_interval_count')<>'integer' OR json_type(NEW.validation_summary,'$.material_gap_count')<>'integer' OR json_type(NEW.validation_summary,'$.non_material_gap_count')<>'integer' OR json_extract(NEW.validation_summary,'$.present_expected_interval_count')+json_extract(NEW.validation_summary,'$.missing_expected_interval_count')<>json_extract(NEW.validation_summary,'$.expected_interval_count') THEN RAISE(ABORT,'invalid intraday validation counts')
+WHEN json_type(NEW.validation_summary,'$.latest_expected_closed_interval_present') NOT IN ('true','false') THEN RAISE(ABORT,'invalid intraday latest interval state') END"""
+_COEXISTENCE_CASE=f"""CASE
+WHEN json_valid(NEW.validation_summary)=0 THEN RAISE(ABORT,'lane validation summary must be valid JSON')
+WHEN json_extract(NEW.validation_summary,'$.format')='fragarach_ii.lane_validation_summary.v1' THEN {_VALIDATION_SUMMARY_CASE}
+WHEN json_extract(NEW.validation_summary,'$.format')='fragarach_ii.lane_validation_summary.v2' THEN {_V2_CASE}
+ELSE RAISE(ABORT,'invalid lane validation summary format') END"""
+MIGRATION_8_STATEMENTS=(
+ "DROP TRIGGER lane_state_validation_summary_insert","DROP TRIGGER lane_state_validation_summary_update",
+ f"CREATE TRIGGER lane_state_validation_summary_insert BEFORE INSERT ON lane_state WHEN NEW.validation_summary IS NOT NULL BEGIN SELECT {_COEXISTENCE_CASE}; END",
+ f"CREATE TRIGGER lane_state_validation_summary_update BEFORE UPDATE OF validation_summary ON lane_state WHEN NEW.validation_summary IS NOT NULL BEGIN SELECT {_COEXISTENCE_CASE}; END",
+)
+def migration_8_checksum() -> str:
+    return hashlib.sha256("\n-- statement --\n".join(s.strip() for s in MIGRATION_8_STATEMENTS).encode()).hexdigest()

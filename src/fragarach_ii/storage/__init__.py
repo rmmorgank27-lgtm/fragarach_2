@@ -13,6 +13,7 @@ from .outcome import OUTCOME_FORMAT, Rejection, canonical_ingest_outcome
 from .validation_summary import (
     VALIDATION_SUMMARY_FORMAT,
     LaneValidationSummary,
+    IntradayLaneValidationSummary,
 )
 from .registrations import (Alias, RegistrationCandidate, RegistrationError, RegistrationResult,
     canonical_registration, register_instrument, registration_for_lane)
@@ -24,6 +25,7 @@ from .authority_ledger import (AuthorityEventManifest, AuthorityEventResult, Aut
 __all__ = [
     "IntegrityReport",
     "LaneValidationSummary",
+    "IntradayLaneValidationSummary",
     "OUTCOME_FORMAT",
     "Rejection",
     "VALIDATION_SUMMARY_FORMAT",

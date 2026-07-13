@@ -41,10 +41,8 @@ def stage_record(
     csv_timeframe = (fields.get("timeframe") or "").strip() or None
     symbol = _resolve_identity(explicit_symbol, csv_symbol, "symbol")
     timeframe = _resolve_identity(explicit_timeframe, csv_timeframe, "timeframe")
-    if timeframe != "D1":
-        raise RowValidationError(
-            "UNSUPPORTED_TIMEFRAME", "SPEC-002 manual proof supports timeframe D1 only"
-        )
+    if timeframe not in {"D1","H1","M30","M5"}:
+        raise RowValidationError("UNSUPPORTED_TIMEFRAME",timeframe)
 
     source_timestamp = (fields.get("timestamp") or "").strip()
     timestamp = parse_utc_timestamp(source_timestamp, timeframe)
@@ -83,6 +81,7 @@ def stage_record(
         source_row_number=source_row_number,
         source_timestamp_text=source_timestamp,
         received_at=received_at,
+        close_timestamp=(timestamp+{"H1":3600,"M30":1800,"M5":300}[timeframe] if timeframe!="D1" else None),
     )
 
 

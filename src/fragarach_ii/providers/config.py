@@ -7,6 +7,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from .contracts import load_provider_contract
+
 
 class ProviderConfigurationError(RuntimeError):
     pass
@@ -33,9 +35,11 @@ class ProviderConfig:
     max_calendar_days: int
     user_agent: str
     configuration_checksum: str
+    contract_checksum: str
+    request_ceiling: int
 
 
-def load_provider_config(config_root: str | Path | None = None) -> ProviderConfig:
+def load_provider_config(config_root: str | Path | None = None,timeframe: str="D1") -> ProviderConfig:
     root = (
         Path(config_root).resolve()
         if config_root is not None
@@ -53,15 +57,18 @@ def load_provider_config(config_root: str | Path | None = None) -> ProviderConfi
     ).hexdigest()
     if stored != actual:
         raise ProviderConfigurationError("provider configuration checksum drift")
+    timeframe=timeframe.strip().upper();interval={"D1":"1day","H1":"1h","M30":"30min","M5":"5min"}.get(timeframe)
+    if interval is None:raise ProviderConfigurationError(f"unsupported timeframe: {timeframe}")
+    contract_id=f"TWELVE_DATA_TIME_SERIES_{timeframe}_V1"
+    authority=load_provider_contract(contract_id)
+    if authority.get("provider")!="TWELVE_DATA" or authority.get("interval_code")!=interval or authority.get("endpoint")!=raw.get("endpoint_path") or authority.get("sort_order")!=raw.get("order"):
+        raise ProviderConfigurationError(f"provider authority contract mismatch: {contract_id}")
     required = {
         "format": "fragarach_ii.provider_contract.v1",
         "provider_id": "TWELVE_DATA",
-        "provider_contract": "TWELVE_DATA_TIME_SERIES_D1_V1",
         "provider_host": "api.twelvedata.com",
         "base_url": "https://api.twelvedata.com",
         "endpoint_path": "/time_series",
-        "timeframe": "D1",
-        "interval": "1day",
         "timezone": "UTC",
         "order": "ASC",
     }
@@ -71,15 +78,16 @@ def load_provider_config(config_root: str | Path | None = None) -> ProviderConfi
     if raw.get("authentication_environment") != "TWELVE_DATA_API_KEY":
         raise ProviderConfigurationError("unsupported credential environment")
     return ProviderConfig(
-        provider_id=raw["provider_id"], provider_contract=raw["provider_contract"],
+        provider_id=raw["provider_id"], provider_contract=contract_id,
         provider_host=raw["provider_host"], base_url=raw["base_url"],
         endpoint_path=raw["endpoint_path"], endpoint_family=raw["endpoint_family"],
-        timeframe=raw["timeframe"], interval=raw["interval"], timezone=raw["timezone"],
+        timeframe=timeframe, interval=interval, timezone=raw["timezone"],
         order=raw["order"], authentication_environment=raw["authentication_environment"],
         connect_timeout_seconds=raw["connect_timeout_seconds"],
         read_timeout_seconds=raw["read_timeout_seconds"], max_attempts=raw["max_attempts"],
         retry_backoff_seconds=tuple(raw["retry_backoff_seconds"]),
         max_response_bytes=raw["max_response_bytes"],
         max_calendar_days=raw["max_calendar_days"], user_agent=raw["user_agent"],
-        configuration_checksum=stored,
+        configuration_checksum=stored,contract_checksum=authority["contract_checksum_sha256"],
+        request_ceiling=authority["fragarach_request_ceiling"],
     )

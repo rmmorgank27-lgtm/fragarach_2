@@ -23,7 +23,7 @@ public final class SQLiteReadService: @unchecked Sendable {
         let tables = Set(try strings(db, "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'"))
         guard tables == foundationTables else { throw AuthorityReadError.incompatibleDatabase("exact ten-table identity failed") }
         let migrations = try int(db, "SELECT count(*) FROM schema_migrations")
-        guard (6...7).contains(migrations) else { throw AuthorityReadError.incompatibleDatabase("expected six or seven recognized migrations") }
+        guard (6...8).contains(migrations) else { throw AuthorityReadError.incompatibleDatabase("expected six through eight recognized migrations") }
         let registrations = try queryRegistrations(db)
         let lanes = try queryLanes(db)
         let authorityEvents = try queryAuthorityEvents(db)

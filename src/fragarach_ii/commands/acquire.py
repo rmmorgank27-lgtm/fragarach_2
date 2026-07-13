@@ -28,7 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
-    config = load_provider_config()
+    config = load_provider_config(timeframe=arguments.timeframe)
     credential = os.environ.get(config.authentication_environment)
     try:
         if arguments.provider=="TWELVE_DATA" and not credential:
@@ -36,6 +36,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = acquire_resolved(
             arguments.database,
             asset=arguments.asset,
+            timeframe=arguments.timeframe,
             from_date=arguments.from_date,
             through_date=arguments.through_date,
             merge_mode=arguments.conflict_mode,

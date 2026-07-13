@@ -1,5 +1,7 @@
 import Foundation
 
+private final class PipeBuffer:@unchecked Sendable{private let lock=NSLock();private var value=Data();func set(_ data:Data){lock.withLock{value=data}};func get()->Data{lock.withLock{value}}}
+
 public enum BridgeError: Error, LocalizedError, Sendable {
     case incompatibleCLI, operationActive, malformedResult, missingCredential
     public var errorDescription: String? { switch self { case .incompatibleCLI: "Fragarach II CLI identity check failed"; case .operationActive: "Another mutating operation is active"; case .malformedResult: "Child process returned malformed structured output"; case .missingCredential: "Twelve Data authentication is unavailable" } }
@@ -24,7 +26,7 @@ public enum ArgumentBuilder {
         case .reactivateInstrument(let asset): ["-m","fragarach_ii.commands.reactivate_instrument","--database",database,"--asset",asset,"--confirm","--json"]
         case .permanentRemovalPlan(let asset): ["-m","fragarach_ii.commands.permanently_remove_instrument","--database",database,"--asset",asset,"--json"]
         case .permanentlyRemoveInstrument(let asset,let confirmation): ["-m","fragarach_ii.commands.permanently_remove_instrument","--database",database,"--asset",asset,"--confirmation",confirmation,"--confirm","--json"]
-        case .acquire(let asset,let from,let through,let mode): ["-m","fragarach_ii.commands.acquire","--database",database,"--provider","AUTO","--asset",asset,"--timeframe","D1","--from-date",from,"--through-date",through,"--conflict-mode",mode.rawValue,"--json"]
+        case .acquire(let asset,let timeframe,let from,let through,let mode): ["-m","fragarach_ii.commands.acquire","--database",database,"--provider","AUTO","--asset",asset,"--timeframe",timeframe,"--from-date",from,"--through-date",through,"--conflict-mode",mode.rawValue,"--json"]
         case .importCSV(let file,let symbol,let timeframe,let mode): ["-m","fragarach_ii.commands.ingest_file","--database",database,"--file",file,"--symbol",symbol,"--timeframe",timeframe,"--merge-mode",mode.rawValue,"--json"]
         case .validate(let symbol,let timeframe,let through,let persist): ["-m","fragarach_ii.commands.validate_lane","--database",database,"--symbol",symbol,"--timeframe",timeframe,"--through-date",through,persist ? "--persist":"--no-persist","--json"]
         case .verify: ["-m","fragarach_ii.commands.operations","verify","--database",database,"--json"]
@@ -55,10 +57,14 @@ public final class ProcessBridge: @unchecked Sendable {
         defer { lock.withLock { process=nil } }
         child.executableURL=URL(fileURLWithPath:config.python); child.arguments=args; child.currentDirectoryURL=URL(fileURLWithPath:config.repository)
         var env=ProcessInfo.processInfo.environment; env["PYTHONPATH"]="\(config.repository)/src"; for (k,v) in environment { env[k]=v }; child.environment=env; child.standardOutput=out; child.standardError=err
-        try child.run(); child.waitUntilExit()
+        try child.run()
+        let group=DispatchGroup(),outBuffer=PipeBuffer(),errBuffer=PipeBuffer()
+        group.enter();DispatchQueue.global(qos:.userInitiated).async{outBuffer.set(out.fileHandleForReading.readDataToEndOfFile());group.leave()}
+        group.enter();DispatchQueue.global(qos:.userInitiated).async{errBuffer.set(err.fileHandleForReading.readDataToEndOfFile());group.leave()}
+        child.waitUntilExit();group.wait()
         let secrets=Array(environment.values)
-        let stdout=SecretFilter.filter(String(decoding:out.fileHandleForReading.readDataToEndOfFile(),as:UTF8.self),secrets:secrets).trimmingCharacters(in:.whitespacesAndNewlines)
-        let stderr=SecretFilter.filter(String(decoding:err.fileHandleForReading.readDataToEndOfFile(),as:UTF8.self),secrets:secrets).trimmingCharacters(in:.whitespacesAndNewlines)
+        let stdout=SecretFilter.filter(String(decoding:outBuffer.get(),as:UTF8.self),secrets:secrets).trimmingCharacters(in:.whitespacesAndNewlines)
+        let stderr=SecretFilter.filter(String(decoding:errBuffer.get(),as:UTF8.self),secrets:secrets).trimmingCharacters(in:.whitespacesAndNewlines)
         return ProcessResult(operationID:id,exitCode:child.terminationStatus,stdout:stdout,stderr:stderr)
     }
 }

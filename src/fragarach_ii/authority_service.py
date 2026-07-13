@@ -46,12 +46,12 @@ def serve_historical_authority(
             SELECT asset, timeframe, aliases_json, provider_id, provider_contract,
                    provider_symbol, registration_status, evidence_confirmed_at_utc
             FROM instrument_registrations
-            WHERE asset=? AND timeframe=?
+            WHERE asset=? AND timeframe='D1'
             """,
-            (normalized_symbol, normalized_timeframe),
+            (normalized_symbol,),
         ).fetchone()
         if registration is None:
-            registration = _registration_by_alias(connection, normalized_symbol, normalized_timeframe)
+            registration = _registration_by_alias(connection, normalized_symbol, "D1")
         if registration is None:
             raise AuthorityServiceError(
                 "UNREGISTERED_LANE", f"{normalized_symbol}:{normalized_timeframe}"
