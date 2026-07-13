@@ -20,7 +20,7 @@ def acquire_resolved(database_path:str|Path,*,asset:str,from_date:str,through_da
             if provider=="TWELVE_DATA":
                 end=date.fromisoformat(through_date);start=max(date.fromisoformat(from_date),end-timedelta(days=4999))
                 result=acquire_twelve_data(database_path,asset=asset,timeframe="D1",from_date=start.isoformat(),through_date=through_date,merge_mode=merge_mode,credential=credential,transport=twelve_transport,provider_symbol_override=symbol if not registration[1] else None).as_dict()
-                result["warnings"]=["Twelve Data best-available history is limited to 5,000 calendar days."] if start>date.fromisoformat(from_date) else []
+                result["warnings"]=[*result.get("warnings",[]),*(["Twelve Data best-available history is limited to 5,000 calendar days."] if start>date.fromisoformat(from_date) else [])]
             else:result=acquire_yahoo(database_path,asset=asset,asset_class=asset_class,from_date=from_date,through_date=through_date,merge_mode=merge_mode,fetch=yahoo_fetch)
             result["provider_attempts"]=attempts+[{"provider":provider,"result":"SUCCESS"}];return result
         except Exception as error:attempts.append({"provider":provider,"result":"FAILED","reason":str(error)})

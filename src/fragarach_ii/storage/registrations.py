@@ -80,6 +80,13 @@ def canonical_registration(candidate: RegistrationCandidate) -> tuple[str, str, 
 
 
 def register_instrument(database_path: str | Path, candidate: RegistrationCandidate, *, registered_at_utc: str) -> RegistrationResult:
+    from ..retirement import is_permanently_removed,is_retired,restore_removed_registration
+    try:
+        was_removed=is_permanently_removed(database_path,candidate.asset,candidate.timeframe)
+        was_retired=is_retired(database_path,candidate.asset,candidate.timeframe)
+    except (sqlite3.Error,RuntimeError):
+        was_removed=was_retired=False
+    if was_retired:raise RegistrationError("INSTRUMENT_RETIRED_REACTIVATION_REQUIRED",candidate.asset)
     aliases_json, provider_key, identity_json, checksum = canonical_registration(candidate)
     mapped=candidate.provider_id is not None; contract="INSTRUMENT_REGISTRATION_V1" if mapped else "INSTRUMENT_REGISTRATION_V2";version=1 if mapped else 2;status="REGISTERED_NO_EVIDENCE" if mapped else "REGISTERED_UNMAPPED"
     values = (candidate.asset,candidate.timeframe,contract,version,candidate.instrument_family,candidate.local_symbol,
@@ -94,7 +101,7 @@ def register_instrument(database_path: str | Path, candidate: RegistrationCandid
             existing = connection.execute("SELECT identity_checksum_sha256,provider_identity_key,registration_status FROM instrument_registrations WHERE asset=? AND timeframe=?",(candidate.asset,candidate.timeframe)).fetchone()
             if existing:
                 if existing[0] != checksum: raise RegistrationError("CANONICAL_ASSET_COLLISION", candidate.asset)
-                outcome, status = "EXISTING_IDENTICAL", existing[2]
+                outcome, status = ("REREGISTERED_AFTER_REMOVAL" if was_removed else "EXISTING_IDENTICAL"), existing[2]
             else:
                 try: connection.execute("INSERT INTO instrument_registrations VALUES ("+",".join("?" for _ in values)+")",values)
                 except sqlite3.IntegrityError as error: raise RegistrationError("PROVIDER_OR_NAME_COLLISION",str(error)) from error
@@ -102,6 +109,7 @@ def register_instrument(database_path: str | Path, candidate: RegistrationCandid
             connection.execute("""INSERT OR IGNORE INTO evidence_lanes
               (asset,timeframe,registration_timeframe,lane_contract,lane_contract_version,created_at_utc)
               VALUES (?, 'D1', 'D1', 'EVIDENCE_LANE_V1', 1, ?)""",(candidate.asset,registered_at_utc))
+    if was_removed:restore_removed_registration(database_path,candidate.asset,registered_at=registered_at_utc)
     connection = open_read_only(database_path)
     try:
         row=connection.execute("SELECT identity_json,identity_checksum_sha256 FROM instrument_registrations WHERE asset=? AND timeframe=?",(candidate.asset,candidate.timeframe)).fetchone()

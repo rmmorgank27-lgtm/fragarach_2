@@ -8,7 +8,7 @@ from pathlib import Path
 from .storage import open_read_only
 from .truth_engine import TruthEngineError, truth_state_for_lane
 from .fx_orientation import orientation_for
-from .retirement import retirement_state
+from .retirement import removal_state,retirement_state
 from .market_registry import load_registry,provider_mapping,search_registry
 
 MARKET_DISCOVERY_CONTRACT = "fragarach_ii.market_discovery.v2"
@@ -99,18 +99,20 @@ def discover_market(database_path:str|Path,query:str)->dict[str,object]:
 def _market_result(db,definition,reason,requested,confidence):
     registrations=_registrations(db); reps=[]; existing=[]
     for r in definition.representations:
-        reg=_registration_for(r,registrations); retired=retirement_state(db,r.symbol);context=_registration_context(db,reg,retired) if reg else None
+        physical_reg=_registration_for(r,registrations); retired=retirement_state(db,r.symbol);removed=removal_state(db,r.symbol);reg=None if removed else physical_reg;context=_registration_context(db,reg,retired) if reg else None
         if context:existing.append(context)
-        plan=_registration_plan(definition,r) if not reg and not retired else None
+        plan=_registration_plan(definition,r) if (not reg and not retired) else None
         warning=_warning(r)
-        lanes=_timeframe_lanes(r,definition,registrations,retired)
-        reps.append({**asdict(r),"registration_status":retired["lifecycle_state"] if retired else reg[1] if reg else "NOT_REGISTERED","provider_mapping_status":"KNOWN_MAPPING" if r.provider_symbol else "DISCOVERY_REQUIRED","acquisition_readiness":"HISTORICAL_ONLY" if retired else "READY_FOR_REGISTRATION" if plan else "OPEN_EXISTING" if reg else "PROVIDER_DISCOVERY_REQUIRED","warnings":tuple(filter(None,(warning,))),"registration_plan":plan,"timeframe_lanes":lanes,"retirement":retired})
+        lanes=_timeframe_lanes(r,definition,() if removed else registrations,retired)
+        reps.append({**asdict(r),"registration_status":retired["lifecycle_state"] if retired else "PERMANENTLY_REMOVED" if removed else reg[1] if reg else "NOT_REGISTERED","provider_mapping_status":"KNOWN_MAPPING" if r.provider_symbol else "DISCOVERY_REQUIRED","acquisition_readiness":"HISTORICAL_ONLY" if retired else "READY_FOR_REGISTRATION" if plan else "OPEN_EXISTING" if reg else "PROVIDER_DISCOVERY_REQUIRED","warnings":tuple(filter(None,(warning,))),"registration_plan":plan,"timeframe_lanes":lanes,"retirement":retired,"removal":removed})
     selected=requested or (None if definition.canonical_identity in {"COMPANY:ALPHABET","COMMODITY:SILVER"} else definition.default_symbol)
     recommendation=next((r for r in reps if r["symbol"]==selected),None)
-    providers=tuple(_provider_mapping(r,_registration_for(r,registrations)) for r in definition.representations)
+    providers=tuple(_provider_mapping(r,None if removal_state(db,r.symbol) else _registration_for(r,registrations)) for r in definition.representations)
     result={"underlying_market":definition.underlying_market,"canonical_identity":definition.canonical_identity,"confidence":confidence,"market_type":definition.market_type,"asset_class":definition.asset_class,"description":definition.description,"known_aliases":definition.aliases,"representations":tuple(reps),"provider_discovery":providers,"recommendation":{"representation_type":recommendation["representation_type"] if recommendation else "OPERATOR_SELECTION_REQUIRED","symbol":recommendation["symbol"] if recommendation else "","display_name":recommendation["display_name"] if recommendation else "Select a representation","reason":reason,"alternatives":tuple(r.symbol for r in definition.representations if r.symbol!=selected)},"metadata":{"market":definition.underlying_market,"asset_class":definition.asset_class,"exchange":recommendation["exchange"] if recommendation else None,"timezone":definition.timezone,"sessions":definition.sessions,"currencies":tuple(dict.fromkeys(r.currency for r in definition.representations if r.currency)),"aliases":definition.aliases,"provider_mappings":tuple(p["known_symbol"] for p in providers if p["known_symbol"]),"registration_state":"REGISTERED" if existing else "NOT_REGISTERED"},"existing_registrations":tuple(existing),"acquisition_readiness":recommendation["acquisition_readiness"] if recommendation else "REPRESENTATION_SELECTION_REQUIRED","resolution_reason":reason,"required_operator_decisions":(() if recommendation else ("Select the intended tradable representation.",)),"available_actions":(("OPEN_EXISTING",) if recommendation and recommendation["registration_status"]!="NOT_REGISTERED" else ("ADD_TO_FRAGARACH",) if recommendation and recommendation["registration_plan"] else ())}
     if recommendation and recommendation.get("retirement"):
-        result["available_actions"]=("VIEW_RETIREMENT",);result["acquisition_readiness"]="DISABLED_RETIRED";result["metadata"]["registration_state"]="HISTORICAL_RETIRED"
+        result["available_actions"]=("REACTIVATE","PERMANENTLY_REMOVE","VIEW_RETIREMENT");result["acquisition_readiness"]="DISABLED_RETIRED";result["metadata"]["registration_state"]="HISTORICAL_RETIRED"
+    elif recommendation and recommendation.get("removal"):
+        result["available_actions"]=("ADD_TO_FRAGARACH",);result["acquisition_readiness"]="READY_FOR_REGISTRATION";result["metadata"]["registration_state"]="PERMANENTLY_REMOVED"
     if definition.asset_class=="FX":
         orientation=orientation_for(definition.canonical_identity.split(":",1)[1]);result["fx_orientation"]=orientation
         if orientation["orientation_state"]!="DIRECT_PROVIDER_SUPPORTED":

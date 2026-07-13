@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .storage import open_read_only
-from .retirement import is_retired
+from .retirement import is_permanently_removed,is_retired
 
 
 TRUTH_STATE_CONTRACT = "fragarach_ii.truth_state.v1"
@@ -28,6 +28,7 @@ def truth_state_for_lane(
 
     symbol = symbol.strip().upper()
     timeframe = timeframe.strip().upper()
+    if is_permanently_removed(database_path,symbol,timeframe):raise TruthEngineError("REMOVED_LANE",f"{symbol}:{timeframe}")
     if is_retired(database_path,symbol,timeframe):raise TruthEngineError("RETIRED_LANE",f"{symbol}:{timeframe}")
     connection = open_read_only(database_path)
     try:

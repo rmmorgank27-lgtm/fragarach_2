@@ -8,7 +8,7 @@ import re
 from datetime import date
 
 from fragarach_ii.ingestion.validation import RowValidationError, deduplicate_bars, stage_record
-from fragarach_ii.staging import StagingBatch
+from fragarach_ii.staging import StagingBatch, StagingRejection
 
 
 _D1_DATETIME = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:[ T]00:00:00)?(?:Z)?$")
@@ -45,6 +45,7 @@ def stage_twelve_data_response(
     if meta.get("interval") != "1day":
         raise ProviderPayloadError("INTERVAL_MISMATCH", "provider response interval mismatch")
     bars = []
+    row_rejections = []
     for index, observation in enumerate(values, start=1):
         if not isinstance(observation, dict):
             raise ProviderPayloadError("INVALID_OBSERVATION", f"observation {index} is not an object")
@@ -79,13 +80,16 @@ def stage_twelve_data_response(
                 )
             )
         except RowValidationError as error:
+            if error.code == "INVALID_OHLC":
+                row_rejections.append(StagingRejection(index, error.code, str(error)))
+                continue
             raise ProviderPayloadError(error.code, f"observation {index}: {error}") from error
     ordered, rejections, identical, conflicting = deduplicate_bars(bars)
     if rejections:
         raise ProviderPayloadError("CONFLICTING_DUPLICATE", rejections[0].message)
     return StagingBatch(
         bars=ordered,
-        rejections=(),
+        rejections=tuple(row_rejections),
         source_rows=len(values),
         duplicate_identical=identical,
         duplicate_conflicting=conflicting,

@@ -12,7 +12,9 @@ import SwiftUI
     @Published var auditFilter = ""
     @Published var snapshot: AuthoritySnapshot?
     @Published var estateTruth: EstateTruthState?
+    @Published var estateHierarchy: EstateHierarchy?
     @Published var selectedTruthLaneID: String?
+    @Published var truthNavigationRequestID: String?
     @Published var estateTruthError: String?
     @Published var selectedLaneID: String?
     @Published var selectedOperationID: String?
@@ -36,11 +38,12 @@ import SwiftUI
                 try bridge.validateCLI(config)
                 let process=try bridge.run(.readEstateTruth,config:config)
                 guard process.exitCode==0 else { throw BridgeError.malformedResult }
-                return try JSONDecoder().decode(EstateTruthState.self,from:Data(process.stdout.utf8))
+                let state=try JSONDecoder().decode(EstateTruthState.self,from:Data(process.stdout.utf8))
+                return (state,EstateHierarchy(lanes:state.truthMatrix))
             }.value
-            estateTruth=result; estateTruthError=nil
-            if selectedTruthLaneID==nil || !result.truthMatrix.contains(where:{$0.id==selectedTruthLaneID}) { selectedTruthLaneID=result.truthMatrix.first?.id }
-        } catch { estateTruthError=error.localizedDescription }
+            estateTruth=result.0;estateHierarchy=result.1;estateTruthError=nil
+            if selectedTruthLaneID==nil || !result.0.truthMatrix.contains(where:{$0.id==selectedTruthLaneID}) { selectedTruthLaneID=result.0.truthMatrix.first?.id }
+        } catch { estateTruthError=error.localizedDescription;estateHierarchy=nil }
         do { let path=databasePath; let result=try await Task.detached { try self.reader.load(path:path) }.value; snapshot=result; readError=nil; if selectedLaneID==nil { selectedLaneID=result.lanes.first?.id } }
         catch { readError=error.localizedDescription }
     }

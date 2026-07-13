@@ -176,8 +176,15 @@ def _ensure_raw_block(connection: sqlite3.Connection, evidence: RawEvidence) -> 
 
 
 def _require_registration(connection: sqlite3.Connection, symbol: str, timeframe: str) -> None:
-    if connection.execute("SELECT 1 FROM authority_events WHERE event_kind IN ('REGISTRATION_SUPERSEDED','LANE_SUPERSEDED') AND json_extract(canonical_payload,'$.body.asset')=? AND (json_extract(canonical_payload,'$.body.scope')='WHOLE_INSTRUMENT' OR json_extract(canonical_payload,'$.body.timeframe')=?)",(symbol,timeframe)).fetchone() is not None:
-        raise ValueError(f"INSTRUMENT_RETIRED: {symbol}:{timeframe}")
+    lifecycle=connection.execute("""SELECT json_extract(e.canonical_payload,'$.body.lifecycle_state')
+      FROM authority_events e
+      WHERE json_extract(e.canonical_payload,'$.body.asset')=?
+        AND json_extract(e.canonical_payload,'$.body.timeframe')=?
+        AND json_type(e.canonical_payload,'$.body.lifecycle_state')='text'
+        AND NOT EXISTS(SELECT 1 FROM authority_events successor WHERE successor.supersedes_event_id=e.authority_event_id)
+      ORDER BY e.effective_from_utc DESC,e.recorded_at_utc DESC,e.authority_event_id DESC LIMIT 1""",(symbol,timeframe)).fetchone()
+    if lifecycle and (lifecycle[0].startswith("RETIRED") or lifecycle[0].startswith("QUARANTINED") or lifecycle[0]=="PERMANENTLY_REMOVED"):
+        raise ValueError(f"INSTRUMENT_INACTIVE: {symbol}:{timeframe}:{lifecycle[0]}")
     if connection.execute("""SELECT 1 FROM evidence_lanes l JOIN instrument_registrations r
       ON r.asset=l.asset AND r.timeframe=l.registration_timeframe
       WHERE l.asset=? AND l.timeframe=?""",(symbol,timeframe)).fetchone() is None:
@@ -185,10 +192,10 @@ def _require_registration(connection: sqlite3.Connection, symbol: str, timeframe
 
 
 def _confirm_registration_evidence(connection: sqlite3.Connection, symbol: str, timeframe: str, observed_at: str) -> None:
-    row=connection.execute("SELECT registration_status FROM instrument_registrations WHERE asset=? AND timeframe=?",(symbol,timeframe)).fetchone()
-    if row == ("REGISTERED_NO_EVIDENCE",):
+    row=connection.execute("SELECT registration_status,evidence_confirmed_at_utc FROM instrument_registrations WHERE asset=? AND timeframe=?",(symbol,timeframe)).fetchone()
+    if row and row[0] == "REGISTERED_NO_EVIDENCE":
         connection.execute("UPDATE instrument_registrations SET registration_status='REGISTERED_WITH_EVIDENCE',evidence_confirmed_at_utc=? WHERE asset=? AND timeframe=?",(observed_at,symbol,timeframe))
-    elif row == ("REGISTERED_UNMAPPED",):
+    elif row == ("REGISTERED_UNMAPPED", None):
         connection.execute("UPDATE instrument_registrations SET evidence_confirmed_at_utc=? WHERE asset=? AND timeframe=?",(observed_at,symbol,timeframe))
     mismatch=connection.execute("""SELECT 1 FROM instrument_registrations r WHERE r.asset=? AND r.timeframe=? AND
       ((r.registration_status IN ('REGISTERED_WITH_EVIDENCE','REGISTERED_UNMAPPED') AND r.evidence_confirmed_at_utc IS NOT NULL) <> EXISTS(SELECT 1 FROM bars b WHERE b.asset=r.asset AND b.timeframe=r.timeframe))""",(symbol,timeframe)).fetchone()

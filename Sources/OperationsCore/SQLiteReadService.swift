@@ -37,9 +37,13 @@ public final class SQLiteReadService: @unchecked Sendable {
                coalesce(r.provider_id,(SELECT json_extract(i.detail,'$.provider') FROM ingest_runs i WHERE i.status='committed' AND json_extract(i.detail,'$.asset')=r.asset AND json_extract(i.detail,'$.mapping_state')='CONFIRMED_BY_VALID_EVIDENCE' ORDER BY i.finished_at_utc DESC LIMIT 1),''),
                coalesce(r.provider_contract,(SELECT json_extract(i.detail,'$.provider_contract') FROM ingest_runs i WHERE i.status='committed' AND json_extract(i.detail,'$.asset')=r.asset AND json_extract(i.detail,'$.mapping_state')='CONFIRMED_BY_VALID_EVIDENCE' ORDER BY i.finished_at_utc DESC LIMIT 1),''),
                coalesce(r.provider_symbol,(SELECT json_extract(i.detail,'$.provider_symbol') FROM ingest_runs i WHERE i.status='committed' AND json_extract(i.detail,'$.asset')=r.asset AND json_extract(i.detail,'$.mapping_state')='CONFIRMED_BY_VALID_EVIDENCE' ORDER BY i.finished_at_utc DESC LIMIT 1),''),r.registration_status,
-               EXISTS(SELECT 1 FROM authority_events e WHERE e.event_kind='LANE_SUPERSEDED'
-                 AND json_extract(e.canonical_payload,'$.body.asset')=r.asset
-                 AND json_extract(e.canonical_payload,'$.body.timeframe')=r.timeframe)
+               EXISTS(SELECT 1 FROM authority_events e
+                 WHERE json_extract(e.canonical_payload,'$.body.asset')=r.asset
+                 AND json_extract(e.canonical_payload,'$.body.timeframe')=r.timeframe
+                 AND (json_extract(e.canonical_payload,'$.body.lifecycle_state') LIKE 'RETIRED%'
+                   OR json_extract(e.canonical_payload,'$.body.lifecycle_state') LIKE 'QUARANTINED%'
+                   OR json_extract(e.canonical_payload,'$.body.lifecycle_state')='PERMANENTLY_REMOVED')
+                 AND NOT EXISTS(SELECT 1 FROM authority_events successor WHERE successor.supersedes_event_id=e.authority_event_id))
         FROM instrument_registrations r ORDER BY r.display_name,r.asset,r.timeframe
         """
         var statement: OpaquePointer?; try prepare(db,sql,&statement); defer{sqlite3_finalize(statement)}
@@ -74,7 +78,9 @@ public final class SQLiteReadService: @unchecked Sendable {
         SELECT l.asset,l.timeframe,l.high_watermark_open_time_utc,l.state_version,l.last_ingest_run_id,l.updated_at_utc,
                count(b.open_time_utc),min(b.open_time_utc),max(b.open_time_utc),l.validation_summary
         FROM lane_state l LEFT JOIN bars b ON b.asset=l.asset AND b.timeframe=l.timeframe
-        WHERE NOT EXISTS (SELECT 1 FROM authority_events e WHERE e.event_kind='LANE_SUPERSEDED' AND json_extract(e.canonical_payload,'$.body.asset')=l.asset AND json_extract(e.canonical_payload,'$.body.timeframe')=l.timeframe)
+        WHERE NOT EXISTS (SELECT 1 FROM authority_events e WHERE json_extract(e.canonical_payload,'$.body.asset')=l.asset AND json_extract(e.canonical_payload,'$.body.timeframe')=l.timeframe
+          AND (json_extract(e.canonical_payload,'$.body.lifecycle_state') LIKE 'RETIRED%' OR json_extract(e.canonical_payload,'$.body.lifecycle_state') LIKE 'QUARANTINED%' OR json_extract(e.canonical_payload,'$.body.lifecycle_state')='PERMANENTLY_REMOVED')
+          AND NOT EXISTS(SELECT 1 FROM authority_events successor WHERE successor.supersedes_event_id=e.authority_event_id))
         GROUP BY l.asset,l.timeframe ORDER BY l.asset,l.timeframe
         """
         var statement: OpaquePointer?; try prepare(db, sql, &statement); defer { sqlite3_finalize(statement) }

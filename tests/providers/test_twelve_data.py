@@ -195,6 +195,21 @@ class TwelveDataAcquisitionTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, code)
             self.assertEqual(_counts(database)[:4], (0, 0, 0, 0))
 
+    def test_invalid_provider_ohlc_row_is_rejected_without_weakening_validation(self) -> None:
+        payload = json.loads(_fixture("audusd_d1_2026-07-09_2026-07-10.json"))
+        payload["values"][0]["low"] = "0.70000"
+        body = json.dumps(payload, separators=(",", ":")).encode()
+
+        result, _ = self.acquire(body)
+
+        self.assertEqual((result.received, result.staged, result.inserted, result.rejected), (2, 1, 1, 1))
+        self.assertEqual(result.ingest_state, "COMPLETED_WITH_WARNINGS")
+        self.assertEqual(result.warnings, ("1 provider observation(s) rejected by structural OHLC validation.",))
+        with open_read_only(self.database) as connection:
+            detail = json.loads(connection.execute("SELECT detail FROM ingest_runs").fetchone()[0])
+            self.assertEqual(detail["rejections"], [{"code":"INVALID_OHLC","message":"high is below low","source_row_number":1}])
+            self.assertEqual(connection.execute("SELECT count(*) FROM bars").fetchone()[0], 1)
+
         for body, code in (
             (b"not-json", "MALFORMED_PAYLOAD"),
             (b'{"status":"error","code":400,"message":"bad"}', "PROVIDER_DECLARED_ERROR"),

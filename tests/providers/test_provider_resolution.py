@@ -35,3 +35,17 @@ def test_yahoo_rejects_inverse_or_mismatched_fx_symbol():
         try:acquire_resolved(db,asset="EURUSD",from_date="2026-07-01",through_date="2026-07-11",merge_mode="preserve",credential=None,twelve_transport=FailingTwelve(),yahoo_fetch=lambda _:yahoo_payload("USDEUR=X"))
         except Exception as error:assert "No provider returned valid data" in str(error)
         else:raise AssertionError("mismatched inverse evidence was accepted")
+
+def test_unmapped_registration_evidence_confirmation_is_idempotent():
+    with tempfile.TemporaryDirectory() as tmp:
+        db=Path(tmp)/"authority.sqlite3";initialize_database(db);register(db,"EURUSD")
+        arguments=dict(database_path=db,asset="EURUSD",from_date="2026-07-01",through_date="2026-07-11",merge_mode="preserve",credential=None,twelve_transport=FailingTwelve(),yahoo_fetch=lambda _:yahoo_payload())
+        first=acquire_resolved(**arguments)
+        with open_read_only(db) as connection:
+            first_confirmation=connection.execute("select evidence_confirmed_at_utc from instrument_registrations where asset='EURUSD' and timeframe='D1'").fetchone()[0]
+        second=acquire_resolved(**arguments)
+        with open_read_only(db) as connection:
+            registration=connection.execute("select registration_status,evidence_confirmed_at_utc from instrument_registrations where asset='EURUSD' and timeframe='D1'").fetchone()
+        assert first["provider_symbol"]==second["provider_symbol"]=="EURUSD=X"
+        assert second["unchanged"]==2
+        assert registration==("REGISTERED_UNMAPPED",first_confirmation)

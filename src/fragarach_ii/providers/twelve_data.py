@@ -17,7 +17,7 @@ from fragarach_ii.ingestion.pipeline import IngestionResult
 from fragarach_ii.storage import open_read_only, registered_writer, transaction, registration_for_lane, RegistrationError, initialize_database
 from fragarach_ii.validation import validate_lane
 from fragarach_ii.fx_orientation import validate_direct_mapping
-from fragarach_ii.retirement import is_retired
+from fragarach_ii.retirement import is_permanently_removed,is_retired
 
 from .config import ProviderConfig, ProviderConfigurationError, load_provider_config
 from .http import (
@@ -108,6 +108,8 @@ def acquire_twelve_data(
 ) -> AcquisitionResult:
     normalized_asset = asset.strip().upper()
     normalized_timeframe = timeframe.strip().upper()
+    if is_permanently_removed(database_path,normalized_asset,normalized_timeframe):
+        raise AcquisitionError("INSTRUMENT_REMOVED",f"{normalized_asset}:{normalized_timeframe}")
     if is_retired(database_path,normalized_asset,normalized_timeframe):
         raise AcquisitionError("INSTRUMENT_RETIRED",f"{normalized_asset}:{normalized_timeframe}")
     if not credential:
@@ -194,7 +196,7 @@ def acquire_twelve_data(
             "through_date": through_date,
             "timeframe": normalized_timeframe,
         },
-        preserve_rejected_evidence=False,
+        preserve_rejected_evidence=True,
     )
     try:
         validation = validator(
@@ -250,7 +252,7 @@ def acquire_twelve_data(
         validation_outside_expected=validation_data["outside_expected_session_count"],
         validation_result_checksum=validation_data["result_checksum"],
         read_only_verification=verified,
-        warnings=(),
+        warnings=(f"{len(batch.rejections)} provider observation(s) rejected by structural OHLC validation.",) if batch.rejections else (),
     )
 
 def normalized_asset_class(database_path,asset,timeframe):

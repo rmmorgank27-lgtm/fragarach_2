@@ -12,21 +12,74 @@ class RetirementError(RuntimeError):
     def __init__(self,code,message):self.code=code;super().__init__(message)
 
 def retirement_state(database_path:str|Path,asset:str,timeframe:str|None=None):
-    connection=open_read_only(database_path)
-    try:
-        clauses=["event_kind IN ('REGISTRATION_SUPERSEDED','LANE_SUPERSEDED')","json_extract(canonical_payload,'$.body.asset')=?"];args=[asset.strip().upper()]
-        if timeframe:clauses.append("json_extract(canonical_payload,'$.body.timeframe')=?");args.append(timeframe.strip().upper())
-        row=connection.execute("SELECT authority_event_id,event_kind,canonical_payload,recorded_at_utc FROM authority_events WHERE "+" AND ".join(clauses)+" ORDER BY effective_from_utc DESC,recorded_at_utc DESC,authority_event_id DESC LIMIT 1",args).fetchone()
-        if not row:return None
-        body=json.loads(row[2])["body"];return {"retirement_id":body["retirement_id"],"event_id":row[0],"event_kind":row[1],"recorded_at":row[3],**body}
-    finally:connection.close()
+    state=_lifecycle_projection(database_path,asset,timeframe)
+    return state if state and state.get("retirement_id") and _is_retired_lifecycle(state.get("lifecycle_state")) else None
+
+def removal_state(database_path:str|Path,asset:str,timeframe:str|None=None):
+    state=_lifecycle_projection(database_path,asset,timeframe)
+    return state if state and state.get("lifecycle_state")=="PERMANENTLY_REMOVED" else None
 
 def is_retired(database_path,asset,timeframe=None):
     if not Path(database_path).expanduser().exists():return False
     return retirement_state(database_path,asset,timeframe) is not None or (timeframe is not None and retirement_state(database_path,asset) is not None)
 
+def is_permanently_removed(database_path,asset,timeframe=None):
+    if not Path(database_path).expanduser().exists():return False
+    return removal_state(database_path,asset,timeframe) is not None or (timeframe is not None and removal_state(database_path,asset) is not None)
+
+def reactivate_instrument(database_path:str|Path,asset:str,*,reactivated_at:str|None=None):
+    symbol=asset.strip().upper();retired=retirement_state(database_path,symbol)
+    if not retired:raise RetirementError("INSTRUMENT_NOT_RETIRED",symbol)
+    lanes=tuple(retired["selected_lanes"]);observed=reactivated_at or datetime.now(UTC).isoformat()
+    reactivation_id=hashlib.sha256(json.dumps([symbol,lanes,retired["retirement_id"],observed],separators=(",",":")).encode()).hexdigest()
+    results=[]
+    for lane in lanes:
+        for kind,event,extra in (("INSTRUMENT_REGISTRATION","REGISTRATION_REVISED",{"lifecycle_state":"ACTIVE"}),("EVIDENCE_LANE","LANE_REVISED",{"operational_state":"ACTIVE","acquisition_state":"ENABLED","evidence_state":"PRESERVED","serving_state":"ACTIVE","timeframe":lane})):
+            predecessor=_leaf_event(database_path,kind,symbol,lane)
+            if not predecessor:raise RetirementError("LIFECYCLE_HEAD_MISSING",f"{symbol}:{lane}:{kind}")
+            body={"reactivation_id":reactivation_id,"asset":symbol,"timeframe":lane,"selected_lanes":lanes,"lifecycle_state":"ACTIVE","reactivated_at":observed,"reactivates_retirement_id":retired["retirement_id"],**extra}
+            manifest=AuthorityEventManifest(kind,predecessor[1],event,observed,"SPEC-023_OPERATOR",(),"COMPATIBLE",(),body,supersedes_event_id=predecessor[0])
+            results.append(append_authority_event(database_path,manifest,recorded_at_utc=observed))
+    return {"contract":"fragarach_ii.instrument_reactivation_receipt.v1","outcome":"REACTIVATED","canonical_instrument":symbol,"reactivation_id":reactivation_id,"reactivates_retirement_id":retired["retirement_id"],"selected_lanes":lanes,"new_authority_state":"ACTIVE","evidence_state":"PRESERVED","provider_mapping_state":"PRESERVED","completed_timestamp":observed,"events_appended":len(results)}
+
+def permanent_removal_impact(database_path:str|Path,asset:str):
+    symbol=asset.strip().upper();retired=retirement_state(database_path,symbol)
+    if not retired:raise RetirementError("INSTRUMENT_NOT_RETIRED",symbol)
+    impact=retirement_impact(database_path,symbol,retired["scope"],tuple(retired["selected_lanes"]))
+    removable=impact["canonical_bars"]==0 and impact["provenance_records"]==0 and impact["raw_evidence_blocks"]==0
+    return {"contract":"fragarach_ii.permanent_removal_impact.v1","canonical_instrument":symbol,"retirement_id":retired["retirement_id"],"retired_at":retired["completed_at"],"reason":retired["reason"],"selected_lanes":tuple(retired["selected_lanes"]),"canonical_bars":impact["canonical_bars"],"provenance_records":impact["provenance_records"],"raw_evidence_blocks":impact["raw_evidence_blocks"],"removable":removable,"blocking_reason":None if removable else "Accepted evidence and provenance are immutable; reactivate this instrument instead.","required_confirmation":f"PERMANENTLY REMOVE {symbol}"}
+
+def permanently_remove_instrument(database_path:str|Path,asset:str,*,typed_confirmation:str,removed_at:str|None=None):
+    impact=permanent_removal_impact(database_path,asset);symbol=impact["canonical_instrument"]
+    if not impact["removable"]:raise RetirementError("IMMUTABLE_EVIDENCE_PREVENTS_REMOVAL",impact["blocking_reason"])
+    if typed_confirmation.strip().upper()!=impact["required_confirmation"]:raise RetirementError("TYPED_CONFIRMATION_REQUIRED",impact["required_confirmation"])
+    observed=removed_at or datetime.now(UTC).isoformat();removal_id=hashlib.sha256(json.dumps([symbol,impact["retirement_id"],observed],separators=(",",":")).encode()).hexdigest();results=[]
+    for lane in impact["selected_lanes"]:
+        for kind,event,extra in (("INSTRUMENT_REGISTRATION","REGISTRATION_SUPERSEDED",{}),("EVIDENCE_LANE","LANE_SUPERSEDED",{"operational_state":"REMOVED","acquisition_state":"DISABLED","evidence_state":"NO_EVIDENCE","serving_state":"NOT_SERVED","timeframe":lane})):
+            predecessor=_leaf_event(database_path,kind,symbol,lane)
+            if not predecessor:raise RetirementError("LIFECYCLE_HEAD_MISSING",f"{symbol}:{lane}:{kind}")
+            body={"removal_id":removal_id,"asset":symbol,"timeframe":lane,"selected_lanes":impact["selected_lanes"],"lifecycle_state":"PERMANENTLY_REMOVED","removed_at":observed,"removes_retirement_id":impact["retirement_id"],**extra}
+            manifest=AuthorityEventManifest(kind,predecessor[1],event,observed,"SPEC-023_OPERATOR",(),"COMPATIBLE",(),body,supersedes_event_id=predecessor[0])
+            results.append(append_authority_event(database_path,manifest,recorded_at_utc=observed))
+    return {"contract":"fragarach_ii.permanent_removal_receipt.v1","outcome":"PERMANENTLY_REMOVED","canonical_instrument":symbol,"removal_id":removal_id,"removed_retirement_id":impact["retirement_id"],"selected_lanes":impact["selected_lanes"],"new_authority_state":"PERMANENTLY_REMOVED","completed_timestamp":observed,"events_appended":len(results),"audit_history_preserved":True}
+
+def restore_removed_registration(database_path:str|Path,asset:str,*,registered_at:str):
+    symbol=asset.strip().upper();removed=removal_state(database_path,symbol)
+    if not removed:raise RetirementError("INSTRUMENT_NOT_REMOVED",symbol)
+    lanes=tuple(removed["selected_lanes"]);restoration_id=hashlib.sha256(json.dumps([symbol,removed["removal_id"],registered_at],separators=(",",":")).encode()).hexdigest();results=[]
+    for lane in lanes:
+        for kind,event,extra in (("INSTRUMENT_REGISTRATION","REGISTRATION_REVISED",{}),("EVIDENCE_LANE","LANE_REVISED",{"operational_state":"ACTIVE","acquisition_state":"ENABLED","evidence_state":"NO_EVIDENCE","serving_state":"ACTIVE","timeframe":lane})):
+            predecessor=_leaf_event(database_path,kind,symbol,lane)
+            if not predecessor:raise RetirementError("LIFECYCLE_HEAD_MISSING",f"{symbol}:{lane}:{kind}")
+            body={"restoration_id":restoration_id,"asset":symbol,"timeframe":lane,"selected_lanes":lanes,"lifecycle_state":"ACTIVE","registered_at":registered_at,"restores_removal_id":removed["removal_id"],**extra}
+            manifest=AuthorityEventManifest(kind,predecessor[1],event,registered_at,"SPEC-023_REGISTRATION",(),"COMPATIBLE",(),body,supersedes_event_id=predecessor[0])
+            results.append(append_authority_event(database_path,manifest,recorded_at_utc=registered_at))
+    return restoration_id
+
 def retirement_impact(database_path:str|Path,asset:str,scope="WHOLE_INSTRUMENT",selected_lanes:tuple[str,...]=()):
-    symbol=asset.strip().upper();connection=open_read_only(database_path)
+    symbol=asset.strip().upper()
+    if removal_state(database_path,symbol):raise RetirementError("PERMANENTLY_REMOVED_REQUIRES_FRESH_REGISTRATION",symbol)
+    connection=open_read_only(database_path)
     try:
         registrations=connection.execute("SELECT timeframe,registration_contract_version,provider_id,provider_symbol,registration_status FROM instrument_registrations WHERE asset=? ORDER BY timeframe",(symbol,)).fetchall()
         if not registrations:raise RetirementError("UNREGISTERED_INSTRUMENT",symbol)
@@ -69,6 +122,27 @@ def retire_instrument(database_path:str|Path,asset:str,*,scope:str,selected_lane
 
 def _lifecycle(reason):
     return {"INCORRECT_INSTRUMENT_IDENTITY":"RETIRED_INCORRECT_IDENTITY","INCORRECT_PAIR_ORIENTATION":"RETIRED_INCORRECT_ORIENTATION","WRONG_SYMBOL":"RETIRED_WRONG_SYMBOL","DUPLICATE_REGISTRATION":"RETIRED_DUPLICATE","INCORRECT_PROVIDER_MAPPING":"QUARANTINED_PROVIDER_MISMATCH","PROVIDER_EVIDENCE_MISMATCH":"QUARANTINED_EVIDENCE_CONCERN"}.get(reason,"RETIRED_OPERATOR_REQUEST")
+
+def _is_retired_lifecycle(state):
+    return isinstance(state,str) and (state.startswith("RETIRED") or state.startswith("QUARANTINED"))
+
+def _lifecycle_projection(database_path,asset,timeframe=None):
+    symbol=asset.strip().upper();lane=timeframe.strip().upper() if timeframe else None
+    events=inspect_authority(database_path)
+    matching=[]
+    for event in events:
+        body=event["payload"]["body"]
+        if body.get("asset")!=symbol:continue
+        if lane and body.get("timeframe")!=lane:continue
+        if event["entity_kind"] not in {"INSTRUMENT_REGISTRATION","EVIDENCE_LANE"}:continue
+        matching.append(event)
+    superseded={event["supersedes_event_id"] for event in matching if event["supersedes_event_id"]}
+    leaves=[event for event in matching if event["authority_event_id"] not in superseded]
+    lifecycle=[event for event in leaves if event["payload"]["body"].get("lifecycle_state")]
+    if not lifecycle:return None
+    event=sorted(lifecycle,key=lambda item:(item["effective_from_utc"],item["recorded_at_utc"],item["authority_event_id"]))[-1]
+    body=event["payload"]["body"]
+    return {"event_id":event["authority_event_id"],"event_kind":event["event_kind"],"recorded_at":event["recorded_at_utc"],**body}
 
 def _leaf_event(database_path,kind,asset,timeframe):
     events=inspect_authority(database_path,entity_kind=kind);matching=[e for e in events if e["entity_id"].endswith(f":{asset}:{timeframe}") or (e["payload"]["body"].get("asset")==asset and e["payload"]["body"].get("timeframe")==timeframe) or (e["payload"]["body"].get("legacy_key") or {}).get("asset")==asset]

@@ -32,6 +32,26 @@ func checkImportDispatch() throws {
     try check(!plan.matches(mode:.fetch,instrument:"USDJPY",timeframe:"D1",fileChecksum:"abc123"),"fetch result leaked into import")
     try check(!plan.matches(mode:.importFile,instrument:"USDJPY",timeframe:"D1",fileChecksum:"changed"),"stale file checksum accepted")
 }
+func checkEstateHierarchy() throws {
+    try check(EstateHierarchyClassifier.marketName(assetClass:"FX") == "Forex","FX market")
+    try check(EstateHierarchyClassifier.marketName(assetClass:"METALS") == "Metals","metals market")
+    try check(EstateHierarchyClassifier.marketName(assetClass:"US_EQUITIES") == "Stocks","stocks market")
+    try check(EstateHierarchyClassifier.marketName(assetClass:"AGRICULTURE") == "Agriculture","future market expansion")
+    try check(EstateHierarchyClassifier.canonicalMarkets == ["Forex","Metals","Energy","Indices","Stocks","Crypto"],"canonical market order")
+    func subgroup(_ symbol:String)->String?{EstateHierarchyClassifier.subgroupName(market:"Forex",symbol:symbol,assetClass:"FX",exchange:"OTC")}
+    try check(subgroup("EURUSD") == "Majors","major route")
+    try check(subgroup("AUDCAD") == "Minors","minor route")
+    try check(subgroup("GBPJPY") == "Crosses","cross route")
+    try check(subgroup("USDMXN") == "Exotics","exotic route")
+    try check(EstateHierarchyClassifier.subgroupName(market:"Stocks",symbol:"AAPL",assetClass:"US_EQUITIES",exchange:"NASDAQ") == "US","US stock route")
+    try check(EstateHierarchyClassifier.subgroupName(market:"Indices",symbol:"XJO",assetClass:"INDICES",exchange:"ASX") == "Australia","Australian index route")
+    try check(EstateHierarchyClassifier.subgroupName(market:"Crypto",symbol:"BTCUSD",assetClass:"CRYPTO",exchange:"Digital asset venues") == "All","crypto route")
+}
+if ProcessInfo.processInfo.environment["FOCUSED_ESTATE_HIERARCHY"] == "1" {
+    try run("hierarchical Estate Truth routing and future expansion",checkEstateHierarchy)
+    print("OperationsCoreChecks: \(passed) focused checks passed")
+    exit(EXIT_SUCCESS)
+}
 if ProcessInfo.processInfo.environment["FOCUSED_IMPORT_DISPATCH"] == "1" {
     try run("import plans dispatch only immutable CSV ingestion and isolate results",checkImportDispatch)
     print("OperationsCoreChecks: \(passed) focused checks passed")
