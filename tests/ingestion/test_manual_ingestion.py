@@ -127,8 +127,13 @@ class ManualIngestionTests(unittest.TestCase):
         original = self.write("original.csv", "2026-07-09,1,2,0,1,10\n")
         changed = self.write("changed.csv", "2026-07-09,1,2,0,1.5,11\n")
         initial = self.ingest(original)
+        truth_before_conflict = truth_state_for_lane(self.database, symbol="AUDUSD", timeframe="D1")
         preserved = self.ingest(changed)
         self.assertEqual(preserved.conflicts_preserved, 1)
+        self.assertEqual(
+            truth_state_for_lane(self.database, symbol="AUDUSD", timeframe="D1"),
+            truth_before_conflict,
+        )
         connection = open_read_only(self.database)
         try:
             self.assertEqual(connection.execute("SELECT close FROM bars").fetchone()[0], "1")
@@ -176,6 +181,18 @@ class ManualIngestionTests(unittest.TestCase):
             )
         finally:
             connection.close()
+
+    def test_invalid_evidence_does_not_improve_truth(self) -> None:
+        valid = self.write("valid.csv", "2026-07-09,1,2,0,1,10\n")
+        self.ingest(valid)
+        before = truth_state_for_lane(self.database, symbol="AUDUSD", timeframe="D1")
+        invalid = self.write("invalid-after-authority.csv", "2026-07-10,1,0,2,1,-1\n")
+        result = self.ingest(invalid)
+        self.assertEqual(result.transaction_state, "failed")
+        self.assertEqual(
+            truth_state_for_lane(self.database, symbol="AUDUSD", timeframe="D1"),
+            before,
+        )
 
     def test_exact_duplicate_rows_collapse_deterministically(self) -> None:
         source = self.write(

@@ -120,6 +120,7 @@ public struct TruthScoreComponent: Codable, Equatable, Sendable {
 
 public struct TruthExplanation: Codable, Equatable, Sendable {
     public let method: String
+    public let weights: [String: Int]?
     public let components: [String: TruthScoreComponent]
     public let limitations: [String]
 }
@@ -164,7 +165,9 @@ public struct TruthState: Codable, Equatable, Sendable {
     public let timeframe: String
     public let truthScore: Int
     public let authorityScore: Int
+    public let integrityScore: Int?
     public let freshnessScore: Int?
+    public let historicalDepthScore: Int?
     public let coverageScore: Int?
     public let continuityScore: Int?
     public let validationScore: Int?
@@ -181,6 +184,7 @@ public struct TruthState: Codable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey {
         case contract, symbol, timeframe, caodt, coverage, epoch, explanation
         case engineVersion = "engine_version", truthScore = "truth_score", authorityScore = "authority_score"
+        case integrityScore = "integrity_score", historicalDepthScore = "historical_depth_score"
         case freshnessScore = "freshness_score", coverageScore = "coverage_score", continuityScore = "continuity_score"
         case validationScore = "validation_score", providerScore = "provider_score", authorityState = "authority_state"
         case validationState = "validation_state", gapClassification = "gap_classification", gapImpact = "gap_impact"

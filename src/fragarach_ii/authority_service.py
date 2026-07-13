@@ -149,7 +149,7 @@ def _response(symbol, timeframe, registration, rows, validation, provenance_coun
         "caodt": caodt,
         "authority_state": truth_state["authority_state"],
         "validation_state": truth_state["validation_state"],
-        "truth_score": {"score": truth_state["truth_score"], "maximum": 100, "components": {name: truth_state["explanation"]["components"][name] for name in ("authority", "freshness", "validation", "coverage")}},
+        "truth_score": {"score": truth_state["truth_score"], "maximum": 100, "components": {name: truth_state["explanation"]["components"][name] for name in ("authority", "integrity", "freshness", "historical_depth", "continuity")}},
         "truth_state": truth_state,
         "gap_summary": {
             "current_gaps": current,

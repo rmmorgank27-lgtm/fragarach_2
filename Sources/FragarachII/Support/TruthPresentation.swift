@@ -6,5 +6,5 @@ enum TruthPresentation {
     }
     static func value(_ value:Int?)->String { value.map(String.init) ?? "Not measured" }
     static func text(_ value:String?)->String { value ?? "Not measured" }
-    static let componentOrder=["authority","freshness","coverage","continuity","validation","provider"]
+    static let componentOrder=["authority","integrity","freshness","historical_depth","continuity","provider"]
 }

@@ -25,7 +25,7 @@ class AuthorityServiceTests(unittest.TestCase):
             self.assertEqual(response["operational_metadata"]["symbol"], "AUDUSD")
             self.assertEqual(response["validation_state"], "LIMITED")
             self.assertEqual(response["gap_summary"]["operational_impact"], "HIGH")
-            self.assertEqual(set(response["truth_score"]["components"]), {"authority", "freshness", "validation", "coverage"})
+            self.assertEqual(set(response["truth_score"]["components"]), {"authority", "integrity", "freshness", "historical_depth", "continuity"})
             self.assertEqual(response["provider_summary"]["provider_entitlement"], "NOT_RECORDED")
             self.assertEqual(before, database.stat().st_mtime_ns)
 

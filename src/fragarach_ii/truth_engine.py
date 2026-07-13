@@ -12,7 +12,20 @@ from .retirement import is_permanently_removed,is_retired
 
 
 TRUTH_STATE_CONTRACT = "fragarach_ii.truth_state.v1"
-TRUTH_ENGINE_VERSION = 1
+TRUTH_ENGINE_VERSION = 2
+
+# Operational Truth weights. Freshness dominates the current edge, while
+# historical depth is intentionally more valuable than perfect continuity over
+# a shallow record. Each lane is scored against its own timeframe horizon.
+TRUTH_COMPONENT_WEIGHTS = {
+    "authority": 15,
+    "integrity": 20,
+    "freshness": 30,
+    "historical_depth": 25,
+    "continuity": 10,
+}
+_TIMEFRAME_SECONDS = {"D1": 86_400, "H1": 3_600, "M30": 1_800, "M5": 300}
+_DEPTH_HORIZON_DAYS = {"D1": 3_652.5, "H1": 1_095.75, "M30": 730.5, "M5": 365.25}
 
 
 class TruthEngineError(RuntimeError):
@@ -94,15 +107,18 @@ def _calculate(symbol, timeframe, registration, range_row, validation, ledger):
     caodt = _iso_utc(latest if timeframe=="D1" else latest_close)
     authority_score = 100 if registration[3] == "REGISTERED_WITH_EVIDENCE" and ledger else 90 if registration[3] == "REGISTERED_WITH_EVIDENCE" else 75
     authority_basis = f"{registration[3]};" + ("LEDGER_BOUND" if ledger else "LEDGER_BINDING_NOT_PRESENT")
-    validation_state, validation_score = _validation(validation)
+    validation_state, integrity_score = _integrity(validation)
     intraday=bool(validation and validation.get("format")=="fragarach_ii.lane_validation_summary.v2")
     expected = validation.get("expected_interval_count" if intraday else "expected_session_count") if validation else None
     present = validation.get("present_expected_interval_count" if intraday else "present_expected_session_count") if validation else None
     missing = validation.get("missing_expected_interval_count" if intraday else "missing_expected_session_count") if validation else None
+    continuity_score = _continuity(validation, expected, present, missing)
+    # Retained as a compatibility alias for accepted v1 consumers. Coverage is
+    # no longer a separately weighted Truth component.
     coverage_score = round(100 * present / expected) if expected else None
-    continuity_score = round(100 * (expected - missing) / expected) if expected is not None and expected > 0 else None
     freshness_key="latest_expected_closed_interval_present" if intraday else "latest_expected_session_present"
-    freshness_score = 100 if validation and validation.get(freshness_key) else (50 if validation else None)
+    freshness_score = 100 if validation and validation.get(freshness_key) else (0 if validation else None)
+    depth_score, depth_basis = _historical_depth(timeframe, earliest, latest)
     gap_classification, gap_impact = _gaps(validation)
     provider_summary = {
         "provider": registration[0],
@@ -115,13 +131,23 @@ def _calculate(symbol, timeframe, registration, range_row, validation, ledger):
     components: dict[str, dict[str, object]] = {
         "authority": {"score": authority_score, "basis": authority_basis},
         "freshness": {"score": freshness_score, "basis": "LATEST_EXPECTED_SESSION_PRESENT" if freshness_score == 100 else "LATEST_EXPECTED_SESSION_NOT_CONFIRMED" if validation else "NOT_MEASURED"},
-        "coverage": {"score": coverage_score, "basis": f"{present}/{expected} expected sessions" if expected else "NOT_MEASURED"},
+        "integrity": {"score": integrity_score, "basis": validation_state},
+        "historical_depth": {"score": depth_score, "basis": depth_basis},
         "continuity": {"score": continuity_score, "basis": f"{missing} missing of {expected} expected sessions" if expected else "NOT_MEASURED"},
-        "validation": {"score": validation_score, "basis": validation_state},
         "provider": {"score": None, "basis": provider_summary["basis"]},
     }
-    measured = [item["score"] for item in components.values() if item["score"] is not None]
-    truth_score = round(sum(measured) / len(measured))
+    measured = {
+        name: components[name]["score"]
+        for name in TRUTH_COMPONENT_WEIGHTS
+        if components[name]["score"] is not None
+    }
+    measured_weight = sum(TRUTH_COMPONENT_WEIGHTS[name] for name in measured)
+    truth_score = round(
+        sum(measured[name] * TRUTH_COMPONENT_WEIGHTS[name] for name in measured)
+        / measured_weight
+    )
+    if truth_score == 100 and any(score < 100 for score in measured.values()):
+        truth_score = 99
     state = "GREEN" if truth_score >= 80 else "AMBER" if truth_score >= 50 else "RED"
     limitations = [name.upper() + "_NOT_MEASURED" for name, item in components.items() if item["score"] is None]
     return {
@@ -131,10 +157,12 @@ def _calculate(symbol, timeframe, registration, range_row, validation, ledger):
         "timeframe": timeframe,
         "truth_score": truth_score,
         "authority_score": authority_score,
+        "integrity_score": integrity_score,
         "freshness_score": freshness_score,
+        "historical_depth_score": depth_score,
         "coverage_score": coverage_score,
         "continuity_score": continuity_score,
-        "validation_score": validation_score,
+        "validation_score": integrity_score,
         "provider_score": None,
         "authority_state": state,
         "validation_state": validation_state,
@@ -158,23 +186,52 @@ def _calculate(symbol, timeframe, registration, range_row, validation, ledger):
         "provider_summary": provider_summary,
         "epoch": "UNKNOWN",
         "explanation": {
-            "method": "EQUAL_WEIGHT_MEAN_OF_MEASURED_COMPONENTS",
+            "method": "WEIGHTED_AUTHORITY_INTEGRITY_FRESHNESS_HISTORICAL_DEPTH_CONTINUITY_V2",
+            "weights": TRUTH_COMPONENT_WEIGHTS,
             "components": components,
             "limitations": limitations,
         },
     }
 
 
-def _validation(validation: dict[str, Any] | None) -> tuple[str, int | None]:
+def _integrity(validation: dict[str, Any] | None) -> tuple[str, int | None]:
     if validation is None:
         return "LIMITED", None
     outside=validation.get("outside_expected_interval_count",validation.get("outside_expected_session_count",0))
-    missing=validation.get("missing_expected_interval_count",validation.get("missing_expected_session_count",0))
     if validation.get("material_gap_count", 0) or outside:
         return "WARNING", 60
-    if missing:
-        return "WARNING", 80
+    if validation.get("missing_expected_interval_count",validation.get("missing_expected_session_count",0)):
+        return "WARNING", 100
     return "PASS", 100
+
+
+def _continuity(
+    validation: dict[str, Any] | None,
+    expected: int | None,
+    present: int | None,
+    missing: int | None,
+) -> int | None:
+    if validation is None or not expected or present is None or missing is None:
+        return None
+    ratio = max(0.0, min(1.0, present / expected))
+    if missing and not validation.get("material_gap_count", 0):
+        # Old, explicitly non-material gaps remain visible but occupy only the
+        # upper continuity band; they cannot erase years of usable authority.
+        return min(99, round(90 + 10 * ratio))
+    return round(100 * ratio)
+
+
+def _historical_depth(timeframe: str, earliest: int, latest: int) -> tuple[int, str]:
+    interval_seconds = _TIMEFRAME_SECONDS[timeframe]
+    horizon_days = _DEPTH_HORIZON_DAYS[timeframe]
+    span_seconds = max(interval_seconds, latest - earliest + interval_seconds)
+    span_days = span_seconds / 86_400
+    progress = min(1.0, span_days / horizon_days)
+    # A validated but shallow lane receives half-credit for depth. The remaining
+    # half is earned strictly through elapsed historical span.
+    score = round(50 + 50 * progress)
+    basis = f"{span_days:.2f} elapsed days / {horizon_days:.2f} day {timeframe} horizon"
+    return score, basis
 
 
 def _gaps(validation: dict[str, Any] | None) -> tuple[str, str]:
