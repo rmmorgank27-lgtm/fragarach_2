@@ -7,7 +7,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from fragarach_ii.ingestion.manual import ingest_manual_file
-from fragarach_ii.storage import open_read_only, verify_integrity
+from fragarach_ii.storage import initialize_database,open_read_only, verify_integrity
+from fragarach_ii.lane_commissioning import ensure_commissioned_lane
+from fragarach_ii.truth_engine import truth_state_for_lane
 
 
 FIXED_NOW = datetime(2026, 7, 10, 12, 0, tzinfo=UTC)
@@ -220,6 +222,31 @@ class ManualIngestionTests(unittest.TestCase):
             self.assertEqual(reopened.execute("SELECT count(*) FROM raw_blocks").fetchone()[0], 1)
         finally:
             reopened.close()
+
+    def test_h1_explicit_offset_import_preserves_raw_timestamp_provenance_and_refreshes_truth(self) -> None:
+        initialize_database(self.database)
+        ensure_commissioned_lane(self.database,"AUDUSD","H1",observed_at="2026-07-10T00:00:00+00:00")
+        source=self.write(
+            "AUDUSD_H1.csv",
+            "2026-07-10T12:00:00+03:00,1,2,0,1.5,10\n"
+            "2026-07-10T13:00:00+03:00,1.5,3,1,2,11\n",
+        )
+        payload=source.read_bytes()
+        result=self.ingest(source,timeframe="H1",clock=lambda:datetime(2026,7,10,16,30,tzinfo=UTC))
+        self.assertEqual((result.transaction_state,result.inserted,result.rejected),("committed",2,0))
+        with open_read_only(self.database) as connection:
+            bars=connection.execute("SELECT open_time_utc,close_time_utc FROM bars WHERE asset='AUDUSD' AND timeframe='H1' ORDER BY open_time_utc").fetchall()
+            self.assertEqual(bars,[(int(datetime(2026,7,10,9,tzinfo=UTC).timestamp()),int(datetime(2026,7,10,10,tzinfo=UTC).timestamp())),(int(datetime(2026,7,10,10,tzinfo=UTC).timestamp()),int(datetime(2026,7,10,11,tzinfo=UTC).timestamp()))])
+            event=connection.execute("SELECT raw_block_id,source_row_number FROM provenance WHERE symbol='AUDUSD' AND timeframe='H1' ORDER BY timestamp LIMIT 1").fetchone()
+            raw=connection.execute("SELECT payload FROM raw_blocks WHERE raw_block_id=?",(event[0],)).fetchone()[0]
+            self.assertEqual(raw,payload);self.assertEqual(raw.decode().splitlines()[event[1]-1].split(',')[0],"2026-07-10T12:00:00+03:00")
+            detail=json.loads(connection.execute("SELECT detail FROM ingest_runs WHERE ingest_run_id=?",(result.ingest_run_id,)).fetchone()[0])
+            self.assertEqual(detail["timestamp_provenance_contract"],"RAW_BLOCK_EXACT_SOURCE_ROW_V1")
+            self.assertEqual(detail["source_timestamp_interpretations"],"EXPLICIT_OFFSET:+03:00")
+            summary=json.loads(connection.execute("SELECT validation_summary FROM lane_state WHERE asset='AUDUSD' AND timeframe='H1'").fetchone()[0])
+            self.assertEqual(summary["format"],"fragarach_ii.lane_validation_summary.v2")
+        truth=truth_state_for_lane(self.database,symbol="AUDUSD",timeframe="H1")
+        self.assertEqual(truth["caodt"],"2026-07-10T11:00:00+00:00")
 
 
 if __name__ == "__main__":

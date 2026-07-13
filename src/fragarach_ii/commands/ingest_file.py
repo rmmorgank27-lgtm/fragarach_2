@@ -17,6 +17,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--symbol")
     parser.add_argument("--timeframe")
     parser.add_argument("--provider", default="MANUAL")
+    parser.add_argument("--source-timezone")
     parser.add_argument("--merge-mode", choices=("preserve", "correct"), default="preserve")
     parser.add_argument("--json", action="store_true", dest="json_output")
     return parser
@@ -31,6 +32,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             symbol=arguments.symbol,
             timeframe=arguments.timeframe,
             provider=arguments.provider,
+            source_timezone=arguments.source_timezone,
             merge_mode=arguments.merge_mode,
         )
     except IngestionFailure as error:

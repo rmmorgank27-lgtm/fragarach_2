@@ -27,7 +27,8 @@ public enum ArgumentBuilder {
         case .permanentRemovalPlan(let asset): ["-m","fragarach_ii.commands.permanently_remove_instrument","--database",database,"--asset",asset,"--json"]
         case .permanentlyRemoveInstrument(let asset,let confirmation): ["-m","fragarach_ii.commands.permanently_remove_instrument","--database",database,"--asset",asset,"--confirmation",confirmation,"--confirm","--json"]
         case .acquire(let asset,let timeframe,let from,let through,let mode): ["-m","fragarach_ii.commands.acquire","--database",database,"--provider","AUTO","--asset",asset,"--timeframe",timeframe,"--from-date",from,"--through-date",through,"--conflict-mode",mode.rawValue,"--json"]
-        case .importCSV(let file,let symbol,let timeframe,let mode): ["-m","fragarach_ii.commands.ingest_file","--database",database,"--file",file,"--symbol",symbol,"--timeframe",timeframe,"--merge-mode",mode.rawValue,"--json"]
+        case .importCSV(let file,let symbol,let timeframe,let sourceTimezone,let mode):
+            ["-m","fragarach_ii.commands.ingest_file","--database",database,"--file",file,"--symbol",symbol,"--timeframe",timeframe,"--merge-mode",mode.rawValue]+(sourceTimezone.map{["--source-timezone",$0]} ?? [])+["--json"]
         case .validate(let symbol,let timeframe,let through,let persist): ["-m","fragarach_ii.commands.validate_lane","--database",database,"--symbol",symbol,"--timeframe",timeframe,"--through-date",through,persist ? "--persist":"--no-persist","--json"]
         case .verify: ["-m","fragarach_ii.commands.operations","verify","--database",database,"--json"]
         case .backup(let destination): ["-m","fragarach_ii.commands.operations","backup","--database",database,"--destination",destination,"--json"]

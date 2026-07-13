@@ -20,6 +20,7 @@ class StagedBar:
     raw_block_id: str
     source_row_number: int
     source_timestamp_text: str
+    source_timezone_interpretation: str
     received_at: str
     close_timestamp: int | None = None
 

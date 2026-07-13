@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import io
+from datetime import UTC, datetime
 
 from fragarach_ii.ingestion.validation import (
     RowValidationError,
@@ -12,6 +13,11 @@ from fragarach_ii.ingestion.validation import (
 )
 
 from .contract import StagingBatch, StagingRejection
+from fragarach_ii.validation.intraday_profiles import (
+    is_aligned_open,
+    is_expected_open,
+    profile_for,
+)
 
 
 REQUIRED_FIELDS = frozenset({"timestamp", "open", "high", "low", "close"})
@@ -27,6 +33,8 @@ def stage_csv_bytes(
     provider: str,
     raw_block_id: str,
     received_at: str,
+    asset_class: str | None = None,
+    source_timezone: str | None = None,
 ) -> StagingBatch:
     try:
         text = payload.decode("utf-8-sig")
@@ -70,8 +78,7 @@ def stage_csv_bytes(
                 )
                 continue
             try:
-                bars.append(
-                    stage_record(
+                bar = stage_record(
                         fields,
                         explicit_symbol=symbol,
                         explicit_timeframe=timeframe,
@@ -80,8 +87,32 @@ def stage_csv_bytes(
                         raw_block_id=raw_block_id,
                         source_row_number=source_row_number,
                         received_at=received_at,
+                        source_timezone=source_timezone,
                     )
-                )
+                if bar.timeframe != "D1":
+                    if asset_class is None:
+                        raise RowValidationError(
+                            "INTRADAY_PROFILE_NOT_REVIEWED",
+                            "intraday CSV staging requires the registered asset class",
+                        )
+                    profile = profile_for(asset_class, bar.timeframe)
+                    if not is_aligned_open(bar.timestamp, profile):
+                        raise RowValidationError(
+                            "MISALIGNED_INTERVAL_OPEN",
+                            "canonical UTC instant is not aligned to the authorised interval",
+                        )
+                    if not is_expected_open(bar.timestamp, profile):
+                        raise RowValidationError(
+                            "OUTSIDE_EXPECTED_SESSION",
+                            "canonical UTC instant is outside the authorised session",
+                        )
+                    observed = datetime.fromisoformat(received_at).astimezone(UTC)
+                    if bar.close_timestamp is None or bar.close_timestamp > int(observed.timestamp()):
+                        raise RowValidationError(
+                            "INCOMPLETE_CURRENT_INTERVAL",
+                            "interval was not closed when the source was admitted",
+                        )
+                bars.append(bar)
             except RowValidationError as error:
                 rejections.append(
                     StagingRejection(source_row_number, error.code, str(error))

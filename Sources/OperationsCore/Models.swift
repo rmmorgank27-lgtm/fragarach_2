@@ -330,7 +330,7 @@ public enum OperationIntent: Equatable, Sendable {
     case permanentRemovalPlan(asset:String)
     case permanentlyRemoveInstrument(asset:String,confirmation:String)
     case acquire(asset: String,timeframe:String,from: String, through: String, mode: ConflictMode)
-    case importCSV(file: String, symbol: String, timeframe: String, mode: ConflictMode)
+    case importCSV(file: String, symbol: String, timeframe: String, sourceTimezone: String?, mode: ConflictMode)
     case validate(symbol: String, timeframe: String, through: String, persist: Bool)
     case verify
     case backup(destination: String)

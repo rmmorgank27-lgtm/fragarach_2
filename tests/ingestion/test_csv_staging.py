@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from datetime import UTC, datetime
 
 from fragarach_ii.staging import stage_csv_bytes
 
@@ -102,6 +103,41 @@ class CsvStagingTests(unittest.TestCase):
             "2026-07-09,2026-07-09,1,2,0,1\n"
         )
         self.assertEqual(duplicate_logical.rejections[0].code, "DUPLICATE_HEADER")
+
+    def test_intraday_explicit_offset_is_preserved_and_canonicalised_before_alignment(self) -> None:
+        batch=self.stage(
+            "timestamp,open,high,low,close\n2026-07-10T12:00:00+03:00,1,2,0,1\n",
+            timeframe="H1",asset_class="FX",received_at="2026-07-10T16:30:00+00:00",
+        )
+        self.assertEqual(batch.rejections,())
+        bar=batch.bars[0]
+        self.assertEqual(bar.source_timestamp_text,"2026-07-10T12:00:00+03:00")
+        self.assertEqual(bar.source_timezone_interpretation,"EXPLICIT_OFFSET:+03:00")
+        self.assertEqual(bar.timestamp,int(datetime(2026,7,10,9,tzinfo=UTC).timestamp()))
+        self.assertEqual(bar.close_timestamp,bar.timestamp+3600)
+
+    def test_intraday_naive_timestamp_requires_reviewed_timezone_and_never_guesses(self) -> None:
+        text="timestamp,open,high,low,close\n2026-07-10T12:00:00,1,2,0,1\n"
+        missing=self.stage(text,timeframe="H1",asset_class="FX",received_at="2026-07-10T16:30:00+00:00")
+        self.assertEqual(missing.rejections[0].code,"MISSING_TIMEZONE")
+        reviewed=self.stage(text,timeframe="H1",asset_class="FX",source_timezone="Etc/GMT-3",received_at="2026-07-10T16:30:00+00:00")
+        self.assertEqual(reviewed.rejections,())
+        self.assertEqual(reviewed.bars[0].timestamp,int(datetime(2026,7,10,9,tzinfo=UTC).timestamp()))
+        self.assertEqual(reviewed.bars[0].source_timezone_interpretation,"REVIEWED_SOURCE_TIMEZONE:Etc/GMT-3:OFFSET=+03:00")
+
+    def test_intraday_quarantine_runs_after_utc_conversion(self) -> None:
+        batch=self.stage(
+            "timestamp,open,high,low,close\n"
+            "2026-07-10T12:30:00+03:00,1,2,0,1\n"
+            "2026-07-11T12:00:00+03:00,1,2,0,1\n"
+            "2026-07-10T19:00:00+03:00,1,2,0,1\n",
+            timeframe="H1",asset_class="FX",received_at="2026-07-10T16:30:00+00:00",
+        )
+        self.assertEqual([row.code for row in batch.rejections],["MISALIGNED_INTERVAL_OPEN","OUTSIDE_EXPECTED_SESSION","INCOMPLETE_CURRENT_INTERVAL"])
+
+    def test_d1_nonzero_offset_semantics_are_unchanged(self) -> None:
+        batch=self.stage("timestamp,open,high,low,close\n2026-07-10T00:00:00+03:00,1,2,0,1\n")
+        self.assertEqual(batch.rejections[0].code,"NON_UTC_TIMESTAMP")
 
 
 if __name__ == "__main__":

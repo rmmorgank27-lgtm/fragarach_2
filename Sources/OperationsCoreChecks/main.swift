@@ -27,10 +27,13 @@ var passed = 0
 func checkImportDispatch() throws {
     let id=UUID(),fileID=UUID()
     let plan=ReviewedDataOperationPlan(id:id,mode:.importFile,instrument:"USDJPY",timeframe:"D1",filePath:"/tmp/FX_USDJPY.csv",fileChecksum:"abc123",fileSelectionID:fileID,conflict:.preserve)
-    try check(plan.intent == .importCSV(file:"/tmp/FX_USDJPY.csv",symbol:"USDJPY",timeframe:"D1",mode:.preserve),"import dispatched outside ingest_file")
+    try check(plan.intent == .importCSV(file:"/tmp/FX_USDJPY.csv",symbol:"USDJPY",timeframe:"D1",sourceTimezone:nil,mode:.preserve),"import dispatched outside ingest_file")
     try check(plan.matches(mode:.importFile,instrument:"USDJPY",timeframe:"D1",fileChecksum:"abc123"),"matching import plan rejected")
     try check(!plan.matches(mode:.fetch,instrument:"USDJPY",timeframe:"D1",fileChecksum:"abc123"),"fetch result leaked into import")
     try check(!plan.matches(mode:.importFile,instrument:"USDJPY",timeframe:"D1",fileChecksum:"changed"),"stale file checksum accepted")
+    let intraday=ReviewedDataOperationPlan(id:UUID(),mode:.importFile,instrument:"AUDUSD",timeframe:"H1",filePath:"/tmp/AUDUSD_H1.csv",fileChecksum:"offset",sourceTimezone:"Europe/Athens",conflict:.preserve)
+    let arguments=ArgumentBuilder.arguments(for:try intraday.intent ?? {throw CheckFailure.failed("missing intraday import intent")}(),database:"/authority.sqlite3")
+    try check(arguments.contains("--source-timezone") && arguments.contains("Europe/Athens"),"reviewed source timezone not dispatched")
 }
 func checkEstateHierarchy() throws {
     try check(EstateHierarchyClassifier.marketName(assetClass:"FX") == "Forex","FX market")
@@ -104,7 +107,7 @@ try run("native market discovery and onboarding model") {
     let discovery=try JSONDecoder().decode(MarketDiscoveryResult.self,from:Data(result.stdout.utf8));let market=try discovery.markets.first ?? {throw CheckFailure.failed("missing market")}()
     try check(market.recommendation.symbol=="US30" && market.representations.count==5 && !market.providerDiscovery.isEmpty,"market discovery decode")
 }
-try run("explicit secret-free arguments") { let db="/authority.sqlite3",secret="never-in-arguments";let intents:[OperationIntent]=[.readEstateTruth,.readTruth(symbol:"AUDUSD",timeframe:"D1"),.resolveInstrument(query:"Gold"),.discoverMarket(query:"US30"),.acquire(asset:"AUDUSD",timeframe:"H1",from:"2026-07-01",through:"2026-07-10",mode:.preserve),.importCSV(file:"/evidence.csv",symbol:"AUDUSD",timeframe:"D1",mode:.preserve),.validate(symbol:"AUDUSD",timeframe:"D1",through:"2026-07-10",persist:true),.verify,.backup(destination:"/backup.sqlite3")];for intent in intents{let args=ArgumentBuilder.arguments(for:intent,database:db);try check(args.contains(db) && !args.contains(secret),"arguments")}}
+try run("explicit secret-free arguments") { let db="/authority.sqlite3",secret="never-in-arguments";let intents:[OperationIntent]=[.readEstateTruth,.readTruth(symbol:"AUDUSD",timeframe:"D1"),.resolveInstrument(query:"Gold"),.discoverMarket(query:"US30"),.acquire(asset:"AUDUSD",timeframe:"H1",from:"2026-07-01",through:"2026-07-10",mode:.preserve),.importCSV(file:"/evidence.csv",symbol:"AUDUSD",timeframe:"H1",sourceTimezone:"Europe/Athens",mode:.preserve),.validate(symbol:"AUDUSD",timeframe:"D1",through:"2026-07-10",persist:true),.verify,.backup(destination:"/backup.sqlite3")];for intent in intents{let args=ArgumentBuilder.arguments(for:intent,database:db);try check(args.contains(db) && !args.contains(secret),"arguments")}}
 try run("review confirmation gate") { let intent=OperationIntent.acquire(asset:"AUDUSD",timeframe:"H1",from:"2026-07-01",through:"2026-07-10",mode:.preserve);var gate=ReviewGate();try check(!gate.confirm(intent),"unreviewed");gate.review(intent);try check(gate.confirm(intent),"reviewed");try check(!gate.confirm(intent),"repeat") }
 try run("secret filter") { try check(SecretFilter.filter("before SECRET middle SECRET",secrets:["SECRET"])=="before [REDACTED] middle [REDACTED]","filter") }
 try run("credential alias memory resolution") { let file=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString);try "TWELVEDATA_API_KEY=fixture-only-secret\n".write(to:file,atomically:true,encoding:.utf8);defer{try? FileManager.default.removeItem(at:file)};try check(CredentialResolver.resolve(environment:[:],authorizedFile:file.path)=="fixture-only-secret","alias") }

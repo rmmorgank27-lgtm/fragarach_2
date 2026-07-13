@@ -6,6 +6,7 @@ import re
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Mapping
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fragarach_ii.staging.contract import StagedBar, StagingRejection
 
@@ -36,6 +37,7 @@ def stage_record(
     raw_block_id: str,
     source_row_number: int,
     received_at: str,
+    source_timezone: str | None = None,
 ) -> StagedBar:
     csv_symbol = (fields.get("symbol") or "").strip() or None
     csv_timeframe = (fields.get("timeframe") or "").strip() or None
@@ -45,7 +47,9 @@ def stage_record(
         raise RowValidationError("UNSUPPORTED_TIMEFRAME",timeframe)
 
     source_timestamp = (fields.get("timestamp") or "").strip()
-    timestamp = parse_utc_timestamp(source_timestamp, timeframe)
+    timestamp, timezone_interpretation = interpret_timestamp(
+        source_timestamp, timeframe, source_timezone=source_timezone
+    )
     open_value = parse_decimal(fields.get("open"), "open")
     high_value = parse_decimal(fields.get("high"), "high")
     low_value = parse_decimal(fields.get("low"), "low")
@@ -80,6 +84,7 @@ def stage_record(
         raw_block_id=raw_block_id,
         source_row_number=source_row_number,
         source_timestamp_text=source_timestamp,
+        source_timezone_interpretation=timezone_interpretation,
         received_at=received_at,
         close_timestamp=(timestamp+{"H1":3600,"M30":1800,"M5":300}[timeframe] if timeframe!="D1" else None),
     )
@@ -111,7 +116,13 @@ def deduplicate_bars(
     return ordered, tuple(rejections), identical, conflicting
 
 
-def parse_utc_timestamp(value: str, timeframe: str) -> int:
+def parse_utc_timestamp(value: str, timeframe: str, source_timezone: str | None = None) -> int:
+    return interpret_timestamp(value, timeframe, source_timezone=source_timezone)[0]
+
+
+def interpret_timestamp(
+    value: str, timeframe: str, *, source_timezone: str | None = None
+) -> tuple[int, str]:
     if not value:
         raise RowValidationError("INVALID_TIMESTAMP", "timestamp is required")
     if DATE_ONLY.fullmatch(value):
@@ -124,6 +135,7 @@ def parse_utc_timestamp(value: str, timeframe: str) -> int:
         except ValueError as error:
             raise RowValidationError("INVALID_TIMESTAMP", str(error)) from error
         parsed = datetime.combine(parsed_date, datetime.min.time(), UTC)
+        interpretation = "D1_DATE_AT_UTC_MIDNIGHT"
     else:
         if "/" in value:
             raise RowValidationError(
@@ -135,15 +147,59 @@ def parse_utc_timestamp(value: str, timeframe: str) -> int:
         except ValueError as error:
             raise RowValidationError("INVALID_TIMESTAMP", str(error)) from error
         if parsed.tzinfo is None or parsed.utcoffset() is None:
-            raise RowValidationError(
-                "MISSING_TIMEZONE", "timestamp must declare UTC or be a D1 date"
+            if timeframe == "D1" or not source_timezone:
+                raise RowValidationError(
+                    "MISSING_TIMEZONE",
+                    "intraday timestamp must declare an offset or use an explicit reviewed source timezone",
+                )
+            parsed = _localize_reviewed_source_time(parsed, source_timezone)
+            interpretation = (
+                f"REVIEWED_SOURCE_TIMEZONE:{source_timezone}:"
+                f"OFFSET={_format_offset(parsed.utcoffset())}"
             )
-        if parsed.utcoffset().total_seconds() != 0:
+        elif timeframe == "D1" and parsed.utcoffset().total_seconds() != 0:
             raise RowValidationError(
                 "NON_UTC_TIMESTAMP", "timestamp offset must be UTC"
             )
+        else:
+            interpretation = f"EXPLICIT_OFFSET:{_format_offset(parsed.utcoffset())}"
         parsed = parsed.astimezone(UTC)
-    return int(parsed.timestamp())
+    return int(parsed.timestamp()), interpretation
+
+
+def _localize_reviewed_source_time(value: datetime, timezone_name: str) -> datetime:
+    try:
+        zone = ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError as error:
+        raise RowValidationError(
+            "INVALID_SOURCE_TIMEZONE", f"unknown reviewed source timezone: {timezone_name}"
+        ) from error
+    candidates: dict[int, datetime] = {}
+    for fold in (0, 1):
+        candidate = value.replace(tzinfo=zone, fold=fold)
+        round_trip = candidate.astimezone(UTC).astimezone(zone).replace(tzinfo=None)
+        if round_trip == value:
+            candidates[int(candidate.timestamp())] = candidate
+    if not candidates:
+        raise RowValidationError(
+            "NONEXISTENT_LOCAL_TIMESTAMP",
+            f"timestamp does not exist in reviewed source timezone {timezone_name}",
+        )
+    if len(candidates) != 1:
+        raise RowValidationError(
+            "AMBIGUOUS_LOCAL_TIMESTAMP",
+            f"timestamp is ambiguous in reviewed source timezone {timezone_name}",
+        )
+    return next(iter(candidates.values()))
+
+
+def _format_offset(value) -> str:
+    seconds = int(value.total_seconds())
+    sign = "+" if seconds >= 0 else "-"
+    seconds = abs(seconds)
+    hours, remainder = divmod(seconds, 3600)
+    minutes = remainder // 60
+    return f"{sign}{hours:02d}:{minutes:02d}"
 
 
 def parse_decimal(value: str | None, name: str) -> Decimal:
