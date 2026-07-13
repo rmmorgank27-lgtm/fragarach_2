@@ -295,11 +295,30 @@ public struct EstateTruthState: Codable, Equatable, Sendable {
     }
 }
 
+public struct MarketHistoryBar: Codable, Equatable, Sendable, Identifiable {
+    public var id: String { timestamp }
+    public let timestamp: String
+    public let open: String
+    public let high: String
+    public let low: String
+    public let close: String
+}
+
+public struct MarketHistoryResponse: Codable, Equatable, Sendable {
+    public let ohlc: [MarketHistoryBar]
+    public let caodt: String?
+    public let status: String
+    public let warnings: [String]
+    enum CodingKeys: String, CodingKey {
+        case ohlc = "OHLC", caodt = "CAODT", status = "Status", warnings = "Warnings"
+    }
+}
+
 public enum ConsoleSection: String, CaseIterable, Identifiable, Sendable {
-    case truth = "Truth", discoverMarket = "Discover Market", dataOperations = "Data Operations", system = "System"
+    case truth = "Truth", marketHistory = "Market History", discoverMarket = "Discover Market", dataOperations = "Data Operations", system = "System"
     public var id: String { rawValue }
     public var icon: String {
-        switch self { case .truth: "checkmark.seal"; case .discoverMarket: "plus.magnifyingglass"; case .dataOperations: "arrow.down.doc"; case .system: "gearshape.2" }
+        switch self { case .truth: "checkmark.seal"; case .marketHistory: "clock.arrow.circlepath"; case .discoverMarket: "plus.magnifyingglass"; case .dataOperations: "arrow.down.doc"; case .system: "gearshape.2" }
     }
 }
 
@@ -324,6 +343,7 @@ public enum ConflictMode: String, CaseIterable, Sendable { case preserve, correc
 public enum OperationIntent: Equatable, Sendable {
     case readEstateTruth
     case readTruth(symbol: String, timeframe: String)
+    case marketHistory(symbol: String, timeframe: String, tradingDays: Int)
     case resolveInstrument(query: String)
     case discoverMarket(query: String)
     case searchInstrument(query: String)

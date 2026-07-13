@@ -17,6 +17,7 @@ public enum ArgumentBuilder {
         switch intent {
         case .readEstateTruth: ["-m","fragarach_ii.commands.estate_truth","--database",database,"--json"]
         case .readTruth(let symbol,let timeframe): ["-m","fragarach_ii.commands.truth_state","--database",database,"--symbol",symbol,"--timeframe",timeframe,"--json"]
+        case .marketHistory(let symbol,let timeframe,let tradingDays): ["-m","fragarach_ii.commands.get_market_history","--database",database,"--symbol",symbol,"--timeframe",timeframe,"--last-trading-days","\(tradingDays)","--json"]
         case .resolveInstrument(let query): ["-m","fragarach_ii.commands.resolve_instrument","--database",database,"--query",query,"--json"]
         case .discoverMarket(let query): ["-m","fragarach_ii.commands.discover_market","--database",database,"--query",query,"--json"]
         case .searchInstrument(let query): ["-m","fragarach_ii.commands.search_instrument","--database",database,"--query",query,"--json"]

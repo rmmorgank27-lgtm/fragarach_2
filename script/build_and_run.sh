@@ -39,12 +39,21 @@ chmod +x "$APP_BINARY"
 /usr/libexec/PlistBuddy -c 'Add :NSPrincipalClass string NSApplication' "$INFO_PLIST"
 /usr/bin/codesign --force --deep --sign - "$APP_BUNDLE"
 
-open_app() { /usr/bin/open -n "$APP_BUNDLE"; }
+open_app() {
+  local launch_arguments=()
+  if [[ -n "${FRAGARACH_LAUNCH_MODE:-}" ]]; then
+    launch_arguments+=(--args --mode "$FRAGARACH_LAUNCH_MODE")
+    if [[ -n "${FRAGARACH_LAUNCH_SYMBOL:-}" ]]; then
+      launch_arguments+=(--symbol "$FRAGARACH_LAUNCH_SYMBOL")
+    fi
+  fi
+  /usr/bin/open -n "$APP_BUNDLE" "${launch_arguments[@]}"
+}
 case "$MODE" in
   run) open_app ;;
   --debug|debug) lldb -- "$APP_BINARY" ;;
   --logs|logs) open_app; /usr/bin/log stream --info --style compact --predicate "process == '$APP_NAME'" ;;
   --telemetry|telemetry) open_app; /usr/bin/log stream --info --style compact --predicate "subsystem == '$BUNDLE_ID'" ;;
-  --verify|verify) open_app; sleep 2; pgrep -x "$APP_NAME" >/dev/null ;;
+  --verify|verify) open_app; sleep 8; pgrep -x "$APP_NAME" >/dev/null; echo "Fragarach II signed bundle launched and remained alive" ;;
   *) echo "usage: $0 [run|--debug|--logs|--telemetry|--verify]" >&2; exit 2 ;;
 esac
