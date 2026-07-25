@@ -1750,6 +1750,21 @@ def _run_due_acquisitions_unlocked(
             database_path, observed, update_register,
             max_tasks=max_tasks or int(time_triggered_pace["claim_limit"]),
         )
+        terminal_operator_releases = _release_terminal_operator_fetches(
+            journal, at=observed,
+        )
+        if terminal_operator_releases:
+            # The register claim is the normal-work authority.  A terminal
+            # manual/backfill failure must not leave an old operator marker
+            # above it indefinitely.  Release only the affected lanes to a
+            # bounded re-check; no fresh provider representation is invented.
+            for symbol, timeframe in terminal_operator_releases:
+                update_register.retry(
+                    asset=symbol, timeframe=timeframe,
+                    reason="TERMINAL_OPERATOR_FETCH_RELEASED_NORMAL",
+                    at=observed, not_before=observed,
+                )
+            journal.save()
         # An operator fetch is a durable, explicit request.  It must not wait
         # for the next ordinary register boundary (which can be hours away),
         # but promoting it must not turn every normal wake into an estate
@@ -1767,6 +1782,12 @@ def _run_due_acquisitions_unlocked(
                 lane_id = f"{item['symbol']}:{item['timeframe']}"
                 claimed_normal = merged.get(lane_id)
                 if claimed_normal is not None and claimed_normal.get("work_class") == "NORMAL":
+                    if item.get("operator_fetch_backfill"):
+                        # Initial history is valuable, but a historical
+                        # backfill must never stop the current scheduled edge
+                        # from progressing.  Leave the request durable for a
+                        # later capacity slot and keep this normal claim.
+                        continue
                     # ``claim_due`` has already moved the normal register row
                     # to RUNNING.  Preserve that ownership while the explicit
                     # fetch takes precedence so its terminal path can settle
@@ -2264,7 +2285,12 @@ def _run_due_acquisitions_unlocked(
                         detail += f" until {next_attempt}"
                     queued.update(queue_reason=detail, waiting_reason=detail, operational_state="Waiting for Local Budget", budget_wait=next_attempt, next_attempt=next_attempt)
                     recorded.update(queue_state="Waiting for Local Budget", result="WAITING", reason=detail)
-                    final_reason = reason
+                    # Capacity is a transient condition.  Preserve the exact
+                    # credit-window reason for diagnostics, but report the
+                    # execution as waiting so the indexed lane register puts
+                    # it back on retry rather than treating it as a repair
+                    # block.
+                    outcome, final_reason = "WAITING", reason
                     record_stop(
                         journal.data, queued, cycle_id=cycle_id,
                         current_stage="BUDGET_RESERVED",
@@ -2807,12 +2833,10 @@ def _run_due_acquisitions_unlocked(
                 "reason": recorded.get("reason") or final_reason,
                 "completed_at": datetime.now(UTC).isoformat(),
             }
-            # A credit-window or transient provider wait is not a completed
-            # operator request.  Keep its durable intent so the next normal
-            # service wake can promote the same request again.  Removing this
-            # marker left a queue row with no dispatch owner and made initial
-            # M5 history appear permanently "in progress".
-            if outcome == "SUCCESS" or not time_triggered:
+            # Keep only transient provider/budget waits durable.  A terminal
+            # failure already produced a manual repair record; retaining its
+            # operator marker would endlessly pre-empt normal scheduled work.
+            if outcome != "WAITING" or not time_triggered:
                 recorded.pop("operator_fetch_pending", None)
         if time_triggered and update_register is not None and (
             work["work_class"] == "NORMAL" or bool(work.get("_register_claimed"))
@@ -2825,7 +2849,11 @@ def _run_due_acquisitions_unlocked(
                     # immediately eligible for its own bounded check.
                     update_register.retry(
                         asset=str(symbol), timeframe=str(timeframe),
-                        reason="OPERATOR_FETCH_SUPERSEDED_NORMAL",
+                        reason=(
+                            "OPERATOR_FETCH_TERMINAL_FAILURE_RELEASED_NORMAL"
+                            if outcome == "FAILED" else
+                            "OPERATOR_FETCH_SUPERSEDED_NORMAL"
+                        ),
                         at=observed, not_before=observed,
                     )
                 elif outcome == "SUCCESS":
@@ -3264,6 +3292,7 @@ def _pending_operator_fetches(
                 "work_class": "OPERATOR_FETCH",
                 "operator_fetch_id": request.get("id"),
                 "operator_fetch_mode": request.get("requested_mode"),
+                "operator_fetch_backfill": bool(request.get("backfill_from_start")),
                 "requested_bounds": [requested_start, end],
                 "next_attempt": None,
                 "enqueued_at": request.get("requested_at") or observed.isoformat(),
@@ -3273,6 +3302,53 @@ def _pending_operator_fetches(
                 "register_state": None,
             })
     return sorted(result, key=_operational_dispatch_key), universe
+
+
+def _release_terminal_operator_fetches(
+    journal: SchedulerJournal, *, at: datetime,
+) -> list[tuple[str, str]]:
+    """Release stale terminal operator fetches back to the normal register.
+
+    Manual fetches are intentionally durable while a provider/budget wait can
+    resolve itself.  ``FAILED`` and ``MANUAL_REQUIRED`` are different: a
+    repair record already exists, so preserving their operator priority causes
+    every future normal boundary to be superseded forever.
+    """
+
+    released: list[tuple[str, str]] = []
+    for lane_id, state in journal.data.get("lanes", {}).items():
+        if not isinstance(state, dict) or not isinstance(state.get("operator_fetch_pending"), dict):
+            continue
+        request = state["operator_fetch_pending"]
+        result = state.get("last_operator_fetch_result")
+        if not isinstance(result, dict):
+            continue
+        if result.get("operation_id") != request.get("id"):
+            continue
+        if str(result.get("outcome") or "").upper() not in {"FAILED", "MANUAL_REQUIRED"}:
+            continue
+        try:
+            symbol, timeframe = str(lane_id).rsplit(":", 1)
+        except ValueError:
+            continue
+        state.pop("operator_fetch_pending", None)
+        state["operator_fetch_terminal_release"] = {
+            "operation_id": request.get("id"),
+            "outcome": result.get("outcome"),
+            "released_at": at.isoformat(),
+        }
+        state["queue_state"] = "Ready"
+        state["reason"] = "TERMINAL_OPERATOR_FETCH_RELEASED_NORMAL"
+        journal.data["acquisition_queue"] = [
+            item for item in journal.data.get("acquisition_queue", [])
+            if not (
+                isinstance(item, dict)
+                and item.get("work_class") == "OPERATOR_FETCH"
+                and item.get("lane") == lane_id
+            )
+        ]
+        released.append((symbol, timeframe))
+    return released
 
 
 def _time_triggered_runtime_snapshot(

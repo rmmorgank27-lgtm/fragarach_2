@@ -4,12 +4,14 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+from fragarach_ii.acquisition_orchestrator import ProviderProfile, RateBudgetController
 from fragarach_ii.lane_commissioning import ensure_commissioned_lane
 from fragarach_ii.lane_update_register import LaneUpdateRegister
 from fragarach_ii.scheduler_service import (
     SchedulerJournal,
     _fair_bounded_selection,
     _pending_operator_fetches,
+    _release_terminal_operator_fetches,
     _time_triggered_runtime_snapshot,
     run_operator_fetch,
     run_due_acquisitions,
@@ -268,6 +270,99 @@ def test_operator_fetch_that_replaces_claimed_normal_work_settles_register_claim
     row = next(item for item in register.rows() if item["asset"] == "AUDUSD" and item["timeframe"] == "M5")
     assert row["state"] == "RETRY"
     assert row["last_outcome"] == "OPERATOR_FETCH_SUPERSEDED_NORMAL"
+
+
+def test_terminal_operator_fetch_is_released_and_cannot_preempt_normal_work(tmp_path: Path) -> None:
+    database = _m5_lane(tmp_path)
+    journal = SchedulerJournal(database, tmp_path / "scheduler.json")
+    lane = journal.lane("AUDUSD", "M5")
+    lane["operator_fetch_pending"] = {
+        "id": "terminal-fetch", "requested_mode": "initial",
+        "requested_start": "2025-07-13", "requested_end": "2026-07-13",
+        "backfill_from_start": True,
+    }
+    lane["last_operator_fetch_result"] = {
+        "operation_id": "terminal-fetch", "outcome": "FAILED",
+    }
+    journal.data["acquisition_queue"] = [{
+        "lane": "AUDUSD:M5", "work_class": "OPERATOR_FETCH", "operational_state": "Ready",
+    }]
+    journal.save()
+
+    restored = SchedulerJournal(database, tmp_path / "scheduler.json")
+    released = _release_terminal_operator_fetches(restored, at=NOW)
+
+    assert released == [("AUDUSD", "M5")]
+    assert "operator_fetch_pending" not in restored.lane("AUDUSD", "M5")
+    assert restored.data["acquisition_queue"] == []
+
+
+def test_historical_operator_fetch_does_not_replace_claimed_current_boundary(tmp_path: Path) -> None:
+    database = _m5_lane(tmp_path)
+    journal = tmp_path / "scheduler.json"
+    LaneUpdateRegister(database).audit_estate(at=NOW, reason="TEST")
+    submitted = run_operator_fetch(
+        database, symbol="AUDUSD", timeframe="M5", credential="fixture",
+        requested_mode="initial", journal_path=journal, at=NOW, defer_dispatch=True,
+    )
+    calls: list[str] = []
+    run_due_acquisitions(
+        database, at=NOW, credential="fixture", journal_path=journal,
+        acquirer=lambda _database, **kwargs: calls.append(str(kwargs["from_date"])) or {"inserted": 1, "corrected": 0},
+        time_triggered=True,
+    )
+    lane = SchedulerJournal(database, journal).lane("AUDUSD", "M5")
+    assert calls and calls[0] != submitted["requested_range"]["start"]
+    assert lane["operator_fetch_pending"]["id"] == submitted["operation_id"]
+    assert "last_operator_fetch_result" not in lane
+
+
+def test_credit_window_deferral_retries_instead_of_blocking_a_normal_lane(tmp_path: Path, monkeypatch) -> None:
+    database = _m5_lane(tmp_path)
+    journal = tmp_path / "scheduler.json"
+    LaneUpdateRegister(database).audit_estate(at=NOW, reason="TEST")
+    profile = ProviderProfile(
+        provider="TEST_PROVIDER", enabled=True,
+        supported_asset_classes=("FX",), supported_timeframes=("M5",),
+        credential_environment=None, entitlement_state="AVAILABLE",
+        request_limit=1, request_window_seconds=60, maximum_rows_per_request=4_000,
+        history_limit_days=None, cost_class=0, priority=1, cooldown_seconds=30,
+        mappings=({
+            "asset": "AUDUSD", "symbol": "AUDUSD", "timeframes": ["M5"],
+            "mapping_class": "EXACT_REPRESENTATION", "reviewed_status": "REVIEWED",
+            "authority_source": "TEST",
+        },),
+    )
+
+    def credit_window(_self, *_args, **_kwargs):
+        return {
+            "eligible": False, "reason": "CREDIT_WINDOW",
+            "next_available": "2026-07-14T00:11:00+00:00",
+        }
+
+    original_inspect = RateBudgetController.inspect
+
+    def queue_capacity_available(self, *args, **kwargs):
+        inspection = original_inspect(self, *args, **kwargs)
+        if kwargs.get("work_class") == "QUEUE":
+            inspection["queue_available"] = 1
+        return inspection
+
+    monkeypatch.setattr(RateBudgetController, "reserve", credit_window)
+    monkeypatch.setattr(RateBudgetController, "inspect", queue_capacity_available)
+    snapshot = run_due_acquisitions(
+        database, at=NOW, credential=None, journal_path=journal,
+        acquirer=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not fetch")),
+        provider_profiles=(profile,), time_triggered=True,
+    )
+
+    row = next(
+        item for item in LaneUpdateRegister(database).rows()
+        if item["asset"] == "AUDUSD" and item["timeframe"] == "M5"
+    )
+    assert row["state"] == "RETRY"
+    assert "Credit Window" in str(row["last_outcome"])
+    assert snapshot["register"]["blocked_count"] == 0
 
 
 def test_empty_intraday_lane_upgrades_an_operator_update_to_initial_history(tmp_path: Path) -> None:
