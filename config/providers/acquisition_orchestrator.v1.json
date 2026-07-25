@@ -36,7 +36,7 @@
     {
       "provider": "YAHOO_FINANCE",
       "enabled": true,
-      "supported_asset_classes": ["FX", "INDICES", "US_EQUITIES", "UK_EQUITIES", "GERMAN_EQUITIES", "AUSTRALIAN_EQUITIES"],
+      "supported_asset_classes": ["FX", "INDICES", "ENERGY", "US_EQUITIES", "UK_EQUITIES", "GERMAN_EQUITIES", "AUSTRALIAN_EQUITIES"],
       "supported_timeframes": ["D1"],
       "credential_environment": null,
       "entitlement_state": "AVAILABLE",
@@ -56,7 +56,9 @@
         {"asset": "GOOGL", "symbol": "GOOGL", "timeframes": ["D1"], "mapping_class": "EXACT_REPRESENTATION", "conversion_policy": "NO_CONVERSION", "effective_date": "2026-07-14", "reviewed_status": "REVIEWED", "authority_source": "REVIEWED_PROVIDER_CONFIGURATION"},
         {"asset": "MSFT", "symbol": "MSFT", "timeframes": ["D1"], "mapping_class": "EXACT_REPRESENTATION", "conversion_policy": "NO_CONVERSION", "effective_date": "2026-07-14", "reviewed_status": "REVIEWED", "authority_source": "REVIEWED_PROVIDER_CONFIGURATION"},
         {"asset": "DJI", "symbol": "^DJI", "timeframes": ["D1"], "mapping_class": "APPROVED_PROVIDER_ALIAS", "conversion_policy": "NO_CONVERSION", "effective_date": "2026-07-14", "reviewed_status": "REVIEWED", "authority_source": "REVIEWED_PROVIDER_CONFIGURATION"},
-        {"asset": "SPY", "symbol": "SPY", "timeframes": ["D1"], "mapping_class": "EXACT_REPRESENTATION", "conversion_policy": "NO_CONVERSION", "effective_date": "2026-07-14", "reviewed_status": "REVIEWED", "authority_source": "REVIEWED_PROVIDER_CONFIGURATION"}
+        {"asset": "SPY", "symbol": "SPY", "timeframes": ["D1"], "mapping_class": "EXACT_REPRESENTATION", "conversion_policy": "NO_CONVERSION", "effective_date": "2026-07-14", "reviewed_status": "REVIEWED", "authority_source": "REVIEWED_PROVIDER_CONFIGURATION"},
+        {"asset": "USO", "asset_class": "ENERGY", "symbol": "USO", "provider_representation": "United States Oil Fund ETF (NYSE Arca)", "timeframes": ["D1"], "mapping_class": "EXACT_REPRESENTATION", "conversion_policy": "NO_CONVERSION", "calendar_id": "US_EQUITIES_D1_V1", "effective_date": "2026-07-25", "reviewed_status": "REVIEWED", "authority_source": "OPERATOR_APPROVED_WTI_ETF_YAHOO_ROUTE"},
+        {"asset": "USOIL", "asset_class": "ENERGY", "symbol": "USO", "provider_representation": "United States Oil Fund ETF proxy for US Oil / WTI CFD", "timeframes": ["D1"], "mapping_class": "APPROVED_EQUIVALENT_REPRESENTATION", "conversion_policy": "NO_CONVERSION", "calendar_id": "US_EQUITIES_D1_V1", "effective_date": "2026-07-25", "reviewed_status": "REVIEWED", "authority_source": "OPERATOR_APPROVED_WTI_USO_ETF_D1_PROXY"}
       ]
     },
     {

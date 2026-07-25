@@ -6,6 +6,7 @@ struct ProviderFactsView: View {
     @State private var showingCredential = false
     @State private var credential = ""
     @State private var editingProvider: ProviderInventoryItem?
+    @State private var editingRoute: ProviderApprovedRoute?
 
     var body: some View {
         ScrollView {
@@ -35,6 +36,7 @@ struct ProviderFactsView: View {
         }
         .sheet(isPresented: $showingCredential) { credentialSheet }
         .sheet(item:$editingProvider) { provider in ProviderRuntimeSettingsSheet(provider:provider) }
+        .sheet(item:$editingRoute) { route in ProviderRouteSettingsSheet(route:route) }
         .task {
             if store.providerCredentialRepairRequested {
                 showingCredential=true;store.providerCredentialRepairRequested=false
@@ -122,6 +124,8 @@ struct ProviderFactsView: View {
                         Text(route.enabled ? "Enabled":"Disabled").font(.caption).foregroundStyle(route.enabled ? .green:.secondary)
                     }
                     Text("\(route.mappingClass.replacingOccurrences(of:"_",with:" ")) · \(route.authoritySource)").font(.caption2).foregroundStyle(.secondary)
+                    if let calendarID=route.calendarID { Text("D1 calendar · \(calendarID)").font(.caption2.monospaced()).foregroundStyle(.secondary) }
+                    if route.timeframes == ["D1"] { Button("Configure D1 Route…") { editingRoute=route }.font(.caption) }
                     if route.id != routes.last?.id { Divider() }
                 }
             }.frame(maxWidth:.infinity,alignment:.leading).padding(.vertical,4)
@@ -333,6 +337,39 @@ private struct CandidateCard: View {
         }
     }
     private func decide(_ decision: String) { Task { await store.recordProviderMappingDecision(symbol: mapping.canonicalSymbol, decision: decision, candidate: candidate.providerSymbol) } }
+}
+
+private struct ProviderRouteSettingsSheet: View {
+    @EnvironmentObject private var store: ConsoleStore
+    @Environment(\.dismiss) private var dismiss
+    let route: ProviderApprovedRoute
+    @State private var providerSymbol: String
+    @State private var mappingClass: String
+    @State private var calendarID: String
+
+    init(route: ProviderApprovedRoute) {
+        self.route=route
+        _providerSymbol=State(initialValue:route.providerSymbol)
+        _mappingClass=State(initialValue:route.mappingClass)
+        _calendarID=State(initialValue:route.calendarID ?? "")
+    }
+
+    var body: some View {
+        VStack(alignment:.leading,spacing:14) {
+            Text("Configure D1 Provider Route").font(.title3.bold())
+            Text("This is an explicit operator approval. An alias or proxy is not treated as the same instrument; its mapping class and D1 session calendar are recorded with the route.").foregroundStyle(.secondary)
+            Facts([("Canonical lane",route.asset), ("Provider",route.provider.replacingOccurrences(of:"_",with:" "))])
+            TextField("Provider symbol",text:$providerSymbol)
+            Picker("Representation",selection:$mappingClass) {
+                Text("Exact representation").tag("EXACT_REPRESENTATION")
+                Text("Approved provider alias").tag("APPROVED_PROVIDER_ALIAS")
+                Text("Approved equivalent / proxy").tag("APPROVED_EQUIVALENT_REPRESENTATION")
+            }
+            TextField("D1 calendar",text:$calendarID)
+            Text("For US-listed ETFs and their D1 proxies, use US_EQUITIES_D1_V1. Saving wakes the scheduler and retries eligible work.").font(.caption).foregroundStyle(.secondary)
+            HStack { Spacer();Button("Cancel"){dismiss()};Button("Save Approved Route") { Task { if await store.configureProviderRoute(provider:route.provider,asset:route.asset,providerSymbol:providerSymbol,timeframe:"D1",mappingClass:mappingClass,calendarID:calendarID){dismiss()} } }.buttonStyle(.borderedProminent).disabled(providerSymbol.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty || calendarID.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty || store.providerFactsResolving) }
+        }.padding(24).frame(width:560)
+    }
 }
 
 private struct ProviderIssueBox<Actions: View>: View {

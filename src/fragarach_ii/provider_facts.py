@@ -298,6 +298,7 @@ def provider_facts_snapshot(
                 "timeframes": [str(item).upper() for item in mapping.get("timeframes", ())],
                 "mapping_class": mapping.get("mapping_class") or "UNREVIEWED",
                 "authority_source": mapping.get("authority_source") or "REVIEW_REQUIRED",
+                "calendar_id": mapping.get("calendar_id"),
                 "enabled": profile.enabled,
             })
     return {

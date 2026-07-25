@@ -380,6 +380,9 @@ def load_provider_profiles(
                 max(1, int(source.get("concurrency_limit", 1))),
                 max(1, int(override.get("concurrency_limit", source.get("concurrency_limit", 1)))),
             )
+        if apply_runtime_overrides:
+            from .provider_route_settings import merged_provider_mappings
+            raw["mappings"] = merged_provider_mappings(provider, list(raw.get("mappings") or []))
         if provider in seen:
             raise ValueError(f"duplicate provider capability: {provider}")
         seen.add(provider)

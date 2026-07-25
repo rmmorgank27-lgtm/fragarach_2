@@ -507,6 +507,16 @@ struct EstateAdmissionProgress: Equatable {
         } catch { providerFactsError=error.localizedDescription }
     }
 
+    func configureProviderRoute(provider:String,asset:String,providerSymbol:String,timeframe:String,mappingClass:String,calendarID:String) async -> Bool {
+        guard !providerFactsResolving else{return false};providerFactsResolving=true;providerFactsError=nil;defer{providerFactsResolving=false}
+        let config=configuration,bridge=providerFactsBridge
+        do {
+            let result=try await Task.detached { try bridge.run(.configureProviderRoute(provider:provider,asset:asset,providerSymbol:providerSymbol,timeframe:timeframe,mappingClass:mappingClass,calendarID:calendarID),config:config) }.value
+            guard result.exitCode==0 else { throw MarketDiscoveryReadError.serviceFailure(result.stderr.isEmpty ? result.stdout:result.stderr) }
+            await refreshProviderFacts();await refreshSchedulerStatus();await runSchedulerQueue();return true
+        } catch { providerFactsError=error.localizedDescription;return false }
+    }
+
     private func performSchedulerControl(_ intent:OperationIntent) async {
         let config=configuration,bridge=self.bridge
         do {

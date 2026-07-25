@@ -64,6 +64,14 @@ def resolved_calendar_authority(*,asset_class:str,calendar_id:str,exchange_name:
 
 def resolved_calendar_id(*,asset_class:str,calendar_id:str,exchange_name:str|None,canonical_symbol:str|None=None)->str|None:
     if calendar_id and calendar_id!="REGISTRY_D1_V1":return calendar_id
+    # An operator-approved D1 provider proxy (for example WTI CFD → USO ETF)
+    # carries its own reviewed session calendar.  This is intentionally an
+    # explicit route setting, never a symbolic-identity inference.
+    if canonical_symbol:
+        from .provider_route_settings import configured_calendar_for_symbol
+        configured = configured_calendar_for_symbol(canonical_symbol)
+        if configured:
+            return configured
     exchange=_reviewed_market_venue(
         asset_class=asset_class,exchange_name=exchange_name,
         canonical_symbol=canonical_symbol,
