@@ -198,6 +198,28 @@ class CsvStagingTests(unittest.TestCase):
         )
         self.assertEqual([row.code for row in batch.rejections],["MISALIGNED_INTERVAL_OPEN","OUTSIDE_EXPECTED_SESSION","INCOMPLETE_CURRENT_INTERVAL"])
 
+    def test_all_supported_intraday_timeframes_quarantine_open_intervals(self) -> None:
+        cases = (
+            ("H1", "2026-07-10T12:00:00Z", "2026-07-10T14:00:00Z", "2026-07-10T14:00:00+00:00"),
+            ("M30", "2026-07-10T12:00:00Z", "2026-07-10T12:30:00Z", "2026-07-10T12:45:00+00:00"),
+            ("M5", "2026-07-10T12:00:00Z", "2026-07-10T12:15:00Z", "2026-07-10T12:15:00+00:00"),
+        )
+        for timeframe, closed, open_interval, received_at in cases:
+            with self.subTest(timeframe=timeframe):
+                batch = self.stage(
+                    "time,open,high,low,close\n"
+                    f"{closed},1,2,0,1\n"
+                    f"{open_interval},1,2,0,1\n",
+                    timeframe=timeframe,
+                    asset_class="FX",
+                    received_at=received_at,
+                )
+                self.assertEqual(len(batch.bars), 1)
+                self.assertEqual(
+                    [(item.source_row_number, item.code) for item in batch.rejections],
+                    [(3, "INCOMPLETE_CURRENT_INTERVAL")],
+                )
+
     def test_d1_nonzero_offset_semantics_are_unchanged(self) -> None:
         batch=self.stage("timestamp,open,high,low,close\n2026-07-10T00:00:00+03:00,1,2,0,1\n")
         self.assertEqual(batch.rejections[0].code,"NON_UTC_TIMESTAMP")
