@@ -269,6 +269,7 @@ struct SchedulerMonitorView: View {
                         }
                     }.padding(.vertical,4)
                 }
+                repairActions(status.blockedScheduleDashboard)
                 GroupBox("Service Monitor") {
                     Facts([
                         ("Service process",health?.process.state.replacingOccurrences(of:"_",with:" ").capitalized ?? "Alive"),
@@ -278,6 +279,41 @@ struct SchedulerMonitorView: View {
                     ])
                 }
             }.padding()
+        }
+    }
+
+    @ViewBuilder private func repairActions(_ blockedRows:[SchedulerUpdateRegisterLane])->some View {
+        let credentialBlocks=blockedRows.filter { row in
+            let outcome=(row.lastOutcome ?? "").lowercased()
+            return outcome.contains("credential repair") || outcome.contains("authentication_failed")
+        }
+        let localFailures=blockedRows.filter { ($0.lastOutcome ?? "").uppercased().contains("LOCAL_PROGRAMMING_ERROR") }
+        if !credentialBlocks.isEmpty || !localFailures.isEmpty {
+            GroupBox("Repair Actions") {
+                VStack(alignment:.leading,spacing:14) {
+                    if !credentialBlocks.isEmpty {
+                        VStack(alignment:.leading,spacing:7) {
+                            Label("Twelve Data credential blocks · \(credentialBlocks.count) lane\(credentialBlocks.count == 1 ? "" : "s")",systemImage:"key.fill").foregroundStyle(.orange)
+                            Text("Store a replacement key only if needed. Fragarach validates it remotely, refreshes provider facts, then releases only these authentication blocks to retry.").font(.caption).foregroundStyle(.secondary)
+                            HStack {
+                                Button("Configure & Validate Twelve Data") { store.openProviderCredentialRepair() }.buttonStyle(.borderedProminent)
+                                Button("Recheck Provider Facts") { Task { await store.refreshProviderFacts(resolve:true) } }.disabled(store.providerFactsResolving)
+                            }
+                        }
+                    }
+                    if !credentialBlocks.isEmpty && !localFailures.isEmpty { Divider() }
+                    if !localFailures.isEmpty {
+                        VStack(alignment:.leading,spacing:7) {
+                            Label("Provider route / evidence blocks · \(localFailures.count)",systemImage:"wrench.and.screwdriver.fill").foregroundStyle(.red)
+                            Text("These are not credential failures and will not be auto-released. Probe the exact lane before changing its provider route; it remains blocked until Fragarach has exact evidence.").font(.caption).foregroundStyle(.secondary)
+                            HStack {
+                                Button("Probe HYPEUSD D1") { Task { await store.probeProviderCapability(symbol:"HYPEUSD",timeframe:"D1") } }.disabled(store.providerFactsResolving)
+                                Button("Open Provider Facts") { store.openProviderFacts() }
+                            }
+                        }
+                    }
+                }.frame(maxWidth:.infinity,alignment:.leading).padding(.vertical,4)
+            }
         }
     }
 

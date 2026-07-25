@@ -77,6 +77,7 @@ from .lane_commissioning import (
     resolved_calendar_id,
 )
 from .provider_facts import load_provider_facts, provider_facts_path
+from .credentials import CredentialAuthority, CredentialState
 from .adaptive_scheduler import (
     POLICIES,
     calculate_throughput,
@@ -1561,8 +1562,14 @@ def _repair_twelve_data_credential_health(
     provider_state: dict[str, object],
     credentials: dict[str, str],
 ) -> bool:
-    """Clear only stale missing-credential blocks after a verified resolver success."""
+    """Clear stale provider auth state only after a remote credential probe."""
     if not credentials.get("TWELVE_DATA"):
+        return False
+    resolution = CredentialAuthority().resolve("TWELVE_DATA")
+    if (
+        resolution.state is not CredentialState.AVAILABLE
+        or resolution.validation_source != "Credential Authority Twelve Data probe"
+    ):
         return False
     facts = load_provider_facts(database_path)
     if facts.get("credential_state") != "Configured":
@@ -1578,7 +1585,11 @@ def _repair_twelve_data_credential_health(
         and state.get("wait_reason") not in {"CREDENTIAL_MISSING", "AUTHENTICATION_FAILED"}
     )
     invented_cooldown = bool(state.get("cooldown_until")) and not state.get("last_429_at")
-    if not stale_local_block and not invented_cooldown:
+    verified_authentication_block = (
+        state.get("health") in {"Authentication Blocked", "Authentication Failed"}
+        or state.get("wait_reason") == "AUTHENTICATION_FAILED"
+    )
+    if not stale_local_block and not invented_cooldown and not verified_authentication_block:
         return False
     state.update(
         health="Healthy", consecutive_failures=0, cooldown_until=None,
@@ -1711,6 +1722,11 @@ def _run_due_acquisitions_unlocked(
         provider_worker_limit=max((profile.concurrency_limit for profile in profiles), default=1),
     )
     credentials = credential_map(credential)
+    credential_repaired = _repair_twelve_data_credential_health(
+        database_path, journal.providers, credentials
+    )
+    if credential_repaired and update_register is not None:
+        update_register.release_verified_credential_blocks(at=observed)
     budgets = build_rate_budgets(
         profiles, journal.providers, monotonic=monotonic,
         wall_clock=(lambda: datetime.now(UTC)), credential=credential,

@@ -31,7 +31,16 @@ struct ProviderFactsView: View {
             .padding(.vertical, 4)
         }
         .sheet(isPresented: $showingCredential) { credentialSheet }
-        .task { if store.providerFacts == nil { await store.refreshProviderFacts() } }
+        .task {
+            if store.providerCredentialRepairRequested {
+                showingCredential=true;store.providerCredentialRepairRequested=false
+            }
+            if store.providerFacts == nil { await store.refreshProviderFacts() }
+        }
+        .onChange(of: store.providerCredentialRepairRequested) { _, requested in
+            guard requested else { return }
+            showingCredential=true;store.providerCredentialRepairRequested=false
+        }
     }
 
     private var header: some View {
@@ -161,9 +170,9 @@ struct ProviderFactsView: View {
     private var credentialSheet: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Configure Twelve Data").font(.title2.bold())
-            Text("The API key is stored in macOS Keychain and passed only to the app-owned provider and Scheduler processes.").foregroundStyle(.secondary)
+            Text("The API key is stored in macOS Keychain. Fragarach validates it with Twelve Data before it releases credential-blocked lanes for retry.").foregroundStyle(.secondary)
             SecureField("Twelve Data API key", text: $credential).textFieldStyle(.roundedBorder)
-            HStack { Spacer(); Button("Cancel") { credential = ""; showingCredential = false }; Button("Save and Recheck") {
+            HStack { Spacer(); Button("Cancel") { credential = ""; showingCredential = false }; Button("Save, Validate & Repair") {
                 let value = credential; credential = ""; showingCredential = false
                 Task { await store.configureTwelveDataCredential(value) }
             }.buttonStyle(.borderedProminent).disabled(credential.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }

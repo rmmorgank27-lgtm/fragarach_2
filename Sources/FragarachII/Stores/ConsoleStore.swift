@@ -68,6 +68,7 @@ struct EstateAdmissionProgress: Equatable {
     @Published var providerFacts:ProviderFactsSnapshot?
     @Published var providerFactsError:String?
     @Published var providerFactsResolving=false
+    @Published var providerCredentialRepairRequested=false
     @Published var latestProviderProbe:ProviderCapabilityProbe?
     @Published var pauseScheduledAcquisitionWhileImporting = true
     @Published var manualIngestionPauseScope = "SYMBOL"
@@ -439,10 +440,28 @@ struct EstateAdmissionProgress: Equatable {
             let config=configuration,bridge=providerFactsBridge
             let result=try await Task.detached{try bridge.storeCredential(value,config:config)}.value
             guard result.exitCode==0 else { throw MarketDiscoveryReadError.serviceFailure(result.stderr.isEmpty ? result.stdout:result.stderr) }
+            let validation=try await Task.detached{try bridge.validateCredential(config:config)}.value
+            guard validation.exitCode==0 else { throw MarketDiscoveryReadError.serviceFailure(validation.stderr.isEmpty ? validation.stdout:validation.stderr) }
+            if validation.JSON?["credential_state"] as? String == "Invalid" {
+                throw MarketDiscoveryReadError.serviceFailure("Twelve Data rejected this API key. The blocked lanes were not released.")
+            }
             await refreshCredentialAuthority()
             await refreshProviderFacts(resolve:true)
             await runSchedulerQueue()
         } catch { providerFactsError=error.localizedDescription }
+    }
+
+    func openProviderCredentialRepair() {
+        providerCredentialRepairRequested = true
+        manageDataSection = .system
+        systemSection = .providerFacts
+        section = .manageData
+    }
+
+    func openProviderFacts() {
+        manageDataSection = .system
+        systemSection = .providerFacts
+        section = .manageData
     }
 
     func probeProviderCapability(symbol:String,timeframe:String) async {

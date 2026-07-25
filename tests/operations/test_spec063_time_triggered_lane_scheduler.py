@@ -169,6 +169,22 @@ def test_blocked_rows_are_available_as_a_bounded_operator_projection(tmp_path: P
     assert rows[0]["last_outcome"] == "AUTHENTICATION_FAILED"
 
 
+def test_verified_credential_repair_requeues_only_authentication_blocks(tmp_path: Path) -> None:
+    database = _m5_lane(tmp_path)
+    register = LaneUpdateRegister(database)
+    register.audit_estate(at=NOW, reason="TEST")
+    register.block(asset="AUDUSD", timeframe="M5", reason="Waiting for provider credential repair: TWELVE_DATA", at=NOW)
+    register.block(asset="AUDUSD", timeframe="D1", reason="LOCAL_PROGRAMMING_ERROR; provider route requires repair", at=NOW)
+
+    released = register.release_verified_credential_blocks(at=NOW)
+    rows = {(row["asset"], row["timeframe"]): row for row in register.rows()}
+
+    assert released == 1
+    assert rows[("AUDUSD", "M5")]["state"] == "RETRY"
+    assert rows[("AUDUSD", "M5")]["last_outcome"] == "CREDENTIAL_REPAIRED_RETRY_QUEUED"
+    assert rows[("AUDUSD", "D1")]["state"] == "BLOCKED"
+
+
 def test_normal_wake_uses_register_not_estate_reconciliation(tmp_path: Path, monkeypatch) -> None:
     database = _m5_lane(tmp_path)
     journal = tmp_path / "scheduler.json"

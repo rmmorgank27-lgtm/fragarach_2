@@ -333,6 +333,35 @@ class LaneUpdateRegister:
             ).fetchall()
         return [_row_dict(row) for row in rows]
 
+    def release_verified_credential_blocks(self, *, at: datetime | None = None) -> int:
+        """Requeue only lanes blocked solely by provider authentication.
+
+        A successful remote credential probe proves that the previous
+        authentication result is obsolete. Other blocks are deliberately left
+        untouched: route, schedule, and local programming failures need their
+        own repair path.
+        """
+        observed = normalized_utc(at).isoformat()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = connection.execute(
+                    """UPDATE lane_update_register
+                       SET state='RETRY', next_check_at_utc=?, retry_not_before_utc=?,
+                           last_outcome='CREDENTIAL_REPAIRED_RETRY_QUEUED',
+                           updated_at_utc=?, lane_state_version=lane_state_version+1
+                       WHERE state='BLOCKED' AND (
+                           lower(coalesce(last_outcome, '')) LIKE '%credential repair%'
+                           OR upper(coalesce(last_outcome, '')) LIKE '%AUTHENTICATION_FAILED%'
+                       )""",
+                    (observed, observed, observed),
+                )
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+        return int(cursor.rowcount)
+
     def audit_due(self, *, at: datetime | None = None) -> bool:
         """Whether the bounded weekly maintenance audit is due."""
         observed = normalized_utc(at)

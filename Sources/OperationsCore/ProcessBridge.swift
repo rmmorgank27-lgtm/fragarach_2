@@ -138,6 +138,9 @@ public final class ProcessBridge: @unchecked Sendable {
         guard !value.isEmpty else { throw CredentialStorageError.empty }
         return try runRaw(config:config,args:["-m","fragarach_ii.commands.credentials","--mode","store","--provider",provider,"--json"],environment:["FRAGARACH_CREDENTIAL_INPUT":value])
     }
+    public func validateCredential(provider:String="TWELVE_DATA",config:CLIConfiguration) throws -> ProcessResult {
+        try runRaw(config:config,args:["-m","fragarach_ii.commands.credentials","--mode","validate","--provider",provider,"--json"],environment:[:])
+    }
     public func cancel() { lock.withLock { cancellationRequested=true;if let process,process.isRunning{process.terminate()} } }
     private func runRaw(config:CLIConfiguration,args:[String],environment:[String:String],progress:(@Sendable (DataOperationState)->Void)?=nil,progressDetail:(@Sendable (OperationProgressDetail)->Void)?=nil) throws -> ProcessResult {
         let child=Process(), out=Pipe(), err=Pipe(); let id=UUID()
