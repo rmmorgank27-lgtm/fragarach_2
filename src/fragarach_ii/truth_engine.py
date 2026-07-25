@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -203,12 +203,22 @@ def _calculate(
     caodt = freshness["latest_canonical_observation"]
     authority_score = 100 if registration[3] == "REGISTERED_WITH_EVIDENCE" and ledger else 90 if registration[3] == "REGISTERED_WITH_EVIDENCE" else 75
     authority_basis = f"{registration[3]};" + ("LEDGER_BOUND" if ledger else "LEDGER_BINDING_NOT_PRESENT")
+    validation_stale = _validation_snapshot_stale(
+        validation, timeframe=timeframe, latest=latest, latest_close=latest_close,
+    )
     validation_state, integrity_score = _integrity(validation)
     intraday=bool(validation and validation.get("format")=="fragarach_ii.lane_validation_summary.v2")
     expected = validation.get("expected_interval_count" if intraday else "expected_session_count") if validation else None
     present = validation.get("present_expected_interval_count" if intraday else "present_expected_session_count") if validation else None
     missing = validation.get("missing_expected_interval_count" if intraday else "missing_expected_session_count") if validation else None
     continuity_score = _continuity(validation, expected, present, missing)
+    if validation_stale:
+        # A persisted validation summary is a point-in-time audit.  Once the
+        # canonical edge has moved beyond its checked boundary it cannot be
+        # used to claim current gaps or reduce live operational health.  Keep
+        # its factual counts visible, but wait for a fresh audit before using
+        # integrity/continuity as score inputs again.
+        validation_state, integrity_score, continuity_score = "STALE", None, None
     # Retained as a compatibility alias for accepted v1 consumers. Coverage is
     # no longer a separately weighted Truth component.
     coverage_score = round(100 * present / expected) if expected else None
@@ -220,7 +230,9 @@ def _calculate(
         else None
     )
     depth_score, depth_basis = _historical_depth(timeframe, earliest, latest)
-    gap_classification, gap_impact = _gaps(validation, freshness)
+    gap_classification, gap_impact = _gaps(
+        validation, freshness, validation_stale=validation_stale,
+    )
     provider_summary = {
         "provider": registration[0],
         "provider_contract": registration[1] if timeframe=="D1" else f"TWELVE_DATA_TIME_SERIES_{timeframe}_V1",
@@ -232,9 +244,20 @@ def _calculate(
     components: dict[str, dict[str, object]] = {
         "authority": {"score": authority_score, "basis": authority_basis},
         "freshness": {"score": freshness_score, "basis": freshness["reason_code"]},
-        "integrity": {"score": integrity_score, "basis": validation_state},
+        "integrity": {
+            "score": integrity_score,
+            "basis": "STALE_VALIDATION_SNAPSHOT" if validation_stale else validation_state,
+        },
         "historical_depth": {"score": depth_score, "basis": depth_basis},
-        "continuity": {"score": continuity_score, "basis": f"{missing} missing of {expected} expected sessions" if expected else "NOT_MEASURED"},
+        "continuity": {
+            "score": continuity_score,
+            "basis": (
+                "STALE_VALIDATION_SNAPSHOT"
+                if validation_stale
+                else f"{missing} missing of {expected} expected sessions"
+                if expected else "NOT_MEASURED"
+            ),
+        },
         "provider": {"score": None, "basis": provider_summary["basis"]},
     }
     measured = {
@@ -255,6 +278,9 @@ def _calculate(
     elif freshness.get("state") == "Behind" and state == "GREEN":
         state = "AMBER"
     limitations = [name.upper() + "_NOT_MEASURED" for name, item in components.items() if item["score"] is None]
+    if validation_stale:
+        limitations = [item for item in limitations if item not in {"INTEGRITY_NOT_MEASURED", "CONTINUITY_NOT_MEASURED"}]
+        limitations.append("VALIDATION_SNAPSHOT_STALE")
     result = {
         "contract": TRUTH_STATE_CONTRACT,
         "engine_version": TRUTH_ENGINE_VERSION,
@@ -271,7 +297,7 @@ def _calculate(
         "provider_score": None,
         "authority_state": state,
         "evidence_integrity": {
-            "state": "Healthy" if validation_state == "PASS" else "Attention" if validation_state == "WARNING" else "Limited",
+            "state": "Healthy" if validation_state == "PASS" else "Attention" if validation_state == "WARNING" else "Not current" if validation_state == "STALE" else "Limited",
             "score": integrity_score,
         },
         "freshness_dimension": {
@@ -282,13 +308,13 @@ def _calculate(
         "overall_operational_state": (
             "Critical" if state == "RED" else "Attention" if state == "AMBER" else "Healthy"
         ),
-        "operational_state_label": f"{'Valid' if validation_state == 'PASS' else 'Incomplete'} · {freshness.get('operational_state', freshness.get('state'))}",
+        "operational_state_label": f"{'Valid' if validation_state == 'PASS' else 'Validation snapshot stale' if validation_state == 'STALE' else 'Incomplete'} · {freshness.get('operational_state', freshness.get('state'))}",
         "validation_state": validation_state,
         "caodt": caodt,
         "latest_canonical_observation": caodt,
         "authority_revision": authority_revision,
         "freshness": freshness,
-        "validation": {"state": validation_state, "summary": validation},
+        "validation": {"state": validation_state, "summary": validation, "snapshot_stale": validation_stale},
         "gap_classification": gap_classification,
         "gap_impact": gap_impact,
         "coverage": {
@@ -359,11 +385,39 @@ def _historical_depth(timeframe: str, earliest: int, latest: int) -> tuple[int, 
     return score, basis
 
 
+def _validation_snapshot_stale(
+    validation: dict[str, Any] | None,
+    *, timeframe: str, latest: int, latest_close: int,
+) -> bool:
+    """Whether a persisted validation snapshot predates canonical evidence.
+
+    Validation can be expensive and is intentionally decoupled from every
+    scheduler poll.  Its historical findings remain available, but it must
+    not be projected as a live current-edge failure after a provider has
+    advanced the canonical lane.
+    """
+
+    if not validation:
+        return False
+    try:
+        if timeframe == "D1":
+            boundary = validation.get("through_date") or validation.get("latest_expected_session")
+            return bool(boundary) and date.fromisoformat(str(boundary)) < datetime.fromtimestamp(latest, UTC).date()
+        boundary = validation.get("latest_expected_closed_interval_end_utc")
+        return bool(boundary) and int(datetime.fromisoformat(str(boundary)).timestamp()) < int(latest_close)
+    except (TypeError, ValueError, OverflowError):
+        # A legacy/malformed summary remains subject to its normal validation
+        # path.  Only an exact, comparable boundary is marked stale.
+        return False
+
+
 def _gaps(
-    validation: dict[str, Any] | None, freshness: dict[str, object]
+    validation: dict[str, Any] | None, freshness: dict[str, object], *, validation_stale: bool = False,
 ) -> tuple[str, str]:
     if freshness["state"] == "Behind":
         return "CURRENT", "HIGH"
+    if validation_stale:
+        return "HISTORICAL_SNAPSHOT", "NONE"
     if validation is None:
         return "NOT_MEASURED", "HIGH"
     missing = validation.get("missing_expected_interval_count",validation.get("missing_expected_session_count", 0))

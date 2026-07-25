@@ -101,6 +101,30 @@ class TruthEngineTests(unittest.TestCase):
         self.assertEqual(fresh["explanation"]["weights"]["freshness"], 30)
         self.assertGreater(fresh["explanation"]["weights"]["freshness"], fresh["explanation"]["weights"]["historical_depth"])
 
+    def test_stale_validation_snapshot_does_not_mark_a_current_lane_attention(self) -> None:
+        latest_epoch = 1_800_000_000
+        validation = {
+            "format": "fragarach_ii.lane_validation_summary.v2",
+            "expected_interval_count": 26, "present_expected_interval_count": 17,
+            "missing_expected_interval_count": 9, "outside_expected_interval_count": 0,
+            "latest_expected_closed_interval_present": False,
+            "latest_expected_closed_interval_end_utc": datetime.fromtimestamp(latest_epoch - 3_600, UTC).isoformat(),
+            "material_gap_count": 9, "non_material_gap_count": 0,
+        }
+        state = _calculate(
+            "DOGEUSD", "H1",
+            ("BINANCE", "CONTRACT", "DOGEUSDT", "REGISTERED_WITH_EVIDENCE"),
+            (1_000, latest_epoch - 31 * 86_400, latest_epoch, latest_epoch + 3_600),
+            validation, ("ledger",),
+            {"state": "Current", "latest_canonical_observation": datetime.fromtimestamp(latest_epoch + 3_600, UTC).isoformat(), "expected_latest": None, "reason_code": "CURRENT"},
+        )
+
+        self.assertEqual(state["authority_state"], "GREEN")
+        self.assertEqual(state["validation_state"], "STALE")
+        self.assertEqual(state["evidence_integrity"]["state"], "Not current")
+        self.assertEqual(state["gap_classification"], "HISTORICAL_SNAPSHOT")
+        self.assertIn("VALIDATION_SNAPSHOT_STALE", state["explanation"]["limitations"])
+
 
 def _state(timeframe: str, span_days: int, *, expected: int, present: int, material: int = 0, latest: bool = True):
     interval = {"D1": 86_400, "H1": 3_600, "M30": 1_800, "M5": 300}[timeframe]
