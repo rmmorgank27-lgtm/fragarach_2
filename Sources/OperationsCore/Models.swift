@@ -1,6 +1,10 @@
 import Foundation
 
-public let foundationTables = Set(["authority_events", "bars", "evidence_lanes", "ingest_runs", "instrument_registrations", "lane_state", "provenance", "raw_blocks", "rollup_state", "schema_migrations"])
+// Keep the desktop reader pinned to the complete current authority schema.
+// Scheduler runtime control and its immutable audit trail were promoted from
+// the legacy journal into SQLite by migration 10, so they are part of the
+// database identity even though the UI does not materialise them directly.
+public let foundationTables = Set(["authority_events", "bars", "evidence_lanes", "ingest_runs", "instrument_registrations", "lane_state", "provenance", "raw_blocks", "rollup_state", "schema_migrations", "scheduler_runtime_state", "scheduler_audit_events"])
 
 public struct ValidationSummary: Codable, Equatable, Sendable {
     public let format: String
