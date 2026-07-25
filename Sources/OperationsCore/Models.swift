@@ -1106,6 +1106,10 @@ public enum OperationIntent: Equatable, Sendable {
 }
 
 public extension OperationIntent {
+    var isManualImport: Bool {
+        if case .importCSV = self { return true }
+        return false
+    }
     var isAuthorityMutation: Bool {
         switch self {
         case .registerInstrument,.retireInstrument,.reactivateInstrument,

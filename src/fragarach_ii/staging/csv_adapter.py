@@ -5,7 +5,7 @@ from __future__ import annotations
 import csv
 import io
 import re
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from fragarach_ii.ingestion.validation import (
     RowValidationError,
@@ -45,6 +45,7 @@ def stage_csv_bytes(
     asset_class: str | None = None,
     source_timezone: str | None = None,
     d1_date_format: str = "AUTO",
+    d1_latest_closed_date: date | None = None,
 ) -> StagingBatch:
     try:
         text = payload.decode("utf-8-sig")
@@ -108,7 +109,17 @@ def stage_csv_bytes(
                         source_timezone=source_timezone,
                         d1_date_format=effective_d1_date_format,
                     )
-                if bar.timeframe != "D1":
+                if bar.timeframe == "D1":
+                    if (
+                        d1_latest_closed_date is not None
+                        and datetime.fromtimestamp(bar.timestamp, UTC).date()
+                        > d1_latest_closed_date
+                    ):
+                        raise RowValidationError(
+                            "INCOMPLETE_CURRENT_DAILY_SESSION",
+                            "daily bar belongs to a session that was not closed when the source was admitted",
+                        )
+                else:
                     if asset_class is None:
                         raise RowValidationError(
                             "INTRADAY_PROFILE_NOT_REVIEWED",

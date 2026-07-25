@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from fragarach_ii.staging import stage_csv_bytes
 
@@ -41,6 +41,20 @@ class CsvStagingTests(unittest.TestCase):
         batch = self.stage("time,open,high,low,close\n2026-07-09,1,2,0,1\n")
         self.assertEqual(batch.rejections, ())
         self.assertEqual(batch.bars[0].source_timestamp_text, "2026-07-09")
+
+    def test_daily_current_session_is_quarantined_when_a_closed_boundary_is_known(self) -> None:
+        batch = self.stage(
+            "time,open,high,low,close\n"
+            "2026-07-09,1,2,0,1\n"
+            "2026-07-10,1,2,0,1\n",
+            d1_latest_closed_date=date(2026, 7, 9),
+        )
+        self.assertEqual(len(batch.bars), 1)
+        self.assertEqual(batch.bars[0].source_timestamp_text, "2026-07-09")
+        self.assertEqual(
+            [(item.source_row_number, item.code) for item in batch.rejections],
+            [(3, "INCOMPLETE_CURRENT_DAILY_SESSION")],
+        )
 
     def test_timestamp_utc_header_maps_to_logical_timestamp(self) -> None:
         batch = self.stage(

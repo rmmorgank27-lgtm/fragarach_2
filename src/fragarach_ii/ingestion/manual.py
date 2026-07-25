@@ -6,10 +6,13 @@ import hashlib
 import sqlite3
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from fragarach_ii.staging import stage_csv_bytes
+from fragarach_ii.calendars import CalendarRegistry, ConfigurationError
+from fragarach_ii.lane_commissioning import resolved_calendar_id
+from fragarach_ii.operational_schedule import latest_closed_session_date
 from fragarach_ii.storage import open_read_only
 from fragarach_ii.validation import validate_lane
 from fragarach_ii.execution_trace import timing_record
@@ -60,6 +63,11 @@ def ingest_manual_file(
     raw_block_id = f"raw-{checksum}"
     received_at = (clock or (lambda: datetime.now(UTC)))().astimezone(UTC).isoformat()
     normalized_timeframe = timeframe.strip().upper() if timeframe else None
+    d1_closed_boundary, has_d1_calendar = _latest_closed_d1_boundary(
+        database_path,
+        symbol=symbol,
+        observed_at=datetime.fromisoformat(received_at),
+    ) if normalized_timeframe == "D1" else (None, False)
     asset_class = _registered_asset_class(database_path, symbol) if normalized_timeframe != "D1" else None
     if progress is not None:
         progress("validating")
@@ -74,6 +82,7 @@ def ingest_manual_file(
         asset_class=asset_class,
         source_timezone=source_timezone,
         d1_date_format=d1_date_format,
+        d1_latest_closed_date=d1_closed_boundary,
     )
     validation_completed = datetime.now(UTC)
     timing_trace.append(timing_record(
@@ -126,29 +135,33 @@ def ingest_manual_file(
         rows_read=result.accepted, rows_written=result.inserted + result.corrected,
         blocking_reason=(result.rejections[0].get("code") if result.rejections else None),
     ))
-    if (
-        result.transaction_state in {"committed", "COMPLETED_WITH_WARNINGS"}
-        and batch.bars
-        and batch.bars[0].timeframe != "D1"
-    ):
+    if result.transaction_state in {"committed", "COMPLETED_WITH_WARNINGS"} and batch.bars:
         lane_validation_started = datetime.now(UTC)
-        latest_date = datetime.fromtimestamp(
-            max(bar.timestamp for bar in batch.bars), UTC
-        ).date().isoformat()
-        validate_lane(
-            database_path,
-            symbol=batch.bars[0].symbol,
-            timeframe=batch.bars[0].timeframe,
-            through_date=latest_date,
-            persist=True,
-            clock=clock,
-        )
-        timing_trace.append(timing_record(
-            operation_id=operation_id, symbol=batch.bars[0].symbol,
-            timeframe=batch.bars[0].timeframe, intent="MANUAL_CSV_IMPORT",
-            step_name="intraday_lane_validation", started_at=lane_validation_started,
-            ended_at=datetime.now(UTC), provider=provider,
-        ))
+        if (
+            (batch.bars[0].timeframe != "D1" or (result.inserted or result.corrected))
+            and (batch.bars[0].timeframe != "D1" or has_d1_calendar)
+        ):
+            latest_date = (
+                d1_closed_boundary.isoformat()
+                if batch.bars[0].timeframe == "D1" and d1_closed_boundary is not None
+                else datetime.fromtimestamp(
+                    max(bar.timestamp for bar in batch.bars), UTC
+                ).date().isoformat()
+            )
+            validate_lane(
+                database_path,
+                symbol=batch.bars[0].symbol,
+                timeframe=batch.bars[0].timeframe,
+                through_date=latest_date,
+                persist=True,
+                clock=clock,
+            )
+            timing_trace.append(timing_record(
+                operation_id=operation_id, symbol=batch.bars[0].symbol,
+                timeframe=batch.bars[0].timeframe, intent="MANUAL_CSV_IMPORT",
+                step_name=("d1_lane_validation" if batch.bars[0].timeframe == "D1" else "intraday_lane_validation"),
+                started_at=lane_validation_started, ended_at=datetime.now(UTC), provider=provider,
+            ))
     # Canonical admission is already durable at this point.  Publication is a
     # separate, asynchronous concern so an import never waits on an Estate or
     # consumer catalogue projection.  Even a conflict-preserving import can
@@ -178,6 +191,58 @@ def _registered_asset_class(database_path: str | Path, symbol: str | None) -> st
         return row[0] if row else None
     finally:
         connection.close()
+
+
+def _latest_closed_d1_boundary(
+    database_path: str | Path,
+    *,
+    symbol: str | None,
+    observed_at: datetime,
+) -> tuple[date, bool]:
+    """Return the calendar-approved closed D1 boundary for a manual import.
+
+    A TradingView daily export normally includes today's still-forming candle.
+    It remains preserved in the raw evidence, but must not become canonical.
+    Older unregistered databases retain the safe UTC-yesterday fallback used by
+    the original manual-file bootstrap flow.
+    """
+    observed = observed_at.astimezone(UTC)
+    if symbol:
+        try:
+            connection = open_read_only(database_path)
+            try:
+                row = connection.execute(
+                    """
+                    SELECT asset_class, calendar_id, exchange_name
+                    FROM instrument_registrations
+                    WHERE asset = ? AND timeframe = 'D1'
+                    """,
+                    (symbol.strip().upper(),),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                row = None
+            finally:
+                connection.close()
+        except sqlite3.OperationalError:
+            row = None
+        if row is not None:
+            calendar_id = resolved_calendar_id(
+                asset_class=row[0],
+                calendar_id=row[1],
+                exchange_name=row[2],
+                canonical_symbol=symbol.strip().upper(),
+            )
+            if calendar_id:
+                try:
+                    definition = CalendarRegistry(
+                        load_symbol_assignments=False
+                    ).calendar_by_id(calendar_id)
+                    boundary = latest_closed_session_date(definition, observed)
+                    if boundary is not None:
+                        return boundary, True
+                except ConfigurationError:
+                    pass
+    return observed.date() - timedelta(days=1), False
 
 
 __all__ = ["IngestionFailure", "IngestionResult", "ingest_manual_file"]

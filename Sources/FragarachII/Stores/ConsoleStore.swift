@@ -70,7 +70,10 @@ struct EstateAdmissionProgress: Equatable {
     @Published var providerFactsResolving=false
     @Published var providerCredentialRepairRequested=false
     @Published var latestProviderProbe:ProviderCapabilityProbe?
-    @Published var pauseScheduledAcquisitionWhileImporting = true
+    // SQLite serialises the short canonical admission transaction, so a
+    // manual file normally coexists with scheduled acquisition.  A pause is
+    // retained as an explicit operator option for exceptional investigations.
+    @Published var pauseScheduledAcquisitionWhileImporting = false
     @Published var manualIngestionPauseScope = "SYMBOL"
     @Published var resumeAfterManualImport = true
     @Published var manualIngestionHoldMessage:String?
@@ -207,7 +210,7 @@ struct EstateAdmissionProgress: Equatable {
                 return
             }
         }
-        guard !intent.isAuthorityMutation || !schedulerAcquisitionIsActive else {
+        guard !(intent.isAuthorityMutation && !intent.isManualImport) || !schedulerAcquisitionIsActive else {
             operationError="A scheduled acquisition is publishing authority. Try again when the active lane completes."
             await releaseManualIngestionPauseIfNeeded()
             return

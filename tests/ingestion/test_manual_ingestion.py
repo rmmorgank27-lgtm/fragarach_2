@@ -258,6 +258,26 @@ class ManualIngestionTests(unittest.TestCase):
             self.assertEqual(status,"committed")
             self.assertEqual(json.loads(detail)["rejections"],[{"code":"INVALID_OHLC","message":"low is above close","source_row_number":3}])
 
+    def test_current_daily_bar_is_preserved_as_raw_evidence_but_not_admitted(self) -> None:
+        source = self.write(
+            "tradingview-daily.csv",
+            "2026-07-09,1,2,0,1,10\n"
+            "2026-07-10,1,2,0,1,11\n",
+        )
+        result = self.ingest(source)
+        self.assertEqual(result.transaction_state, "COMPLETED_WITH_WARNINGS")
+        self.assertEqual((result.inserted, result.rejected), (1, 1))
+        self.assertEqual(result.rejections[0]["code"], "INCOMPLETE_CURRENT_DAILY_SESSION")
+        with open_read_only(self.database) as connection:
+            self.assertEqual(connection.execute("SELECT count(*) FROM bars").fetchone()[0], 1)
+            self.assertEqual(
+                connection.execute(
+                    "SELECT byte_length FROM raw_blocks WHERE raw_block_id = ?",
+                    (result.raw_block_id,),
+                ).fetchone()[0],
+                len(source.read_bytes()),
+            )
+
     def test_restart_preserves_all_evidence_and_history(self) -> None:
         source = self.write("restart.csv", "2026-07-09,1,2,0,1,10\n")
         result = self.ingest(source)
