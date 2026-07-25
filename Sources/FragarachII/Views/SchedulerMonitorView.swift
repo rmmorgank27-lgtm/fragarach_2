@@ -305,11 +305,12 @@ struct SchedulerMonitorView: View {
                     }
                     if !credentialBlocks.isEmpty && (!localFailures.isEmpty || !noEligibleProvider.isEmpty || !calendarBlocks.isEmpty) { Divider() }
                     if !localFailures.isEmpty {
+                        let lane = localFailures[0]
                         VStack(alignment:.leading,spacing:7) {
                             Label("Provider route / evidence blocks · \(localFailures.count)",systemImage:"wrench.and.screwdriver.fill").foregroundStyle(.red)
-                            Text("These are not credential failures and will not be auto-released. Probe the exact lane before changing its provider route; it remains blocked until Fragarach has exact evidence.").font(.caption).foregroundStyle(.secondary)
+                            Text("These are not credential failures. Probe the approved route before changing it; Fragarach only restores the lane after a provider returns valid evidence.").font(.caption).foregroundStyle(.secondary)
                             HStack {
-                                Button("Probe HYPEUSD D1") { Task { await store.probeProviderCapability(symbol:"HYPEUSD",timeframe:"D1") } }.disabled(store.providerFactsResolving)
+                                Button("Probe \(lane.asset) \(lane.timeframe) route") { Task { await store.probeProviderCapability(symbol:lane.asset,timeframe:lane.timeframe) } }.disabled(store.providerFactsResolving)
                                 Button("Open Provider Facts") { store.openProviderFacts() }
                             }
                         }

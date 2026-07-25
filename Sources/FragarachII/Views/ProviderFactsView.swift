@@ -19,8 +19,9 @@ struct ProviderFactsView: View {
                 }
                 if let facts = store.providerFacts {
                     providerInventory(facts.providerInventory ?? [])
+                    approvedRoutes(facts.approvedRoutes ?? [])
                     reconciliation(facts.reconciliation)
-                    mappingSection("Resolved Automatically", mappings: facts.resolvedAutomatically, empty: "No automatic mappings have been recorded yet.")
+                    mappingSection("Resolved Twelve Data Evidence", mappings: facts.resolvedAutomatically, empty: "No Twelve Data evidence mappings have been recorded yet.")
                     reviewSection(facts.needsMaterialReview)
                     credentialSection(facts.credentialOrAccessIssue)
                     failureSection(facts.providerLookupFailed)
@@ -51,14 +52,14 @@ struct ProviderFactsView: View {
             HStack(alignment: .center, spacing: 16) {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("Provider Facts").font(.title2.bold())
-                    Text("Configured providers, approved routes, and Twelve Data representation facts.")
+                    Text("Configured providers, approved routes, and evidence-backed representation facts.")
                         .foregroundStyle(.secondary)
                     if let revision=store.providerFacts?.revision { Text("Current provider facts revision \(revision)").font(.caption.monospaced()).foregroundStyle(.secondary) }
                 }
                 Spacer()
                 credentialBadge
-                Button("Configure…") { showingCredential = true }
-                Button("Resolve from Twelve Data") { Task { await store.refreshProviderFacts(resolve: true) } }
+                Button("Configure Twelve Data…") { showingCredential = true }
+                Button("Resolve Twelve Data Facts") { Task { await store.refreshProviderFacts(resolve: true) } }
                     .buttonStyle(.borderedProminent)
                     .disabled(store.providerFactsResolving)
                 if store.providerFactsResolving { ProgressView().controlSize(.small) }
@@ -102,6 +103,26 @@ struct ProviderFactsView: View {
                         }
                     }.padding(.vertical,5)
                     if provider.id != providers.last?.id { Divider() }
+                }
+            }.frame(maxWidth:.infinity,alignment:.leading).padding(.vertical,4)
+        }
+    }
+
+    private func approvedRoutes(_ routes:[ProviderApprovedRoute])->some View {
+        GroupBox("Approved Provider Routes") {
+            VStack(alignment:.leading,spacing:8) {
+                if routes.isEmpty { Text("No reviewed provider routes are configured.").foregroundStyle(.secondary) }
+                ForEach(routes) { route in
+                    HStack(alignment:.firstTextBaseline,spacing:10) {
+                        Text(route.asset).font(.body.monospaced()).frame(width:90,alignment:.leading)
+                        Text(route.provider.replacingOccurrences(of:"_",with:" ")).frame(width:120,alignment:.leading)
+                        Text(route.providerSymbol).font(.caption.monospaced()).frame(minWidth:110,alignment:.leading)
+                        Text(route.timeframes.joined(separator:", ")).font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Text(route.enabled ? "Enabled":"Disabled").font(.caption).foregroundStyle(route.enabled ? .green:.secondary)
+                    }
+                    Text("\(route.mappingClass.replacingOccurrences(of:"_",with:" ")) · \(route.authoritySource)").font(.caption2).foregroundStyle(.secondary)
+                    if route.id != routes.last?.id { Divider() }
                 }
             }.frame(maxWidth:.infinity,alignment:.leading).padding(.vertical,4)
         }

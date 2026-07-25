@@ -19,6 +19,7 @@ from fragarach_ii.provider_facts import (
     resolve_twelve_data_facts,
     save_provider_facts,
 )
+import fragarach_ii.provider_facts as provider_facts
 from fragarach_ii.providers.http import HttpResponse
 from fragarach_ii.providers.instrument_search import candidate_from_dict
 from fragarach_ii.scheduler_integrity import active_universe
@@ -167,6 +168,22 @@ def test_empty_probe_is_structured_without_invalidating_mapping() -> None:
         fact = load_provider_facts(db)["mappings"]["TWELVE_DATA:EURUSD"]
         assert fact["mapping_class"] == "EXACT_REPRESENTATION"
         assert fact["timeframe_capabilities"]["M30"]["supported"] is False
+
+
+def test_reviewed_crypto_configuration_is_probeable_without_prior_twelve_lookup(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        db = Path(directory) / "authority.sqlite3"
+        _register(db, "HYPEUSD")
+        monkeypatch.setattr(provider_facts, "credited_send", lambda _credential, *, send, **_kwargs: send())
+        probe = probe_twelve_data_capability(
+            db, canonical_symbol="HYPEUSD", timeframe="M5", credential="secret",
+            transport=FactTransport(), clock=lambda: NOW,
+        )
+        assert probe["provider_symbol"] == "HYPE/USDT"
+        assert probe["reason"] == "TIMEFRAME_SUPPORTED"
+        mapping = load_provider_facts(db)["mappings"]["TWELVE_DATA:HYPEUSD"]
+        assert mapping["mapping_class"] == "APPROVED_EQUIVALENT_REPRESENTATION"
+        assert mapping["resolution_method"] == "REVIEWED_PROVIDER_CAPABILITY_CONFIGURATION"
 
 
 def test_transport_failure_has_retry_and_does_not_create_review() -> None:

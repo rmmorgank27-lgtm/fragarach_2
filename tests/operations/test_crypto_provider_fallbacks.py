@@ -9,7 +9,6 @@ def test_commissioned_crypto_assets_have_binance_intraday_and_coingecko_daily_ro
         "AVAXUSD": ("AVAXUSDT", "avalanche-2"),
         "DOGEUSD": ("DOGEUSDT", "dogecoin"),
         "DOTUSD": ("DOTUSDT", "polkadot"),
-        "HYPEUSD": ("HYPEUSDT", "hyperliquid"),
         "LINKUSD": ("LINKUSDT", "chainlink"),
     }
 
@@ -34,3 +33,10 @@ def test_commissioned_crypto_assets_have_binance_intraday_and_coingecko_daily_ro
         assert intraday["quote_equivalence"] == "USD_USDT_CRYPTO"
         assert daily["provider_symbol"] == coingecko_symbol
         assert daily["direct_real_eligible"] is True
+
+    hype = mapping_authority(
+        profiles["TWELVE_DATA"], symbol="HYPEUSD", timeframe="H1",
+        primary_provider=None, primary_symbol=None,
+    )
+    assert hype["provider_symbol"] == "HYPE/USDT"
+    assert hype["direct_real_eligible"] is True

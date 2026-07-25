@@ -257,6 +257,7 @@ def provider_facts_snapshot(
     from .credentials import CredentialAuthority, CredentialState
     authority = CredentialAuthority()
     inventory = []
+    approved_routes = []
     contract_profiles = {
         profile.provider: profile
         for profile in load_provider_profiles(apply_runtime_overrides=False)
@@ -285,6 +286,20 @@ def provider_facts_snapshot(
             "supported_timeframes": list(profile.supported_timeframes),
             "rate_policy_verified": profile.rate_policy_verified,
         })
+        for mapping in profile.mappings:
+            asset = str(mapping.get("asset", mapping.get("canonical_symbol", ""))).upper()
+            provider_symbol = str(mapping.get("symbol", mapping.get("provider_symbol", "")))
+            if not asset or not provider_symbol:
+                continue
+            approved_routes.append({
+                "asset": asset,
+                "provider": profile.provider,
+                "provider_symbol": provider_symbol,
+                "timeframes": [str(item).upper() for item in mapping.get("timeframes", ())],
+                "mapping_class": mapping.get("mapping_class") or "UNREVIEWED",
+                "authority_source": mapping.get("authority_source") or "REVIEW_REQUIRED",
+                "enabled": profile.enabled,
+            })
     return {
         "contract": PROVIDER_FACTS_CONTRACT,
         "resolver_version": PROVIDER_FACTS_RESOLVER_VERSION,
@@ -295,6 +310,7 @@ def provider_facts_snapshot(
         "generated_at": datetime.now(UTC).isoformat(),
         "credential_state": credential_state,
         "provider_inventory": inventory,
+        "approved_routes": sorted(approved_routes, key=lambda item: (item["asset"], item["provider"])),
         "resolved_automatically": sorted(resolved, key=lambda item: str(item.get("canonical_symbol"))),
         "needs_material_review": sorted(reviews, key=lambda item: str(item.get("canonical_symbol"))),
         "credential_or_access_issue": None if credential_state == "Configured" else {
@@ -552,8 +568,14 @@ def probe_twelve_data_capability(
         raise ProviderFactsError("INVALID_TIMEFRAME", lane)
     facts = load_provider_facts(database_path)
     mapping = facts["mappings"].get(f"TWELVE_DATA:{symbol}")
-    if not isinstance(mapping, dict) or mapping.get("mapping_class") not in {"EXACT_REPRESENTATION", "APPROVED_PROVIDER_ALIAS"}:
-        raise ProviderFactsError("REPRESENTATION_AMBIGUOUS", f"Resolve {symbol} representation before probing")
+    direct_mapping_classes = {
+        "EXACT_REPRESENTATION", "APPROVED_PROVIDER_ALIAS", "APPROVED_EQUIVALENT_REPRESENTATION",
+    }
+    if not isinstance(mapping, dict) or mapping.get("mapping_class") not in direct_mapping_classes:
+        mapping = _reviewed_twelve_data_mapping(symbol)
+        if mapping is None:
+            raise ProviderFactsError("REPRESENTATION_AMBIGUOUS", f"Resolve {symbol} representation before probing")
+        facts["mappings"][f"TWELVE_DATA:{symbol}"] = mapping
     now = (clock or (lambda: datetime.now(UTC)))().astimezone(UTC)
     config = load_provider_config(timeframe=lane)
     target = "/time_series?" + urlencode({
@@ -626,6 +648,58 @@ def probe_twelve_data_capability(
         "provider": "TWELVE_DATA",
         "provider_symbol": mapping["provider_symbol"],
         **capability,
+    }
+
+
+def _reviewed_twelve_data_mapping(symbol: str) -> dict[str, object] | None:
+    """Promote a reviewed provider configuration into probeable route facts.
+
+    A reviewed mapping is already an authority decision.  Requiring a second
+    Twelve Data search result before a bounded time-series probe made valid
+    crypto routes (including HYPE/USDT) look ambiguous and blocked recovery.
+    """
+    from .acquisition_orchestrator import load_provider_profiles, mapping_authority
+
+    profile = next(
+        (item for item in load_provider_profiles() if item.provider == "TWELVE_DATA" and item.enabled),
+        None,
+    )
+    if profile is None:
+        return None
+    authority = mapping_authority(
+        profile, symbol=symbol, timeframe="D1", primary_provider=None, primary_symbol=None,
+    )
+    if not authority.get("direct_real_eligible") or not authority.get("provider_symbol"):
+        return None
+    now = datetime.now(UTC).isoformat()
+    return {
+        "canonical_symbol": symbol,
+        "canonical_base_asset": authority.get("canonical_base_asset"),
+        "canonical_quote_asset": authority.get("canonical_quote_asset"),
+        "canonical_instrument_type": "CRYPTO_SPOT_PAIR",
+        "provider": "TWELVE_DATA",
+        "provider_symbol": authority["provider_symbol"],
+        "provider_description": authority.get("provider_representation"),
+        "provider_instrument_type": "CRYPTO",
+        "provider_asset_class": "CRYPTO",
+        "provider_base_asset": authority.get("provider_base_asset"),
+        "provider_quote_asset": authority.get("provider_quote_asset"),
+        "venue_or_market": authority.get("authority_source"),
+        "mapping_class": authority.get("mapping_class"),
+        "resolution_method": "REVIEWED_PROVIDER_CAPABILITY_CONFIGURATION",
+        "matching_rule": authority.get("quote_equivalence") or "REVIEWED_PROVIDER_MAPPING",
+        "status": "RESOLVED_AUTOMATICALLY",
+        "timeframe_capabilities": {},
+        "capability_probe_result": None,
+        "resolution_evidence": {
+            "authority_source": authority.get("authority_source"),
+            "reviewed_configuration": True,
+        },
+        "resolver_version": PROVIDER_FACTS_RESOLVER_VERSION,
+        "effective_time": now,
+        "last_verified": now,
+        "candidates": [],
+        "available_actions": [],
     }
 
 
