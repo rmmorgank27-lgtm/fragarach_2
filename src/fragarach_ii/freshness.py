@@ -421,21 +421,26 @@ def _crypto_operational_policy(config_root: str | Path | None) -> dict[str, obje
 
 
 def _runtime_freshness_override(connection: sqlite3.Connection, timeframe: str) -> dict[str, object]:
-    """Read the small, atomic scheduler-runtime override for one timeframe."""
+    """Read one scheduler-runtime override from the SQLite control authority."""
     try:
         database = next(
             row[2] for row in connection.execute("PRAGMA database_list") if row[1] == "main"
         )
         journal = Path(f"{database}.scheduler.json")
-        stamp = journal.stat()
-        key = str(journal.resolve())
-        with _RUNTIME_OVERRIDE_CACHE_LOCK:
-            cached = _RUNTIME_OVERRIDE_CACHE.get(key)
-            if cached and cached[0] == stamp.st_mtime_ns and cached[1] == stamp.st_size:
-                payload = cached[2]
-            else:
-                payload = json.loads(journal.read_text(encoding="utf-8"))
-                _RUNTIME_OVERRIDE_CACHE[key] = (stamp.st_mtime_ns, stamp.st_size, payload)
+        from .scheduler_state_store import SchedulerStateStore
+        payload = SchedulerStateStore(database, journal).load()
+        if not isinstance(payload, dict):
+            # One-release compatibility for authorities not yet migrated by a
+            # SchedulerJournal save.
+            stamp = journal.stat()
+            key = str(journal.resolve())
+            with _RUNTIME_OVERRIDE_CACHE_LOCK:
+                cached = _RUNTIME_OVERRIDE_CACHE.get(key)
+                if cached and cached[0] == stamp.st_mtime_ns and cached[1] == stamp.st_size:
+                    payload = cached[2]
+                else:
+                    payload = json.loads(journal.read_text(encoding="utf-8"))
+                    _RUNTIME_OVERRIDE_CACHE[key] = (stamp.st_mtime_ns, stamp.st_size, payload)
         overrides = payload.get("freshness_overrides", {})
         value = overrides.get(timeframe, {}) if isinstance(overrides, dict) else {}
         return value if isinstance(value, dict) else {}
