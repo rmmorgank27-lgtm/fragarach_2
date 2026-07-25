@@ -276,6 +276,7 @@ public struct EstateSummary: Codable, Equatable, Sendable {
     public let commissionedLanes: Int
     public let operationalLanes: Int
     public let missingCommissions: Int
+    public let notEnabledLanes: Int?
     public let operationalCoveragePercent: Int?
     public let greenCount: Int
     public let amberCount: Int
@@ -289,6 +290,7 @@ public struct EstateSummary: Codable, Equatable, Sendable {
         case overallCAODT = "overall_caodt", totalSymbols = "total_symbols", totalLanes = "total_lanes"
         case requiredLanes = "required_lanes", commissionedLanes = "commissioned_lanes"
         case operationalLanes = "operational_lanes", missingCommissions = "missing_commissions"
+        case notEnabledLanes = "not_enabled_lanes"
         case operationalCoveragePercent = "operational_coverage_percent"
         case greenCount = "green_count", amberCount = "amber_count", redCount = "red_count"
         case authorityVersion = "authority_version", generatedAt = "generated_at", aggregation
@@ -384,6 +386,8 @@ public struct CommissionedLaneState:Codable,Equatable,Sendable,Identifiable {
     public let assetClass:String
     public let timeframe:String
     public let required:Bool
+    public let enabled:Bool?
+    public let nonBlocking:Bool?
     public let commissioned:Bool
     public let operational:Bool
     public let missingCommission:Bool
@@ -392,6 +396,7 @@ public struct CommissionedLaneState:Codable,Equatable,Sendable,Identifiable {
     public let evidenceCount:Int
     enum CodingKeys:String,CodingKey {
         case id,symbol,timeframe,required,commissioned,operational
+        case enabled,nonBlocking="non_blocking"
         case assetClass="asset_class",missingCommission="missing_commission"
         case commissioningState="commissioning_state",operationalState="operational_state"
         case evidenceCount="evidence_count"

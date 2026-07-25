@@ -21,6 +21,7 @@ struct EstateContextDetailView: View {
                 ("Commissioned lanes", "\(estate.estateSummary.commissionedLanes)"),
                 ("Operational lanes", "\(estate.estateSummary.operationalLanes)"),
                 ("Missing commissions", "\(estate.estateSummary.missingCommissions)"),
+                ("Not enabled", "\(estate.estateSummary.notEnabledLanes ?? 0)"),
                 ("Operational coverage", estate.estateSummary.operationalCoveragePercent.map{"\($0)%"} ?? "Not measured"),
                 ("Healthy", "\(hierarchy.estateSummary.healthyCount)"),
                 ("Attention", "\(hierarchy.estateSummary.attentionCount)"),

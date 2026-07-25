@@ -184,6 +184,7 @@ private struct EstateFindingsView: View {
         case "Commissioned lanes": return commissioning.filter(\.commissioned)
         case "Operational lanes": return commissioning.filter(\.operational)
         case "Missing commissions": return commissioning.filter(\.missingCommission)
+        case "Not enabled": return commissioning.filter { $0.enabled == false || $0.nonBlocking == true }
         case "Coverage": return commissioning.filter { $0.required && !$0.operational }
         default: return []
         }

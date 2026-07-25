@@ -18,6 +18,7 @@ struct TruthEstateSummaryView:View {
                 SummaryMetric(title:"Commissioned lanes",value:"\(summary.commissionedLanes)",action:{onSelect?("Commissioned lanes")})
                 SummaryMetric(title:"Operational lanes",value:"\(summary.operationalLanes)",action:{onSelect?("Operational lanes")})
                 SummaryMetric(title:"Missing commissions",value:"\(summary.missingCommissions)",state:summary.missingCommissions == 0 ? "GREEN":"RED",action:{onSelect?("Missing commissions")})
+                SummaryMetric(title:"Not enabled",value:"\(summary.notEnabledLanes ?? 0)",action:{onSelect?("Not enabled")})
                 SummaryMetric(title:"Coverage",value:summary.operationalCoveragePercent.map{"\($0)%"} ?? "Not measured",action:{onSelect?("Coverage")})
             }
             HStack(spacing:10) {
