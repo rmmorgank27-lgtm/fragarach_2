@@ -288,7 +288,9 @@ struct SchedulerMonitorView: View {
             return outcome.contains("credential repair") || outcome.contains("authentication_failed")
         }
         let localFailures=blockedRows.filter { ($0.lastOutcome ?? "").uppercased().contains("LOCAL_PROGRAMMING_ERROR") }
-        if !credentialBlocks.isEmpty || !localFailures.isEmpty {
+        let noEligibleProvider=blockedRows.filter { ($0.lastOutcome ?? "").uppercased().contains("NO_ELIGIBLE_PROVIDER") }
+        let calendarBlocks=blockedRows.filter { ($0.lastOutcome ?? "").uppercased().contains("OPERATIONAL_CALENDAR_UNAVAILABLE") }
+        if !credentialBlocks.isEmpty || !localFailures.isEmpty || !noEligibleProvider.isEmpty || !calendarBlocks.isEmpty {
             GroupBox("Repair Actions") {
                 VStack(alignment:.leading,spacing:14) {
                     if !credentialBlocks.isEmpty {
@@ -301,7 +303,7 @@ struct SchedulerMonitorView: View {
                             }
                         }
                     }
-                    if !credentialBlocks.isEmpty && !localFailures.isEmpty { Divider() }
+                    if !credentialBlocks.isEmpty && (!localFailures.isEmpty || !noEligibleProvider.isEmpty || !calendarBlocks.isEmpty) { Divider() }
                     if !localFailures.isEmpty {
                         VStack(alignment:.leading,spacing:7) {
                             Label("Provider route / evidence blocks · \(localFailures.count)",systemImage:"wrench.and.screwdriver.fill").foregroundStyle(.red)
@@ -309,6 +311,25 @@ struct SchedulerMonitorView: View {
                             HStack {
                                 Button("Probe HYPEUSD D1") { Task { await store.probeProviderCapability(symbol:"HYPEUSD",timeframe:"D1") } }.disabled(store.providerFactsResolving)
                                 Button("Open Provider Facts") { store.openProviderFacts() }
+                            }
+                        }
+                    }
+                    if !localFailures.isEmpty && (!noEligibleProvider.isEmpty || !calendarBlocks.isEmpty) { Divider() }
+                    if !noEligibleProvider.isEmpty {
+                        VStack(alignment:.leading,spacing:7) {
+                            Label("No eligible provider route · \(noEligibleProvider.count)",systemImage:"point.3.connected.trianglepath.dotted").foregroundStyle(.orange)
+                            Text("No approved, currently usable provider route exists for these lanes. Review Provider Facts to choose or approve a source; the Scheduler will not invent a substitute.").font(.caption).foregroundStyle(.secondary)
+                            Button("Open Provider Facts") { store.openProviderFacts() }
+                        }
+                    }
+                    if !noEligibleProvider.isEmpty && !calendarBlocks.isEmpty { Divider() }
+                    if !calendarBlocks.isEmpty {
+                        VStack(alignment:.leading,spacing:7) {
+                            Label("Operational calendar unavailable · \(calendarBlocks.count)",systemImage:"calendar.badge.exclamationmark").foregroundStyle(.orange)
+                            Text("The lane has no approved market-session calendar. Review Scheduler Diagnostics before restoring it; a calendar repair changes when Fragarach is allowed to fetch.").font(.caption).foregroundStyle(.secondary)
+                            Button("Open Scheduler Diagnostics") {
+                                showDiagnostics=true
+                                Task { await store.loadSchedulerDiagnostics() }
                             }
                         }
                     }
