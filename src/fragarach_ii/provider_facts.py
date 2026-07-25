@@ -257,7 +257,12 @@ def provider_facts_snapshot(
     from .credentials import CredentialAuthority, CredentialState
     authority = CredentialAuthority()
     inventory = []
+    contract_profiles = {
+        profile.provider: profile
+        for profile in load_provider_profiles(apply_runtime_overrides=False)
+    }
     for profile in load_provider_profiles():
+        contract_profile = contract_profiles[profile.provider]
         resolution = authority.resolve(profile.provider)
         requires_credential = profile.credential_environment is not None
         access = (
@@ -274,6 +279,7 @@ def provider_facts_snapshot(
             "operational_limit": int(profile.operational_limit or profile.request_limit),
             "request_window_seconds": profile.request_window_seconds,
             "concurrency_limit": profile.concurrency_limit,
+            "maximum_concurrency_limit": contract_profile.concurrency_limit,
             "approved_mappings": len(profile.mappings),
             "supported_asset_classes": list(profile.supported_asset_classes),
             "supported_timeframes": list(profile.supported_timeframes),

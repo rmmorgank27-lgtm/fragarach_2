@@ -5,6 +5,7 @@ struct ProviderFactsView: View {
     @EnvironmentObject private var store: ConsoleStore
     @State private var showingCredential = false
     @State private var credential = ""
+    @State private var editingProvider: ProviderInventoryItem?
 
     var body: some View {
         ScrollView {
@@ -32,6 +33,7 @@ struct ProviderFactsView: View {
             .padding(.vertical, 4)
         }
         .sheet(isPresented: $showingCredential) { credentialSheet }
+        .sheet(item:$editingProvider) { provider in ProviderRuntimeSettingsSheet(provider:provider) }
         .task {
             if store.providerCredentialRepairRequested {
                 showingCredential=true;store.providerCredentialRepairRequested=false
@@ -92,8 +94,11 @@ struct ProviderFactsView: View {
                             ("Markets",provider.supportedAssetClasses.joined(separator:", ")),
                             ("Policy",provider.ratePolicyVerified ? "Verified" : "Needs review"),
                         ])
-                        if provider.provider == "TWELVE_DATA" {
+                        HStack {
+                            Button("Configure Runtime…") { editingProvider=provider }
+                            if provider.provider == "TWELVE_DATA" {
                             Button("Configure & Validate Twelve Data") { showingCredential=true }
+                            }
                         }
                     }.padding(.vertical,5)
                     if provider.id != providers.last?.id { Divider() }
@@ -207,6 +212,33 @@ struct ProviderFactsView: View {
                 Task { await store.configureTwelveDataCredential(value) }
             }.buttonStyle(.borderedProminent).disabled(credential.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
         }.padding(24).frame(width: 520)
+    }
+}
+
+private struct ProviderRuntimeSettingsSheet:View {
+    @EnvironmentObject private var store:ConsoleStore
+    @Environment(\.dismiss) private var dismiss
+    let provider:ProviderInventoryItem
+    @State private var enabled:Bool
+    @State private var operationalLimit:Int
+    @State private var concurrencyLimit:Int
+
+    init(provider:ProviderInventoryItem) {
+        self.provider=provider
+        _enabled=State(initialValue:provider.enabled)
+        _operationalLimit=State(initialValue:provider.operationalLimit)
+        _concurrencyLimit=State(initialValue:provider.concurrencyLimit)
+    }
+
+    var body:some View {
+        VStack(alignment:.leading,spacing:16) {
+            Text("Configure \(provider.provider.replacingOccurrences(of:"_",with:" "))").font(.title2.bold())
+            Text("These are local Scheduler operating limits. They cannot exceed the reviewed provider contract.").foregroundStyle(.secondary)
+            Toggle("Enabled for Scheduler routing",isOn:$enabled)
+            Stepper("Operational limit: \(operationalLimit) / \(provider.requestLimit) requests per \(provider.requestWindowSeconds)s",value:$operationalLimit,in:1...provider.requestLimit)
+            Stepper("Concurrency: \(concurrencyLimit) / \(provider.maximumConcurrencyLimit) workers",value:$concurrencyLimit,in:1...provider.maximumConcurrencyLimit)
+            HStack { Spacer();Button("Cancel"){dismiss()};Button("Save Runtime Settings") { Task { if await store.configureProvider(provider,enabled:enabled,operationalLimit:operationalLimit,concurrencyLimit:concurrencyLimit){dismiss()} } }.buttonStyle(.borderedProminent).disabled(store.providerFactsResolving) }
+        }.padding(24).frame(width:560)
     }
 }
 

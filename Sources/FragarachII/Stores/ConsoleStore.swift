@@ -464,6 +464,19 @@ struct EstateAdmissionProgress: Equatable {
         section = .manageData
     }
 
+    func configureProvider(_ provider:ProviderInventoryItem,enabled:Bool,operationalLimit:Int,concurrencyLimit:Int) async -> Bool {
+        guard !providerFactsResolving else{return false};providerFactsResolving=true;providerFactsError=nil
+        let config=configuration,bridge=providerFactsBridge
+        do {
+            let result=try await Task.detached{try bridge.run(.configureProvider(provider:provider.provider,enabled:enabled,operationalLimit:operationalLimit,concurrencyLimit:concurrencyLimit),config:config)}.value
+            guard result.exitCode==0 else { throw MarketDiscoveryReadError.serviceFailure(result.stderr.isEmpty ? result.stdout:result.stderr) }
+            providerFactsResolving=false
+            await refreshProviderFacts()
+            await runSchedulerQueue()
+            return true
+        } catch { providerFactsResolving=false;providerFactsError=error.localizedDescription;return false }
+    }
+
     func probeProviderCapability(symbol:String,timeframe:String) async {
         guard !providerFactsResolving else{return};providerFactsResolving=true;providerFactsError=nil;defer{providerFactsResolving=false}
         let config=configuration,bridge=providerFactsBridge

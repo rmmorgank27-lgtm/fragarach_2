@@ -354,14 +354,32 @@ class RateBudgetController:
         return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
-def load_provider_profiles(path: str | Path | None = None) -> tuple[ProviderProfile, ...]:
+def load_provider_profiles(
+    path: str | Path | None = None, *, apply_runtime_overrides: bool = True,
+) -> tuple[ProviderProfile, ...]:
     payload = json.loads(Path(path or CONFIG_PATH).read_text(encoding="utf-8"))
     if payload.get("contract") != CAPABILITY_CONTRACT:
         raise ValueError("unsupported provider capability contract")
     profiles = []
     seen = set()
-    for raw in payload.get("providers", []):
+    overrides = {}
+    if apply_runtime_overrides:
+        from .provider_settings import load_provider_overrides
+        overrides = load_provider_overrides()
+    for source in payload.get("providers", []):
+        raw = dict(source)
         provider = str(raw["provider"]).upper()
+        override = overrides.get(provider, {})
+        if isinstance(override, dict):
+            raw["enabled"] = bool(override.get("enabled", raw["enabled"]))
+            raw["operational_limit"] = min(
+                int(raw["request_limit"]),
+                max(1, int(override.get("operational_limit", raw.get("operational_limit") or raw["request_limit"]))),
+            )
+            raw["concurrency_limit"] = min(
+                max(1, int(source.get("concurrency_limit", 1))),
+                max(1, int(override.get("concurrency_limit", source.get("concurrency_limit", 1)))),
+            )
         if provider in seen:
             raise ValueError(f"duplicate provider capability: {provider}")
         seen.add(provider)
