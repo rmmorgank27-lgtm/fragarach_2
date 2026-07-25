@@ -86,6 +86,7 @@ class Spec049SchedulerServiceTests(unittest.TestCase):
             self.assertEqual(status["service_state"], "RUNNING")
             self.assertEqual(status["service_generation"], runtime.generation)
             self.assertEqual(status["monitor_contract_version"], 3)
+            self.assertEqual(status["scheduler_mode"], "TIME_TRIGGERED_REGISTER")
 
             command = make_command(
                 "RUN_QUEUE_NOW",

@@ -1179,7 +1179,9 @@ class PersistentSchedulerRuntime:
         # every service restart would repeatedly rebuild capability projections
         # across the entire historical ingest ledger.
         from .lane_update_register import LaneUpdateRegister
-        if not LaneUpdateRegister(self.paths.database).is_seeded():
+        register = LaneUpdateRegister(self.paths.database)
+        self._publish_bootstrap_register_status(register)
+        if not register.is_seeded():
             admission_thread = threading.Thread(
                 target=self._run_estate_admission,
                 name="scheduler-estate-admission", daemon=True,
@@ -1200,6 +1202,53 @@ class PersistentSchedulerRuntime:
             self.ownership.release()
             self._state = "STOPPED"
             self._write_current_status(live=False)
+
+    def _publish_bootstrap_register_status(self, register) -> None:
+        """Publish a decodable compact status before the first dispatch cycle.
+
+        A catch-up cycle can legitimately take longer than the desktop
+        monitor's first refresh.  The command socket is already running at
+        this point, so it must report the indexed work register rather than an
+        otherwise-valid but schema-incomplete empty snapshot.
+        """
+        observed = datetime.now(UTC)
+        try:
+            summary = {**register.summary(), "due_now_count": register.due_count(at=observed)}
+            dashboard = register.dashboard_rows(limit=24)
+            blocked_dashboard = register.blocked_rows(limit=100)
+        except Exception:
+            # The register writer may be creating its SQLite schema on a
+            # first-ever service start.  Keep the monitor decodable for that
+            # short window; the next normal publication replaces this shell.
+            summary = {
+                "contract": "fragarach_ii.lane_update_register.v1",
+                "ready_count": 0, "retrying_count": 0, "blocked_count": 0,
+                "paused_count": 0, "running_count": 0, "due_now_count": 0,
+                "next_due_check": None,
+            }
+            dashboard = []
+            blocked_dashboard = []
+        self._publish({
+            "contract": "fragarach_ii.scheduler_monitor.v3",
+            "scheduler_mode": "TIME_TRIGGERED_REGISTER",
+            "register_contract": "fragarach_ii.lane_update_register.v1",
+            "next_run": summary.get("next_due_check"),
+            "next_due_check": summary.get("next_due_check"),
+            "register": summary,
+            "schedule_dashboard": dashboard,
+            "blocked_schedule_dashboard": blocked_dashboard,
+            "scheduler_policy": "Balanced",
+            "scheduler_policy_key": "BALANCED",
+            "dispatch_state": {
+                "next_wake_reason": "SERVICE_STARTING",
+                "due_now_count": summary["due_now_count"],
+            },
+            "execution": {
+                "started_at": observed.isoformat(), "active_workers": 0,
+                "available_workers": 0, "completed_at": None,
+            },
+            "active_activity": None,
+        })
 
     def _run_estate_admission(self) -> None:
         """Run non-critical estate admission without taking down dispatch."""
