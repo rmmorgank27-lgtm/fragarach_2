@@ -1,0 +1,3074 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "Estate Gap Report",
+    "description": "Current continuity gaps by symbol and timeframe.",
+    "generatedAt": "2026-07-24T12:00:15.771786Z",
+    "cards": [
+      {
+        "id": "affected_lanes",
+        "description": "Lanes with one or more observed continuity gaps.",
+        "dataset": "summary",
+        "sourceId": "estate_gap_query",
+        "metrics": [
+          {
+            "label": "Affected lanes",
+            "field": "lanes_with_observed_gaps",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "observed_gaps",
+        "description": "Observed discontinuities after excluding expected FX weekends.",
+        "dataset": "summary",
+        "sourceId": "estate_gap_query",
+        "metrics": [
+          {
+            "label": "Observed gaps",
+            "field": "observed_gaps",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "scanned_lanes",
+        "description": "Current governed evidence lanes scanned.",
+        "dataset": "summary",
+        "sourceId": "estate_gap_query",
+        "metrics": [
+          {
+            "label": "Lanes scanned",
+            "field": "total_lanes",
+            "format": "number"
+          }
+        ]
+      }
+    ],
+    "charts": [
+      {
+        "id": "largest_gap_ranking",
+        "title": "Largest observed gap by affected lane",
+        "subtitle": "Top 12 lanes, minutes; expected FX weekend closures excluded.",
+        "type": "bar",
+        "dataset": "gap_rank",
+        "sourceId": "estate_gap_query",
+        "encodings": {
+          "x": {
+            "field": "lane",
+            "type": "ordinal",
+            "label": "Lane"
+          },
+          "y": {
+            "field": "largest_gap_minutes",
+            "type": "quantitative",
+            "label": "Largest gap (minutes)",
+            "format": "number"
+          }
+        },
+        "valueFormat": "number",
+        "layout": "full"
+      }
+    ],
+    "tables": [
+      {
+        "id": "lane_gaps",
+        "title": "Affected symbol/timeframe lanes",
+        "dataset": "lane_gaps",
+        "sourceId": "estate_gap_query",
+        "defaultSort": {
+          "field": "largest_gap_minutes",
+          "direction": "desc"
+        },
+        "columns": [
+          {
+            "field": "symbol",
+            "label": "Symbol",
+            "type": "text"
+          },
+          {
+            "field": "timeframe",
+            "label": "TF",
+            "type": "text"
+          },
+          {
+            "field": "observed_gap_count",
+            "label": "Observed gaps",
+            "format": "number"
+          },
+          {
+            "field": "largest_gap",
+            "label": "Largest gap",
+            "type": "text"
+          },
+          {
+            "field": "largest_gap_minutes",
+            "label": "Largest gap (min)",
+            "format": "number"
+          },
+          {
+            "field": "most_recent_gap_end",
+            "label": "Most recent gap ends",
+            "type": "text"
+          },
+          {
+            "field": "validation_missing",
+            "label": "Validation missing",
+            "type": "text"
+          },
+          {
+            "field": "material_gaps",
+            "label": "Material gaps",
+            "type": "text"
+          },
+          {
+            "field": "available_range",
+            "label": "Available range",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "gap_details",
+        "title": "Largest observed gaps by lane",
+        "dataset": "gap_details",
+        "sourceId": "estate_gap_query",
+        "defaultSort": {
+          "field": "gap_minutes",
+          "direction": "desc"
+        },
+        "columns": [
+          {
+            "field": "symbol",
+            "label": "Symbol",
+            "type": "text"
+          },
+          {
+            "field": "timeframe",
+            "label": "TF",
+            "type": "text"
+          },
+          {
+            "field": "previous_bar",
+            "label": "Previous governed bar",
+            "type": "text"
+          },
+          {
+            "field": "next_bar",
+            "label": "Next governed bar",
+            "type": "text"
+          },
+          {
+            "field": "gap",
+            "label": "Gap",
+            "type": "text"
+          },
+          {
+            "field": "gap_minutes",
+            "label": "Gap (min)",
+            "format": "number"
+          }
+        ]
+      }
+    ],
+    "sources": [
+      {
+        "id": "estate_gap_query",
+        "label": "Fragarach II governed-estate SQLite snapshot",
+        "query": {
+          "engine": "sqlite",
+          "description": "Consecutive governed-bar continuity scan, joined to current lane validation summaries.",
+          "sql": "WITH intervals AS (SELECT asset,timeframe,open_time_utc AS next_timestamp,lag(open_time_utc) OVER (PARTITION BY asset,timeframe ORDER BY open_time_utc) AS previous_timestamp FROM bars) SELECT * FROM intervals;",
+          "tables_used": [
+            "bars",
+            "evidence_lanes",
+            "instrument_registrations",
+            "lane_state"
+          ],
+          "filters": [
+            "All current evidence lanes",
+            "Expected FX Friday-to-Sunday/Monday weekend closures excluded"
+          ],
+          "executed_at": "2026-07-24T12:00:15.771786Z",
+          "language": "sql"
+        }
+      }
+    ],
+    "blocks": [
+      {
+        "id": "title",
+        "type": "markdown",
+        "body": "# Estate Gap Report"
+      },
+      {
+        "id": "technical_summary",
+        "type": "markdown",
+        "sourceId": "estate_gap_query",
+        "body": "## Technical summary\n\nThe scan found **6455 observed discontinuities** across **82 of 141 governed lanes**. It excludes **2611 normal FX weekend closures**. Use the lane table to prioritise symbols; use the detailed table to inspect each missing interval."
+      },
+      {
+        "id": "metrics",
+        "type": "metric-strip",
+        "cardIds": [
+          "affected_lanes",
+          "observed_gaps",
+          "scanned_lanes"
+        ]
+      },
+      {
+        "id": "definitions",
+        "type": "markdown",
+        "sourceId": "estate_gap_query",
+        "body": "## What counts as a gap\n\nAn observed gap is a break between consecutive governed bars longer than two expected intraday intervals, or longer than three D1 intervals. FX Friday-to-Sunday/Monday closures are excluded. `Validation missing` is the independent, calendar-aware count stored by the lane validator, so it may differ from the visual discontinuity count."
+      },
+      {
+        "id": "lane_table_intro",
+        "type": "markdown",
+        "body": "## Prioritise lanes by the largest break\n\nThe chart ranks the 12 most consequential continuity breaks. The table that follows has one row per affected symbol/timeframe and is sorted by the same measure for exact lookup."
+      },
+      {
+        "id": "largest_gap_chart",
+        "type": "chart",
+        "chartId": "largest_gap_ranking",
+        "layout": "full"
+      },
+      {
+        "id": "lane_table",
+        "type": "table",
+        "tableId": "lane_gaps",
+        "layout": "full"
+      },
+      {
+        "id": "detail_intro",
+        "type": "markdown",
+        "body": "## Inspect the largest breaks\n\nThis exact lookup table lists up to the three largest observed breaks in each affected lane. The first table retains the complete observed-gap count. Neither table infers or interpolates price data."
+      },
+      {
+        "id": "detail_table",
+        "type": "table",
+        "tableId": "gap_details",
+        "layout": "full"
+      },
+      {
+        "id": "limitations",
+        "type": "markdown",
+        "body": "## Limits of this report\n\nThe report is a point-in-time snapshot of the current estate. It reports continuity, not price correctness. A lane can be continuous while still requiring provenance or price-quality review; conversely, expected market closures are intentionally not counted as missing history."
+      },
+      {
+        "id": "next_steps",
+        "type": "markdown",
+        "body": "## Next steps\n\nPrioritise rows with material validator gaps or the largest observed intervals. Re-run this report after scheduler catch-up or a controlled historical import to confirm that the specific interval has closed."
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-07-24T12:00:15.771786Z",
+    "status": "ready",
+    "datasets": {
+      "summary": [
+        {
+          "total_lanes": 141,
+          "lanes_with_observed_gaps": 82,
+          "observed_gaps": 6455,
+          "expected_fx_weekends_excluded": 2611
+        }
+      ],
+      "gap_rank": [
+        {
+          "lane": "XAUUSD D1",
+          "largest_gap_minutes": 1578240,
+          "largest_gap": "1096d"
+        },
+        {
+          "lane": "AUDSGD H1",
+          "largest_gap_minutes": 1336860,
+          "largest_gap": "928d 9h"
+        },
+        {
+          "lane": "EURNZD H1",
+          "largest_gap_minutes": 1336860,
+          "largest_gap": "928d 9h"
+        },
+        {
+          "lane": "EURAUD M5",
+          "largest_gap_minutes": 406085,
+          "largest_gap": "282d 5m"
+        },
+        {
+          "lane": "AUDSGD M5",
+          "largest_gap_minutes": 404645,
+          "largest_gap": "281d 5m"
+        },
+        {
+          "lane": "AUDNZD M5",
+          "largest_gap_minutes": 368225,
+          "largest_gap": "255d 17h 5m"
+        },
+        {
+          "lane": "XAGUSD M5",
+          "largest_gap_minutes": 368225,
+          "largest_gap": "255d 17h 5m"
+        },
+        {
+          "lane": "USDJPY M5",
+          "largest_gap_minutes": 312005,
+          "largest_gap": "216d 16h 5m"
+        },
+        {
+          "lane": "USDCHF M5",
+          "largest_gap_minutes": 257405,
+          "largest_gap": "178d 18h 5m"
+        },
+        {
+          "lane": "GBPUSD M5",
+          "largest_gap_minutes": 164345,
+          "largest_gap": "114d 3h 5m"
+        },
+        {
+          "lane": "AUDJPY M5",
+          "largest_gap_minutes": 106145,
+          "largest_gap": "73d 17h 5m"
+        },
+        {
+          "lane": "BTCUSD D1",
+          "largest_gap_minutes": 77760,
+          "largest_gap": "54d"
+        }
+      ],
+      "lane_gaps": [
+        {
+          "symbol": "XAUUSD",
+          "timeframe": "D1",
+          "observed_gap_count": 775,
+          "largest_gap": "1096d",
+          "largest_gap_minutes": 1578240,
+          "most_recent_gap_end": "2025-04-21 00:00 UTC",
+          "validation_missing": 17596,
+          "material_gaps": 15238,
+          "bars": 15236,
+          "available_range": "1833-01-07 00:00 UTC \u2014 2026-07-23 00:00 UTC"
+        },
+        {
+          "symbol": "AUDSGD",
+          "timeframe": "H1",
+          "observed_gap_count": 2,
+          "largest_gap": "928d 9h",
+          "largest_gap_minutes": 1336860,
+          "most_recent_gap_end": "2026-07-15 04:00 UTC",
+          "validation_missing": 15934,
+          "material_gaps": 0,
+          "bars": 3009,
+          "available_range": "2023-07-17 04:00 UTC \u2014 2026-07-24 10:00 UTC"
+        },
+        {
+          "symbol": "EURNZD",
+          "timeframe": "H1",
+          "observed_gap_count": 1,
+          "largest_gap": "928d 9h",
+          "largest_gap_minutes": 1336860,
+          "most_recent_gap_end": "2026-07-15 04:00 UTC",
+          "validation_missing": 15932,
+          "material_gaps": 0,
+          "bars": 3011,
+          "available_range": "2023-07-17 04:00 UTC \u2014 2026-07-24 10:00 UTC"
+        },
+        {
+          "symbol": "EURAUD",
+          "timeframe": "M5",
+          "observed_gap_count": 2,
+          "largest_gap": "282d 5m",
+          "largest_gap_minutes": 406085,
+          "most_recent_gap_end": "2026-07-01 04:00 UTC",
+          "validation_missing": 57885,
+          "material_gaps": 31,
+          "bars": 16363,
+          "available_range": "2025-07-23 04:00 UTC \u2014 2026-07-24 03:20 UTC"
+        },
+        {
+          "symbol": "AUDSGD",
+          "timeframe": "M5",
+          "observed_gap_count": 1,
+          "largest_gap": "281d 5m",
+          "largest_gap_minutes": 404645,
+          "most_recent_gap_end": "2026-07-17 04:00 UTC",
+          "validation_missing": 264,
+          "material_gaps": 0,
+          "bars": 17301,
+          "available_range": "2025-07-23 04:00 UTC \u2014 2026-07-24 03:40 UTC"
+        },
+        {
+          "symbol": "AUDNZD",
+          "timeframe": "M5",
+          "observed_gap_count": 2,
+          "largest_gap": "255d 17h 5m",
+          "largest_gap_minutes": 368225,
+          "most_recent_gap_end": "2026-07-01 04:00 UTC",
+          "validation_missing": 52713,
+          "material_gaps": 31,
+          "bars": 21539,
+          "available_range": "2025-07-23 04:00 UTC \u2014 2026-07-24 03:40 UTC"
+        },
+        {
+          "symbol": "XAGUSD",
+          "timeframe": "M5",
+          "observed_gap_count": 182,
+          "largest_gap": "255d 17h 5m",
+          "largest_gap_minutes": 368225,
+          "most_recent_gap_end": "2026-07-19 21:00 UTC",
+          "validation_missing": 53906,
+          "material_gaps": 31,
+          "bars": 20347,
+          "available_range": "2025-07-23 04:00 UTC \u2014 2026-07-24 03:45 UTC"
+        },
+        {
+          "symbol": "USDJPY",
+          "timeframe": "M5",
+          "observed_gap_count": 3,
+          "largest_gap": "216d 16h 5m",
+          "largest_gap_minutes": 312005,
+          "most_recent_gap_end": "2026-07-01 04:00 UTC",
+          "validation_missing": 45100,
+          "material_gaps": 31,
+          "bars": 29153,
+          "available_range": "2025-07-23 04:00 UTC \u2014 2026-07-24 03:45 UTC"
+        },
+        {
+          "symbol": "USDCHF",
+          "timeframe": "M5",
+          "observed_gap_count": 16,
+          "largest_gap": "178d 18h 5m",
+          "largest_gap_minutes": 257405,
+          "most_recent_gap_end": "2026-06-18 21:35 UTC",
+          "validation_missing": 36862,
+          "material_gaps": 0,
+          "bars": 38588,
+          "available_range": "2025-07-23 04:00 UTC \u2014 2026-07-24 03:45 UTC"
+        },
+        {
+          "symbol": "GBPUSD",
+          "timeframe": "M5",
+          "observed_gap_count": 11,
+          "largest_gap": "114d 3h 5m",
+          "largest_gap_minutes": 164345,
+          "most_recent_gap_end": "2026-07-12 21:20 UTC",
+          "validation_missing": 216,
+          "material_gaps": 0,
+          "bars": 50980,
+          "available_range": "2025-07-24 04:00 UTC \u2014 2026-07-24 03:10 UTC"
+        },
+        {
+          "symbol": "AUDJPY",
+          "timeframe": "M5",
+          "observed_gap_count": 4,
+          "largest_gap": "73d 17h 5m",
+          "largest_gap_minutes": 106145,
+          "most_recent_gap_end": "2026-07-01 04:00 UTC",
+          "validation_missing": 16054,
+          "material_gaps": 31,
+          "bars": 58198,
+          "available_range": "2025-07-23 04:00 UTC \u2014 2026-07-24 03:40 UTC"
+        },
+        {
+          "symbol": "BTCUSD",
+          "timeframe": "D1",
+          "observed_gap_count": 8,
+          "largest_gap": "54d",
+          "largest_gap_minutes": 77760,
+          "most_recent_gap_end": "2011-06-27 00:00 UTC",
+          "validation_missing": 92,
+          "material_gaps": 56,
+          "bars": 6044,
+          "available_range": "2009-10-05 00:00 UTC \u2014 2026-07-23 00:00 UTC"
+        },
+        {
+          "symbol": "GBPNZD",
+          "timeframe": "D1",
+          "observed_gap_count": 135,
+          "largest_gap": "46d",
+          "largest_gap_minutes": 66240,
+          "most_recent_gap_end": "2021-01-04 00:00 UTC",
+          "validation_missing": 210,
+          "material_gaps": 38,
+          "bars": 13313,
+          "available_range": "1975-01-02 00:00 UTC \u2014 2026-07-23 00:00 UTC"
+        },
+        {
+          "symbol": "GBPNZD",
+          "timeframe": "M5",
+          "observed_gap_count": 4,
+          "largest_gap": "37d 5m",
+          "largest_gap_minutes": 53285,
+          "most_recent_gap_end": "2026-07-19 21:00 UTC",
+          "validation_missing": 264,
+          "material_gaps": 0,
+          "bars": 67195,
+          "available_range": "2025-07-23 04:00 UTC \u2014 2026-07-24 03:00 UTC"
+        },
+        {
+          "symbol": "HYPEUSD",
+          "timeframe": "D1",
+          "observed_gap_count": 1,
+          "largest_gap": "37d",
+          "largest_gap_minutes": 53280,
+          "most_recent_gap_end": "2026-05-31 00:00 UTC",
+          "validation_missing": 36,
+          "material_gaps": 28,
+          "bars": 374,
+          "available_range": "2025-06-09 00:00 UTC \u2014 2026-07-23 00:00 UTC"
+        },
+        {
+          "symbol": "AUDCAD",
+          "timeframe": "M5",
+          "observed_gap_count": 5,
+          "largest_gap": "34d 17h 5m",
+          "largest_gap_minutes": 49985,
+          "most_recent_gap_end": "2026-07-01 04:00 UTC",
+          "validation_missing": 1050,
+          "material_gaps": 0,
+          "bars": 65969,
+          "available_range": "2025-07-23 04:00 UTC \u2014 2026-07-24 03:40 UTC"
+        },
+        {
+          "symbol": "XAGUSD",
+          "timeframe": "D1",
+          "observed_gap_count": 241,
+          "largest_gap": "33d",
+          "largest_gap_minutes": 47520,
+          "most_recent_gap_end": "2024-01-02 00:00 UTC",
+          "validation_missing": 3491,
+          "material_gaps": 2772,
+          "bars": 11279,
+          "available_range": "1970-02-27 00:00 UTC \u2014 2026-07-23 00:00 UTC"
+        },
+        {
+          "symbol": "NZDJPY",
+          "timeframe": "M5",
+          "observed_gap_count": 4,
+          "largest_gap": "32d 7h 5m",
+          "largest_gap_minutes": 46505,
+          "most_recent_gap_end": "2026-07-01 04:00 UTC",
+          "validation_missing": 1046,
+          "material_gaps": 0,
+          "bars": 67979,
+          "available_range": "2025-07-23 04:00 UTC \u2014 2026-07-24 03:00 UTC"
+        },
+        {
+          "symbol": "GBPUSD",
+          "timeframe": "H1",
+          "observed_gap_count": 1,
+          "largest_gap": "25d 8h",
+          "largest_gap_minutes": 36480,
+          "most_recent_gap_end": "2026-07-19 21:00 UTC",
+          "validation_missing": 9,
+          "material_gaps": 9,
+          "bars": 170,
+          "available_range": "2026-06-21 21:00 UTC \u2014 2026-07-24 05:00 UTC"
+        },
+        {
+          "symbol": "GBPUSD",
+          "timeframe": "M30",
+          "observed_gap_count": 1,
+          "largest_gap": "25d 7h 30m",
+          "largest_gap_minutes": 36450,
+          "most_recent_gap_end": "2026-07-19 21:00 UTC",
+          "validation_missing": 830,
+          "material_gaps": 0,
+          "bars": 351,
+          "available_range": "2026-06-21 21:00 UTC \u2014 2026-07-24 11:00 UTC"
+        },
+        {
+          "symbol": "DOGEUSD",
+          "timeframe": "H1",
+          "observed_gap_count": 1,
+          "largest_gap": "23d 11h",
+          "largest_gap_minutes": 33780,
+          "most_recent_gap_end": "2026-07-18 00:00 UTC",
+          "validation_missing": 9,
+          "material_gaps": 9,
+          "bars": 172,
+          "available_range": "2026-06-23 21:00 UTC \u2014 2026-07-24 10:00 UTC"
+        },
+        {
+          "symbol": "LINKUSD",
+          "timeframe": "H1",
+          "observed_gap_count": 1,
+          "largest_gap": "23d 11h",
+          "largest_gap_minutes": 33780,
+          "most_recent_gap_end": "2026-07-18 00:00 UTC",
+          "validation_missing": 9,
+          "material_gaps": 9,
+          "bars": 172,
+          "available_range": "2026-06-23 21:00 UTC \u2014 2026-07-24 10:00 UTC"
+        },
+        {
+          "symbol": "DOGEUSD",
+          "timeframe": "M30",
+          "observed_gap_count": 1,
+          "largest_gap": "23d 10h 30m",
+          "largest_gap_minutes": 33750,
+          "most_recent_gap_end": "2026-07-18 00:00 UTC",
+          "validation_missing": 19,
+          "material_gaps": 19,
+          "bars": 344,
+          "available_range": "2026-06-23 21:30 UTC \u2014 2026-07-24 11:00 UTC"
+        },
+        {
+          "symbol": "LINKUSD",
+          "timeframe": "M30",
+          "observed_gap_count": 1,
+          "largest_gap": "23d 10h 30m",
+          "largest_gap_minutes": 33750,
+          "most_recent_gap_end": "2026-07-18 00:00 UTC",
+          "validation_missing": 19,
+          "material_gaps": 19,
+          "bars": 344,
+          "available_range": "2026-06-23 21:30 UTC \u2014 2026-07-24 11:00 UTC"
+        },
+        {
+          "symbol": "USDJPY",
+          "timeframe": "D1",
+          "observed_gap_count": 138,
+          "largest_gap": "18d",
+          "largest_gap_minutes": 25920,
+          "most_recent_gap_end": "2024-01-02 00:00 UTC",
+          "validation_missing": 174,
+          "material_gaps": 10,
+          "bars": 14273,
+          "available_range": "1971-01-04 00:00 UTC \u2014 2026-07-23 00:00 UTC"
+        },
+        {
+          "symbol": "AUDUSD",
+          "timeframe": "D1",
+          "observed_gap_count": 120,
+          "largest_gap": "10d",
+          "largest_gap_minutes": 14400,
+          "most_recent_gap_end": "2024-01-02 00:00 UTC",
+          "validation_missing": 161,
+          "material_gaps": 5,
+          "bars": 14274,
+          "available_range": "1971-01-04 00:00 UTC \u2014 2026-07-23 00:00 UTC"
+        },
+        {
+          "symbol": "EURUSD",
+          "timeframe": "D1",
+          "observed_gap_count": 120,
+          "largest_gap": "10d",
+          "largest_gap_minutes": 14400,
+          "most_recent_gap_end": "2010-01-04 00:00 UTC",
+          "validation_missing": 145,
+          "material_gaps": 5,
+          "bars": 14382,
+          "available_range": "1971-01-04 00:00 UTC \u2014 2026-07-23 00:00 UTC"
+        },
+        {
+          "symbol": "USDCHF",
+          "timeframe": "D1",
+          "observed_gap_count": 118,
+          "largest_gap": "10d",
+          "largest_gap_minutes": 14400,
+          "most_recent_gap_end": "2024-01-02 00:00 UTC",
+          "validation_missing": 152,
+          "material_gaps": 5,
+          "bars": 14351,
+          "available_range": "1971-01-04 00:00 UTC \u2014 2026-07-23 00:00 UTC"
+        },
+        {
+          "symbol": "AAPL",
+          "timeframe": "D1",
+          "observed_gap_count": 295,
+          "largest_gap": "7d",
+          "largest_gap_minutes": 10080,
+          "most_recent_gap_end": "2026-07-06 00:00 UTC",
+          "validation_missing": "Not measured",
+          "material_gaps": "Not measured",
+          "bars": 11488,
+          "available_range": "1980-12-12 00:00 UTC \u2014 2026-07-23 00:00 UTC"
+        },
+        {
+          "symbol": "CAT",
+          "timeframe": "D1",
+          "observed_gap_count": 364,
+          "largest_gap": "7d",
+          "largest_gap_minutes": 10080,
+          "most_recent_gap_end": "2026-07-06 00:00 UTC",
+          "validation_missing": "Not measured",
+          "material_gaps": "Not measured",
+          "bars": 14736,
+          "available_range": "1968-01-02 00:00 UTC \u2014 2026-07-23 00:00 UTC"
+        },
+        {
+          "symbol": "FDX",
+          "timeframe": "D1",
+          "observed_gap_count": 305,
+          "largest_gap": "7d",
+          "largest_gap_minutes": 10080,
+          "most_recent_gap_end": "2026-07-06 00:00 UTC",
+          "validation_missing": "Not measured",
+          "material_gaps": "Not measured",
+          "bars": 12169,
+          "available_range": "1978-04-12 00:00 UTC \u2014 2026-07-23 00:00 UTC"
+        },
+        {
+          "symbol": "MSFT",
+          "timeframe": "D1",
+          "observed_gap_count": 262,
+          "largest_gap": "7d",
+          "largest_gap_minutes": 10080,
+          "most_recent_gap_end": "2026-07-06 00:00 UTC",
+          "validation_missing": 3,
+          "material_gaps": 1,
+          "bars": 10168,
+          "available_range": "1986-03-13 00:00 UTC \u2014 2026-07-23 00:00 UTC"
+        },
+        {
+          "symbol": "USO",
+          "timeframe": "D1",
+          "observed_gap_count": 1084,
+          "largest_gap": "7d",
+          "largest_gap_minutes": 10080,
+          "most_recent_gap_end": "2026-04-06 00:00 UTC",
+          "validation_missing": "Not measured",
+          "material_gaps": "Not measured",
+          "bars": 9190,
+          "available_range": "1986-07-03 00:00 UTC \u2014 2026-07-13 00:00 UTC"
+        },
+        {
+          "symbol": "USDCAD",
+          "timeframe": "M5",
+          "observed_gap_count": 1,
+          "largest_gap": "6d 13h 55m",
+          "largest_gap_minutes": 9475,
+          "most_recent_gap_end": "2026-07-01 04:00 UTC",
+          "validation_missing": 117,
+          "material_gaps": 31,
+          "bars": 5675,
+          "available_range": "2026-06-21 21:00 UTC \u2014 2026-07-24 03:40 UTC"
+        },
+        {
+          "symbol": "ASXBHP",
+          "timeframe": "D1",
+          "observed_gap_count": 126,
+          "largest_gap": "6d",
+          "largest_gap_minutes": 8640,
+          "most_recent_gap_end": "2026-06-09 00:00 UTC",
+          "validation_missing": "Not measured",
+          "material_gaps": "Not measured",
+          "bars": 9868,
+          "available_range": "1988-01-28 00:00 UTC \u2014 2026-07-24 00:00 UTC"
+        },
+        {
+          "symbol": "ASXCBA",
+          "timeframe": "D1",
+          "observed_gap_count": 49,
+          "largest_gap": "6d",
+          "largest_gap_minutes": 8640,
+          "most_recent_gap_end": "2026-06-09 00:00 UTC",
+          "validation_missing": "Not measured",
+          "material_gaps": "Not measured",
+          "bars": 2536,
+          "available_range": "2016-07-18 00:00 UTC \u2014 2026-07-24 00:00 UTC"
+        },
+        {
+          "symbol": "EURAUD",
+          "timeframe": "D1",
+          "observed_gap_count": 54,
+          "largest_gap": "6d",
+          "largest_gap_minutes": 8640,
+          "most_recent_gap_end": "2024-01-02 00:00 UTC",
+          "validation_missing": 48,
+          "material_gaps": 0,
+          "bars": 10402,
+          "available_range": "1986-05-07 00:00 UTC \u2014 2026-07-23 00:00 UTC"
+        },
+        {
+          "symbol": "NZDUSD",
+          "timeframe": "M5",
+          "observed_gap_count": 7,
+          "largest_gap": "5d 5m",
+          "largest_gap_minutes": 7205,
+          "most_recent_gap_end": "2026-07-01 04:00 UTC",
+          "validation_missing": 1044,
+          "material_gaps": 0,
+          "bars": 73537,
+          "available_range": "2025-07-23 04:00 UTC \u2014 2026-07-24 03:00 UTC"
+        },
+        {
+          "symbol": "AUDCAD",
+          "timeframe": "D1",
+          "observed_gap_count": 75,
+          "largest_gap": "5d",
+          "largest_gap_minutes": 7200,
+          "most_recent_gap_end": "2024-01-02 00:00 UTC",
+          "validation_missing": 84,
+          "material_gaps": 0,
+          "bars": 12019,
+          "available_range": "1979-12-24 00:00 UTC \u2014 2026-07-23 00:00 UTC"
+        },
+        {
+          "symbol": "AUDJPY",
+          "timeframe": "D1",
+          "observed_gap_count": 61,
+          "largest_gap": "5d",
+          "largest_gap_minutes": 7200,
+          "most_recent_gap_end": "2010-01-04 00:00 UTC",
+          "validation_missing": 78,
+          "material_gaps": 0,
+          "bars": 12172,
+          "available_range": "1979-12-24 00:00 UTC \u2014 2026-07-23 00:00 UTC"
+        },
+        {
+          "symbol": "AUDNZD",
+          "timeframe": "D1",
+          "observed_gap_count": 59,
+          "largest_gap": "5d",
+          "largest_gap_minutes": 7200,
+          "most_recent_gap_end": "2024-01-02 00:00 UTC",
+          "validation_missing": 57,
+          "material_gaps": 0,
+          "bars": 11520,
+          "available_range": "1982-01-04 00:00 UTC \u2014 2026-07-23 00:00 UTC"
+        },
+        {
+          "symbol": "DJI",
+          "timeframe": "D1",
+          "observed_gap_count": 136,
+          "largest_gap": "5d",
+          "largest_gap_minutes": 7200,
+          "most_recent_gap_end": "2026-07-06 00:00 UTC",
+          "validation_missing": "Not measured",
+          "material_gaps": "Not measured",
+          "bars": 5039,
+          "available_range": "2006-07-12 00:00 UTC \u2014 2026-07-23 00:00 UTC"
+        },
+        {
+          "symbol": "GBPAUD",
+          "timeframe": "D1",
+          "observed_gap_count": 57,
+          "largest_gap": "5d",
+          "largest_gap_minutes": 7200,
+          "most_recent_gap_end": "2022-08-09 00:00 UTC",
+          "validation_missing": 75,
+          "material_gaps": 0,
+          "bars": 12181,
+          "available_range": "1979-12-27 00:00 UTC \u2014 2026-07-23 00:00 UTC"
+        },
+        {
+          "symbol": "GBPUSD",
+          "timeframe": "D1",
+          "observed_gap_count": 1,
+          "largest_gap": "5d",
+          "largest_gap_minutes": 7200,
+          "most_recent_gap_end": "2025-04-22 00:00 UTC",
+          "validation_missing": 5,
+          "material_gaps": 0,
+          "bars": 2700,
+          "available_range": "2016-07-18 00:00 UTC \u2014 2026-07-23 00:00 UTC"
+        },
+        {
+          "symbol": "GOOGL",
+          "timeframe": "D1",
+          "observed_gap_count": 150,
+          "largest_gap": "5d",
+          "largest_gap_minutes": 7200,
+          "most_recent_gap_end": "2026-07-06 00:00 UTC",
+          "validation_missing": 2,
+          "material_gaps": 1,
+          "bars": 5516,
+          "available_range": "2004-08-19 00:00 UTC \u2014 2026-07-23 00:00 UTC"
+        },
+        {
+          "symbol": "LSERIO",
+          "timeframe": "D1",
+          "observed_gap_count": 10,
+          "largest_gap": "5d",
+          "largest_gap_minutes": 7200,
+          "most_recent_gap_end": "2026-05-26 00:00 UTC",
+          "validation_missing": "Not measured",
+          "material_gaps": "Not measured",
+          "bars": 506,
+          "available_range": "2024-07-15 00:00 UTC \u2014 2026-07-15 00:00 UTC"
+        },
+        {
+          "symbol": "SPY",
+          "timeframe": "D1",
+          "observed_gap_count": 136,
+          "largest_gap": "5d",
+          "largest_gap_minutes": 7200,
+          "most_recent_gap_end": "2026-07-06 00:00 UTC",
+          "validation_missing": "Not measured",
+          "material_gaps": "Not measured",
+          "bars": 5039,
+          "available_range": "2006-07-12 00:00 UTC \u2014 2026-07-23 00:00 UTC"
+        },
+        {
+          "symbol": "USDCAD",
+          "timeframe": "D1",
+          "observed_gap_count": 106,
+          "largest_gap": "5d",
+          "largest_gap_minutes": 7200,
+          "most_recent_gap_end": "2010-01-04 00:00 UTC",
+          "validation_missing": 144,
+          "material_gaps": 0,
+          "bars": 14431,
+          "available_range": "1971-01-04 00:00 UTC \u2014 2026-07-23 00:00 UTC"
+        },
+        {
+          "symbol": "AUDSGD",
+          "timeframe": "D1",
+          "observed_gap_count": 1,
+          "largest_gap": "4d",
+          "largest_gap_minutes": 5760,
+          "most_recent_gap_end": "2022-08-29 00:00 UTC",
+          "validation_missing": 5,
+          "material_gaps": 0,
+          "bars": 3703,
+          "available_range": "2012-11-05 00:00 UTC \u2014 2026-07-23 00:00 UTC"
+        },
+        {
+          "symbol": "DE",
+          "timeframe": "D1",
+          "observed_gap_count": 69,
+          "largest_gap": "4d",
+          "largest_gap_minutes": 5760,
+          "most_recent_gap_end": "2026-07-06 00:00 UTC",
+          "validation_missing": "Not measured",
+          "material_gaps": "Not measured",
+          "bars": 2518,
+          "available_range": "2016-07-18 00:00 UTC \u2014 2026-07-23 00:00 UTC"
+        },
+        {
+          "symbol": "ETHUSD",
+          "timeframe": "D1",
+          "observed_gap_count": 1,
+          "largest_gap": "4d",
+          "largest_gap_minutes": 5760,
+          "most_recent_gap_end": "2021-01-10 00:00 UTC",
+          "validation_missing": 5,
+          "material_gaps": 0,
+          "bars": 3105,
+          "available_range": "2018-01-17 00:00 UTC \u2014 2026-07-23 00:00 UTC"
+        },
+        {
+          "symbol": "EURNZD",
+          "timeframe": "D1",
+          "observed_gap_count": 13,
+          "largest_gap": "4d",
+          "largest_gap_minutes": 5760,
+          "most_recent_gap_end": "2022-09-19 00:00 UTC",
+          "validation_missing": 27,
+          "material_gaps": 0,
+          "bars": 2715,
+          "available_range": "2016-07-18 00:00 UTC \u2014 2026-07-23 00:00 UTC"
+        },
+        {
+          "symbol": "GBPCHF",
+          "timeframe": "D1",
+          "observed_gap_count": 6,
+          "largest_gap": "4d",
+          "largest_gap_minutes": 5760,
+          "most_recent_gap_end": "2022-06-28 00:00 UTC",
+          "validation_missing": 12,
+          "material_gaps": 0,
+          "bars": 2724,
+          "available_range": "2016-07-25 00:00 UTC \u2014 2026-07-23 00:00 UTC"
+        },
+        {
+          "symbol": "GBPJPY",
+          "timeframe": "D1",
+          "observed_gap_count": 4,
+          "largest_gap": "4d",
+          "largest_gap_minutes": 5760,
+          "most_recent_gap_end": "2021-08-16 00:00 UTC",
+          "validation_missing": 6,
+          "material_gaps": 0,
+          "bars": 3701,
+          "available_range": "2012-11-05 00:00 UTC \u2014 2026-07-23 00:00 UTC"
+        },
+        {
+          "symbol": "JPM",
+          "timeframe": "D1",
+          "observed_gap_count": 2,
+          "largest_gap": "4d",
+          "largest_gap_minutes": 5760,
+          "most_recent_gap_end": "2026-07-06 00:00 UTC",
+          "validation_missing": "Not measured",
+          "material_gaps": "Not measured",
+          "bars": 37,
+          "available_range": "2026-06-01 00:00 UTC \u2014 2026-07-23 00:00 UTC"
+        },
+        {
+          "symbol": "NZDJPY",
+          "timeframe": "D1",
+          "observed_gap_count": 5,
+          "largest_gap": "4d",
+          "largest_gap_minutes": 5760,
+          "most_recent_gap_end": "2021-06-29 00:00 UTC",
+          "validation_missing": 11,
+          "material_gaps": 0,
+          "bars": 2735,
+          "available_range": "2016-07-18 00:00 UTC \u2014 2026-07-23 00:00 UTC"
+        },
+        {
+          "symbol": "NZDUSD",
+          "timeframe": "D1",
+          "observed_gap_count": 4,
+          "largest_gap": "4d",
+          "largest_gap_minutes": 5760,
+          "most_recent_gap_end": "2021-12-06 00:00 UTC",
+          "validation_missing": 6,
+          "material_gaps": 0,
+          "bars": 3702,
+          "available_range": "2012-11-05 00:00 UTC \u2014 2026-07-23 00:00 UTC"
+        },
+        {
+          "symbol": "AUDUSD",
+          "timeframe": "H1",
+          "observed_gap_count": 6,
+          "largest_gap": "3d 8h",
+          "largest_gap_minutes": 4800,
+          "most_recent_gap_end": "2026-01-02 06:00 UTC",
+          "validation_missing": 195,
+          "material_gaps": 0,
+          "bars": 22105,
+          "available_range": "2023-01-02 08:00 UTC \u2014 2026-07-24 10:00 UTC"
+        },
+        {
+          "symbol": "EURUSD",
+          "timeframe": "H1",
+          "observed_gap_count": 6,
+          "largest_gap": "3d 8h",
+          "largest_gap_minutes": 4800,
+          "most_recent_gap_end": "2026-01-02 06:00 UTC",
+          "validation_missing": 193,
+          "material_gaps": 0,
+          "bars": 22109,
+          "available_range": "2023-01-02 06:00 UTC \u2014 2026-07-24 10:00 UTC"
+        },
+        {
+          "symbol": "USDCAD",
+          "timeframe": "H1",
+          "observed_gap_count": 6,
+          "largest_gap": "3d 8h",
+          "largest_gap_minutes": 4800,
+          "most_recent_gap_end": "2026-01-02 06:00 UTC",
+          "validation_missing": 199,
+          "material_gaps": 0,
+          "bars": 22104,
+          "available_range": "2023-01-02 05:00 UTC \u2014 2026-07-24 10:00 UTC"
+        },
+        {
+          "symbol": "USDCHF",
+          "timeframe": "H1",
+          "observed_gap_count": 6,
+          "largest_gap": "3d 8h",
+          "largest_gap_minutes": 4800,
+          "most_recent_gap_end": "2026-01-02 06:00 UTC",
+          "validation_missing": 211,
+          "material_gaps": 0,
+          "bars": 22092,
+          "available_range": "2023-01-02 05:00 UTC \u2014 2026-07-24 10:00 UTC"
+        },
+        {
+          "symbol": "XAUUSD",
+          "timeframe": "H1",
+          "observed_gap_count": 202,
+          "largest_gap": "3d 8h",
+          "largest_gap_minutes": 4800,
+          "most_recent_gap_end": "2026-07-19 21:00 UTC",
+          "validation_missing": 1206,
+          "material_gaps": 0,
+          "bars": 21079,
+          "available_range": "2023-01-02 23:00 UTC \u2014 2026-07-24 10:00 UTC"
+        },
+        {
+          "symbol": "XAUUSD",
+          "timeframe": "M30",
+          "observed_gap_count": 641,
+          "largest_gap": "3d 1h 30m",
+          "largest_gap_minutes": 4410,
+          "most_recent_gap_end": "2026-07-19 21:00 UTC",
+          "validation_missing": 1711,
+          "material_gaps": 0,
+          "bars": 30368,
+          "available_range": "2024-01-02 05:00 UTC \u2014 2026-07-24 11:00 UTC"
+        },
+        {
+          "symbol": "XAUUSD",
+          "timeframe": "M5",
+          "observed_gap_count": 74,
+          "largest_gap": "2d 6h 40m",
+          "largest_gap_minutes": 3280,
+          "most_recent_gap_end": "2026-07-19 21:00 UTC",
+          "validation_missing": 1044,
+          "material_gaps": 0,
+          "bars": 23140,
+          "available_range": "2026-03-29 22:00 UTC \u2014 2026-07-24 03:45 UTC"
+        },
+        {
+          "symbol": "XAGUSD",
+          "timeframe": "H1",
+          "observed_gap_count": 5,
+          "largest_gap": "2d 1h",
+          "largest_gap_minutes": 2940,
+          "most_recent_gap_end": "2026-07-19 21:00 UTC",
+          "validation_missing": 0,
+          "material_gaps": 0,
+          "bars": 710,
+          "available_range": "2026-06-14 21:00 UTC \u2014 2026-07-24 10:00 UTC"
+        },
+        {
+          "symbol": "XAGUSD",
+          "timeframe": "M30",
+          "observed_gap_count": 5,
+          "largest_gap": "2d 30m",
+          "largest_gap_minutes": 2910,
+          "most_recent_gap_end": "2026-07-19 21:00 UTC",
+          "validation_missing": 0,
+          "material_gaps": 0,
+          "bars": 1421,
+          "available_range": "2026-06-14 21:00 UTC \u2014 2026-07-24 11:00 UTC"
+        },
+        {
+          "symbol": "AUDUSD",
+          "timeframe": "M30",
+          "observed_gap_count": 4,
+          "largest_gap": "1d 11h 30m",
+          "largest_gap_minutes": 2130,
+          "most_recent_gap_end": "2026-01-02 06:30 UTC",
+          "validation_missing": 280,
+          "material_gaps": 0,
+          "bars": 31799,
+          "available_range": "2024-01-02 05:00 UTC \u2014 2026-07-24 11:00 UTC"
+        },
+        {
+          "symbol": "EURUSD",
+          "timeframe": "M30",
+          "observed_gap_count": 5,
+          "largest_gap": "1d 11h 30m",
+          "largest_gap_minutes": 2130,
+          "most_recent_gap_end": "2026-01-02 06:30 UTC",
+          "validation_missing": 334,
+          "material_gaps": 0,
+          "bars": 31807,
+          "available_range": "2023-12-31 22:00 UTC \u2014 2026-07-24 11:00 UTC"
+        },
+        {
+          "symbol": "USDCAD",
+          "timeframe": "M30",
+          "observed_gap_count": 4,
+          "largest_gap": "1d 11h 30m",
+          "largest_gap_minutes": 2130,
+          "most_recent_gap_end": "2026-01-02 06:30 UTC",
+          "validation_missing": 291,
+          "material_gaps": 0,
+          "bars": 31788,
+          "available_range": "2024-01-02 05:00 UTC \u2014 2026-07-24 11:00 UTC"
+        },
+        {
+          "symbol": "USDCHF",
+          "timeframe": "M30",
+          "observed_gap_count": 6,
+          "largest_gap": "1d 11h 30m",
+          "largest_gap_minutes": 2130,
+          "most_recent_gap_end": "2026-04-29 22:00 UTC",
+          "validation_missing": 334,
+          "material_gaps": 0,
+          "bars": 31745,
+          "available_range": "2024-01-02 05:00 UTC \u2014 2026-07-24 11:00 UTC"
+        },
+        {
+          "symbol": "GBPAUD",
+          "timeframe": "H1",
+          "observed_gap_count": 4,
+          "largest_gap": "1d 6h",
+          "largest_gap_minutes": 1800,
+          "most_recent_gap_end": "2026-01-01 13:00 UTC",
+          "validation_missing": 302,
+          "material_gaps": 0,
+          "bars": 18641,
+          "available_range": "2023-07-17 04:00 UTC \u2014 2026-07-24 10:00 UTC"
+        },
+        {
+          "symbol": "GBPCHF",
+          "timeframe": "H1",
+          "observed_gap_count": 5,
+          "largest_gap": "1d 6h",
+          "largest_gap_minutes": 1800,
+          "most_recent_gap_end": "2026-01-01 13:00 UTC",
+          "validation_missing": 301,
+          "material_gaps": 0,
+          "bars": 18524,
+          "available_range": "2023-07-23 21:00 UTC \u2014 2026-07-24 05:00 UTC"
+        },
+        {
+          "symbol": "GBPAUD",
+          "timeframe": "M30",
+          "observed_gap_count": 5,
+          "largest_gap": "1d 5h 30m",
+          "largest_gap_minutes": 1770,
+          "most_recent_gap_end": "2026-01-01 13:00 UTC",
+          "validation_missing": 416,
+          "material_gaps": 0,
+          "bars": 24895,
+          "available_range": "2024-07-17 04:00 UTC \u2014 2026-07-24 11:00 UTC"
+        },
+        {
+          "symbol": "GBPCHF",
+          "timeframe": "M30",
+          "observed_gap_count": 5,
+          "largest_gap": "1d 5h 30m",
+          "largest_gap_minutes": 1770,
+          "most_recent_gap_end": "2026-01-01 13:00 UTC",
+          "validation_missing": 406,
+          "material_gaps": 0,
+          "bars": 24713,
+          "available_range": "2024-07-23 04:00 UTC \u2014 2026-07-24 11:00 UTC"
+        },
+        {
+          "symbol": "NZDJPY",
+          "timeframe": "H1",
+          "observed_gap_count": 5,
+          "largest_gap": "1d 5h",
+          "largest_gap_minutes": 1740,
+          "most_recent_gap_end": "2026-01-01 13:00 UTC",
+          "validation_missing": 303,
+          "material_gaps": 0,
+          "bars": 18527,
+          "available_range": "2023-07-23 21:00 UTC \u2014 2026-07-24 10:00 UTC"
+        },
+        {
+          "symbol": "AUDUSD",
+          "timeframe": "M5",
+          "observed_gap_count": 7,
+          "largest_gap": "1d 5m",
+          "largest_gap_minutes": 1445,
+          "most_recent_gap_end": "2026-06-09 21:10 UTC",
+          "validation_missing": 1034,
+          "material_gaps": 0,
+          "bars": 75093,
+          "available_range": "2025-07-21 04:00 UTC \u2014 2026-07-24 11:50 UTC"
+        },
+        {
+          "symbol": "GBPAUD",
+          "timeframe": "M5",
+          "observed_gap_count": 3,
+          "largest_gap": "1d 5m",
+          "largest_gap_minutes": 1445,
+          "most_recent_gap_end": "2026-01-01 13:00 UTC",
+          "validation_missing": 1077,
+          "material_gaps": 0,
+          "bars": 75625,
+          "available_range": "2025-07-17 04:00 UTC \u2014 2026-07-24 11:45 UTC"
+        },
+        {
+          "symbol": "GBPCHF",
+          "timeframe": "M5",
+          "observed_gap_count": 2,
+          "largest_gap": "1d 5m",
+          "largest_gap_minutes": 1445,
+          "most_recent_gap_end": "2026-01-01 13:00 UTC",
+          "validation_missing": 1044,
+          "material_gaps": 0,
+          "bars": 74506,
+          "available_range": "2025-07-23 04:00 UTC \u2014 2026-07-24 11:45 UTC"
+        },
+        {
+          "symbol": "SOLUSD",
+          "timeframe": "M30",
+          "observed_gap_count": 15,
+          "largest_gap": "15h 30m",
+          "largest_gap_minutes": 930,
+          "most_recent_gap_end": "2026-05-08 07:30 UTC",
+          "validation_missing": 126,
+          "material_gaps": 0,
+          "bars": 85078,
+          "available_range": "2021-09-13 09:30 UTC \u2014 2026-07-24 11:00 UTC"
+        },
+        {
+          "symbol": "SOLUSD",
+          "timeframe": "M5",
+          "observed_gap_count": 79,
+          "largest_gap": "15h 30m",
+          "largest_gap_minutes": 930,
+          "most_recent_gap_end": "2026-05-08 07:50 UTC",
+          "validation_missing": 1044,
+          "material_gaps": 2,
+          "bars": 510183,
+          "available_range": "2021-09-13 09:50 UTC \u2014 2026-07-24 11:50 UTC"
+        },
+        {
+          "symbol": "SOLUSD",
+          "timeframe": "H1",
+          "observed_gap_count": 8,
+          "largest_gap": "15h",
+          "largest_gap_minutes": 900,
+          "most_recent_gap_end": "2026-05-08 07:00 UTC",
+          "validation_missing": "Not measured",
+          "material_gaps": "Not measured",
+          "bars": 42553,
+          "available_range": "2021-09-13 09:00 UTC \u2014 2026-07-24 10:00 UTC"
+        },
+        {
+          "symbol": "EURUSD",
+          "timeframe": "M5",
+          "observed_gap_count": 5,
+          "largest_gap": "30m",
+          "largest_gap_minutes": 30,
+          "most_recent_gap_end": "2026-06-25 01:50 UTC",
+          "validation_missing": 22,
+          "material_gaps": 0,
+          "bars": 22802,
+          "available_range": "2026-04-05 21:00 UTC \u2014 2026-07-24 03:25 UTC"
+        }
+      ],
+      "gap_details": [
+        {
+          "symbol": "AAPL",
+          "timeframe": "D1",
+          "previous_bar": "2001-09-10 00:00 UTC",
+          "next_bar": "2001-09-17 00:00 UTC",
+          "gap": "7d",
+          "gap_minutes": 10080
+        },
+        {
+          "symbol": "AAPL",
+          "timeframe": "D1",
+          "previous_bar": "2006-12-29 00:00 UTC",
+          "next_bar": "2007-01-03 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "AAPL",
+          "timeframe": "D1",
+          "previous_bar": "2012-10-26 00:00 UTC",
+          "next_bar": "2012-10-31 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "ASXBHP",
+          "timeframe": "D1",
+          "previous_bar": "2005-03-23 00:00 UTC",
+          "next_bar": "2005-03-29 00:00 UTC",
+          "gap": "6d",
+          "gap_minutes": 8640
+        },
+        {
+          "symbol": "ASXBHP",
+          "timeframe": "D1",
+          "previous_bar": "2010-03-31 00:00 UTC",
+          "next_bar": "2010-04-06 00:00 UTC",
+          "gap": "6d",
+          "gap_minutes": 8640
+        },
+        {
+          "symbol": "ASXBHP",
+          "timeframe": "D1",
+          "previous_bar": "2011-04-21 00:00 UTC",
+          "next_bar": "2011-04-27 00:00 UTC",
+          "gap": "6d",
+          "gap_minutes": 8640
+        },
+        {
+          "symbol": "ASXCBA",
+          "timeframe": "D1",
+          "previous_bar": "2018-03-28 00:00 UTC",
+          "next_bar": "2018-04-03 00:00 UTC",
+          "gap": "6d",
+          "gap_minutes": 8640
+        },
+        {
+          "symbol": "ASXCBA",
+          "timeframe": "D1",
+          "previous_bar": "2021-03-31 00:00 UTC",
+          "next_bar": "2021-04-06 00:00 UTC",
+          "gap": "6d",
+          "gap_minutes": 8640
+        },
+        {
+          "symbol": "ASXCBA",
+          "timeframe": "D1",
+          "previous_bar": "2026-04-01 00:00 UTC",
+          "next_bar": "2026-04-07 00:00 UTC",
+          "gap": "6d",
+          "gap_minutes": 8640
+        },
+        {
+          "symbol": "AUDCAD",
+          "timeframe": "D1",
+          "previous_bar": "1980-04-03 00:00 UTC",
+          "next_bar": "1980-04-08 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "AUDCAD",
+          "timeframe": "D1",
+          "previous_bar": "1980-12-24 00:00 UTC",
+          "next_bar": "1980-12-29 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "AUDCAD",
+          "timeframe": "D1",
+          "previous_bar": "1981-04-16 00:00 UTC",
+          "next_bar": "1981-04-21 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "AUDCAD",
+          "timeframe": "M5",
+          "previous_bar": "2026-05-18 03:55 UTC",
+          "next_bar": "2026-06-21 21:00 UTC",
+          "gap": "34d 17h 5m",
+          "gap_minutes": 49985
+        },
+        {
+          "symbol": "AUDCAD",
+          "timeframe": "M5",
+          "previous_bar": "2026-06-24 14:05 UTC",
+          "next_bar": "2026-07-01 04:00 UTC",
+          "gap": "6d 13h 55m",
+          "gap_minutes": 9475
+        },
+        {
+          "symbol": "AUDCAD",
+          "timeframe": "M5",
+          "previous_bar": "2025-12-24 12:55 UTC",
+          "next_bar": "2025-12-25 13:00 UTC",
+          "gap": "1d 5m",
+          "gap_minutes": 1445
+        },
+        {
+          "symbol": "AUDJPY",
+          "timeframe": "D1",
+          "previous_bar": "1980-04-03 00:00 UTC",
+          "next_bar": "1980-04-08 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "AUDJPY",
+          "timeframe": "D1",
+          "previous_bar": "1980-12-24 00:00 UTC",
+          "next_bar": "1980-12-29 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "AUDJPY",
+          "timeframe": "D1",
+          "previous_bar": "1981-04-16 00:00 UTC",
+          "next_bar": "1981-04-21 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "AUDJPY",
+          "timeframe": "M5",
+          "previous_bar": "2026-04-09 03:55 UTC",
+          "next_bar": "2026-06-21 21:00 UTC",
+          "gap": "73d 17h 5m",
+          "gap_minutes": 106145
+        },
+        {
+          "symbol": "AUDJPY",
+          "timeframe": "M5",
+          "previous_bar": "2026-06-24 14:05 UTC",
+          "next_bar": "2026-07-01 04:00 UTC",
+          "gap": "6d 13h 55m",
+          "gap_minutes": 9475
+        },
+        {
+          "symbol": "AUDJPY",
+          "timeframe": "M5",
+          "previous_bar": "2025-12-24 12:55 UTC",
+          "next_bar": "2025-12-25 13:00 UTC",
+          "gap": "1d 5m",
+          "gap_minutes": 1445
+        },
+        {
+          "symbol": "AUDNZD",
+          "timeframe": "D1",
+          "previous_bar": "1982-02-11 00:00 UTC",
+          "next_bar": "1982-02-16 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "AUDNZD",
+          "timeframe": "D1",
+          "previous_bar": "1986-12-24 00:00 UTC",
+          "next_bar": "1986-12-29 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "AUDNZD",
+          "timeframe": "D1",
+          "previous_bar": "1982-05-28 00:00 UTC",
+          "next_bar": "1982-06-01 00:00 UTC",
+          "gap": "4d",
+          "gap_minutes": 5760
+        },
+        {
+          "symbol": "AUDNZD",
+          "timeframe": "M5",
+          "previous_bar": "2025-10-09 03:55 UTC",
+          "next_bar": "2026-06-21 21:00 UTC",
+          "gap": "255d 17h 5m",
+          "gap_minutes": 368225
+        },
+        {
+          "symbol": "AUDNZD",
+          "timeframe": "M5",
+          "previous_bar": "2026-06-24 14:05 UTC",
+          "next_bar": "2026-07-01 04:00 UTC",
+          "gap": "6d 13h 55m",
+          "gap_minutes": 9475
+        },
+        {
+          "symbol": "AUDSGD",
+          "timeframe": "D1",
+          "previous_bar": "2022-08-25 00:00 UTC",
+          "next_bar": "2022-08-29 00:00 UTC",
+          "gap": "4d",
+          "gap_minutes": 5760
+        },
+        {
+          "symbol": "AUDSGD",
+          "timeframe": "H1",
+          "previous_bar": "2023-12-29 19:00 UTC",
+          "next_bar": "2026-07-15 04:00 UTC",
+          "gap": "928d 9h",
+          "gap_minutes": 1336860
+        },
+        {
+          "symbol": "AUDSGD",
+          "timeframe": "H1",
+          "previous_bar": "2023-07-19 18:00 UTC",
+          "next_bar": "2023-07-19 22:00 UTC",
+          "gap": "4h",
+          "gap_minutes": 240
+        },
+        {
+          "symbol": "AUDSGD",
+          "timeframe": "M5",
+          "previous_bar": "2025-10-09 03:55 UTC",
+          "next_bar": "2026-07-17 04:00 UTC",
+          "gap": "281d 5m",
+          "gap_minutes": 404645
+        },
+        {
+          "symbol": "AUDUSD",
+          "timeframe": "D1",
+          "previous_bar": "1971-08-13 00:00 UTC",
+          "next_bar": "1971-08-23 00:00 UTC",
+          "gap": "10d",
+          "gap_minutes": 14400
+        },
+        {
+          "symbol": "AUDUSD",
+          "timeframe": "D1",
+          "previous_bar": "1972-06-22 00:00 UTC",
+          "next_bar": "1972-06-29 00:00 UTC",
+          "gap": "7d",
+          "gap_minutes": 10080
+        },
+        {
+          "symbol": "AUDUSD",
+          "timeframe": "D1",
+          "previous_bar": "1971-02-11 00:00 UTC",
+          "next_bar": "1971-02-16 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "AUDUSD",
+          "timeframe": "H1",
+          "previous_bar": "2023-12-22 21:00 UTC",
+          "next_bar": "2023-12-26 05:00 UTC",
+          "gap": "3d 8h",
+          "gap_minutes": 4800
+        },
+        {
+          "symbol": "AUDUSD",
+          "timeframe": "H1",
+          "previous_bar": "2023-12-29 21:00 UTC",
+          "next_bar": "2024-01-02 05:00 UTC",
+          "gap": "3d 8h",
+          "gap_minutes": 4800
+        },
+        {
+          "symbol": "AUDUSD",
+          "timeframe": "H1",
+          "previous_bar": "2025-12-24 19:00 UTC",
+          "next_bar": "2025-12-26 06:00 UTC",
+          "gap": "1d 11h",
+          "gap_minutes": 2100
+        },
+        {
+          "symbol": "AUDUSD",
+          "timeframe": "M30",
+          "previous_bar": "2025-12-24 19:00 UTC",
+          "next_bar": "2025-12-26 06:30 UTC",
+          "gap": "1d 11h 30m",
+          "gap_minutes": 2130
+        },
+        {
+          "symbol": "AUDUSD",
+          "timeframe": "M30",
+          "previous_bar": "2025-12-31 19:00 UTC",
+          "next_bar": "2026-01-02 06:30 UTC",
+          "gap": "1d 11h 30m",
+          "gap_minutes": 2130
+        },
+        {
+          "symbol": "AUDUSD",
+          "timeframe": "M30",
+          "previous_bar": "2024-12-24 19:00 UTC",
+          "next_bar": "2024-12-26 05:00 UTC",
+          "gap": "1d 10h",
+          "gap_minutes": 2040
+        },
+        {
+          "symbol": "AUDUSD",
+          "timeframe": "M5",
+          "previous_bar": "2025-12-24 12:55 UTC",
+          "next_bar": "2025-12-25 13:00 UTC",
+          "gap": "1d 5m",
+          "gap_minutes": 1445
+        },
+        {
+          "symbol": "AUDUSD",
+          "timeframe": "M5",
+          "previous_bar": "2025-12-31 12:55 UTC",
+          "next_bar": "2026-01-01 13:00 UTC",
+          "gap": "1d 5m",
+          "gap_minutes": 1445
+        },
+        {
+          "symbol": "AUDUSD",
+          "timeframe": "M5",
+          "previous_bar": "2025-10-14 05:30 UTC",
+          "next_bar": "2025-10-14 06:10 UTC",
+          "gap": "40m",
+          "gap_minutes": 40
+        },
+        {
+          "symbol": "BTCUSD",
+          "timeframe": "D1",
+          "previous_bar": "2010-03-02 00:00 UTC",
+          "next_bar": "2010-04-25 00:00 UTC",
+          "gap": "54d",
+          "gap_minutes": 77760
+        },
+        {
+          "symbol": "BTCUSD",
+          "timeframe": "D1",
+          "previous_bar": "2010-05-30 00:00 UTC",
+          "next_bar": "2010-06-07 00:00 UTC",
+          "gap": "8d",
+          "gap_minutes": 11520
+        },
+        {
+          "symbol": "BTCUSD",
+          "timeframe": "D1",
+          "previous_bar": "2011-06-19 00:00 UTC",
+          "next_bar": "2011-06-27 00:00 UTC",
+          "gap": "8d",
+          "gap_minutes": 11520
+        },
+        {
+          "symbol": "CAT",
+          "timeframe": "D1",
+          "previous_bar": "2001-09-10 00:00 UTC",
+          "next_bar": "2001-09-17 00:00 UTC",
+          "gap": "7d",
+          "gap_minutes": 10080
+        },
+        {
+          "symbol": "CAT",
+          "timeframe": "D1",
+          "previous_bar": "1968-07-03 00:00 UTC",
+          "next_bar": "1968-07-08 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "CAT",
+          "timeframe": "D1",
+          "previous_bar": "2006-12-29 00:00 UTC",
+          "next_bar": "2007-01-03 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "DE",
+          "timeframe": "D1",
+          "previous_bar": "2016-09-02 00:00 UTC",
+          "next_bar": "2016-09-06 00:00 UTC",
+          "gap": "4d",
+          "gap_minutes": 5760
+        },
+        {
+          "symbol": "DE",
+          "timeframe": "D1",
+          "previous_bar": "2016-12-23 00:00 UTC",
+          "next_bar": "2016-12-27 00:00 UTC",
+          "gap": "4d",
+          "gap_minutes": 5760
+        },
+        {
+          "symbol": "DE",
+          "timeframe": "D1",
+          "previous_bar": "2016-12-30 00:00 UTC",
+          "next_bar": "2017-01-03 00:00 UTC",
+          "gap": "4d",
+          "gap_minutes": 5760
+        },
+        {
+          "symbol": "DJI",
+          "timeframe": "D1",
+          "previous_bar": "2006-12-29 00:00 UTC",
+          "next_bar": "2007-01-03 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "DJI",
+          "timeframe": "D1",
+          "previous_bar": "2012-10-26 00:00 UTC",
+          "next_bar": "2012-10-31 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "DJI",
+          "timeframe": "D1",
+          "previous_bar": "2006-09-01 00:00 UTC",
+          "next_bar": "2006-09-05 00:00 UTC",
+          "gap": "4d",
+          "gap_minutes": 5760
+        },
+        {
+          "symbol": "DOGEUSD",
+          "timeframe": "H1",
+          "previous_bar": "2026-06-24 13:00 UTC",
+          "next_bar": "2026-07-18 00:00 UTC",
+          "gap": "23d 11h",
+          "gap_minutes": 33780
+        },
+        {
+          "symbol": "DOGEUSD",
+          "timeframe": "M30",
+          "previous_bar": "2026-06-24 13:30 UTC",
+          "next_bar": "2026-07-18 00:00 UTC",
+          "gap": "23d 10h 30m",
+          "gap_minutes": 33750
+        },
+        {
+          "symbol": "ETHUSD",
+          "timeframe": "D1",
+          "previous_bar": "2021-01-06 00:00 UTC",
+          "next_bar": "2021-01-10 00:00 UTC",
+          "gap": "4d",
+          "gap_minutes": 5760
+        },
+        {
+          "symbol": "EURAUD",
+          "timeframe": "D1",
+          "previous_bar": "1986-12-23 00:00 UTC",
+          "next_bar": "1986-12-29 00:00 UTC",
+          "gap": "6d",
+          "gap_minutes": 8640
+        },
+        {
+          "symbol": "EURAUD",
+          "timeframe": "D1",
+          "previous_bar": "1986-05-23 00:00 UTC",
+          "next_bar": "1986-05-27 00:00 UTC",
+          "gap": "4d",
+          "gap_minutes": 5760
+        },
+        {
+          "symbol": "EURAUD",
+          "timeframe": "D1",
+          "previous_bar": "1986-07-03 00:00 UTC",
+          "next_bar": "1986-07-07 00:00 UTC",
+          "gap": "4d",
+          "gap_minutes": 5760
+        },
+        {
+          "symbol": "EURAUD",
+          "timeframe": "M5",
+          "previous_bar": "2025-09-12 20:55 UTC",
+          "next_bar": "2026-06-21 21:00 UTC",
+          "gap": "282d 5m",
+          "gap_minutes": 406085
+        },
+        {
+          "symbol": "EURAUD",
+          "timeframe": "M5",
+          "previous_bar": "2026-06-24 14:05 UTC",
+          "next_bar": "2026-07-01 04:00 UTC",
+          "gap": "6d 13h 55m",
+          "gap_minutes": 9475
+        },
+        {
+          "symbol": "EURNZD",
+          "timeframe": "D1",
+          "previous_bar": "2019-10-18 00:00 UTC",
+          "next_bar": "2019-10-22 00:00 UTC",
+          "gap": "4d",
+          "gap_minutes": 5760
+        },
+        {
+          "symbol": "EURNZD",
+          "timeframe": "D1",
+          "previous_bar": "2019-12-20 00:00 UTC",
+          "next_bar": "2019-12-24 00:00 UTC",
+          "gap": "4d",
+          "gap_minutes": 5760
+        },
+        {
+          "symbol": "EURNZD",
+          "timeframe": "D1",
+          "previous_bar": "2020-02-13 00:00 UTC",
+          "next_bar": "2020-02-17 00:00 UTC",
+          "gap": "4d",
+          "gap_minutes": 5760
+        },
+        {
+          "symbol": "EURNZD",
+          "timeframe": "H1",
+          "previous_bar": "2023-12-29 19:00 UTC",
+          "next_bar": "2026-07-15 04:00 UTC",
+          "gap": "928d 9h",
+          "gap_minutes": 1336860
+        },
+        {
+          "symbol": "EURUSD",
+          "timeframe": "D1",
+          "previous_bar": "1971-08-13 00:00 UTC",
+          "next_bar": "1971-08-23 00:00 UTC",
+          "gap": "10d",
+          "gap_minutes": 14400
+        },
+        {
+          "symbol": "EURUSD",
+          "timeframe": "D1",
+          "previous_bar": "1971-02-11 00:00 UTC",
+          "next_bar": "1971-02-16 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "EURUSD",
+          "timeframe": "D1",
+          "previous_bar": "1990-12-28 00:00 UTC",
+          "next_bar": "1991-01-02 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "EURUSD",
+          "timeframe": "H1",
+          "previous_bar": "2023-12-22 21:00 UTC",
+          "next_bar": "2023-12-26 05:00 UTC",
+          "gap": "3d 8h",
+          "gap_minutes": 4800
+        },
+        {
+          "symbol": "EURUSD",
+          "timeframe": "H1",
+          "previous_bar": "2025-12-24 19:00 UTC",
+          "next_bar": "2025-12-26 06:00 UTC",
+          "gap": "1d 11h",
+          "gap_minutes": 2100
+        },
+        {
+          "symbol": "EURUSD",
+          "timeframe": "H1",
+          "previous_bar": "2025-12-31 19:00 UTC",
+          "next_bar": "2026-01-02 06:00 UTC",
+          "gap": "1d 11h",
+          "gap_minutes": 2100
+        },
+        {
+          "symbol": "EURUSD",
+          "timeframe": "M30",
+          "previous_bar": "2025-12-24 19:00 UTC",
+          "next_bar": "2025-12-26 06:30 UTC",
+          "gap": "1d 11h 30m",
+          "gap_minutes": 2130
+        },
+        {
+          "symbol": "EURUSD",
+          "timeframe": "M30",
+          "previous_bar": "2025-12-31 19:00 UTC",
+          "next_bar": "2026-01-02 06:30 UTC",
+          "gap": "1d 11h 30m",
+          "gap_minutes": 2130
+        },
+        {
+          "symbol": "EURUSD",
+          "timeframe": "M30",
+          "previous_bar": "2024-12-24 19:00 UTC",
+          "next_bar": "2024-12-26 05:00 UTC",
+          "gap": "1d 10h",
+          "gap_minutes": 2040
+        },
+        {
+          "symbol": "EURUSD",
+          "timeframe": "M5",
+          "previous_bar": "2026-04-29 21:05 UTC",
+          "next_bar": "2026-04-29 21:35 UTC",
+          "gap": "30m",
+          "gap_minutes": 30
+        },
+        {
+          "symbol": "EURUSD",
+          "timeframe": "M5",
+          "previous_bar": "2026-06-07 21:00 UTC",
+          "next_bar": "2026-06-07 21:30 UTC",
+          "gap": "30m",
+          "gap_minutes": 30
+        },
+        {
+          "symbol": "EURUSD",
+          "timeframe": "M5",
+          "previous_bar": "2026-06-25 01:20 UTC",
+          "next_bar": "2026-06-25 01:50 UTC",
+          "gap": "30m",
+          "gap_minutes": 30
+        },
+        {
+          "symbol": "FDX",
+          "timeframe": "D1",
+          "previous_bar": "2001-09-10 00:00 UTC",
+          "next_bar": "2001-09-17 00:00 UTC",
+          "gap": "7d",
+          "gap_minutes": 10080
+        },
+        {
+          "symbol": "FDX",
+          "timeframe": "D1",
+          "previous_bar": "2006-12-29 00:00 UTC",
+          "next_bar": "2007-01-03 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "FDX",
+          "timeframe": "D1",
+          "previous_bar": "2012-10-26 00:00 UTC",
+          "next_bar": "2012-10-31 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "GBPAUD",
+          "timeframe": "D1",
+          "previous_bar": "1980-04-03 00:00 UTC",
+          "next_bar": "1980-04-08 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "GBPAUD",
+          "timeframe": "D1",
+          "previous_bar": "1980-12-24 00:00 UTC",
+          "next_bar": "1980-12-29 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "GBPAUD",
+          "timeframe": "D1",
+          "previous_bar": "1981-04-16 00:00 UTC",
+          "next_bar": "1981-04-21 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "GBPAUD",
+          "timeframe": "H1",
+          "previous_bar": "2024-12-31 12:00 UTC",
+          "next_bar": "2025-01-01 18:00 UTC",
+          "gap": "1d 6h",
+          "gap_minutes": 1800
+        },
+        {
+          "symbol": "GBPAUD",
+          "timeframe": "H1",
+          "previous_bar": "2024-12-24 12:00 UTC",
+          "next_bar": "2024-12-25 17:00 UTC",
+          "gap": "1d 5h",
+          "gap_minutes": 1740
+        },
+        {
+          "symbol": "GBPAUD",
+          "timeframe": "H1",
+          "previous_bar": "2025-12-24 12:00 UTC",
+          "next_bar": "2025-12-25 13:00 UTC",
+          "gap": "1d 1h",
+          "gap_minutes": 1500
+        },
+        {
+          "symbol": "GBPAUD",
+          "timeframe": "M30",
+          "previous_bar": "2024-12-31 12:30 UTC",
+          "next_bar": "2025-01-01 18:00 UTC",
+          "gap": "1d 5h 30m",
+          "gap_minutes": 1770
+        },
+        {
+          "symbol": "GBPAUD",
+          "timeframe": "M30",
+          "previous_bar": "2024-12-24 12:30 UTC",
+          "next_bar": "2024-12-25 17:00 UTC",
+          "gap": "1d 4h 30m",
+          "gap_minutes": 1710
+        },
+        {
+          "symbol": "GBPAUD",
+          "timeframe": "M30",
+          "previous_bar": "2025-12-24 12:30 UTC",
+          "next_bar": "2025-12-25 13:00 UTC",
+          "gap": "1d 30m",
+          "gap_minutes": 1470
+        },
+        {
+          "symbol": "GBPAUD",
+          "timeframe": "M5",
+          "previous_bar": "2025-12-24 12:55 UTC",
+          "next_bar": "2025-12-25 13:00 UTC",
+          "gap": "1d 5m",
+          "gap_minutes": 1445
+        },
+        {
+          "symbol": "GBPAUD",
+          "timeframe": "M5",
+          "previous_bar": "2025-12-31 12:55 UTC",
+          "next_bar": "2026-01-01 13:00 UTC",
+          "gap": "1d 5m",
+          "gap_minutes": 1445
+        },
+        {
+          "symbol": "GBPAUD",
+          "timeframe": "M5",
+          "previous_bar": "2025-10-14 05:20 UTC",
+          "next_bar": "2025-10-14 06:10 UTC",
+          "gap": "50m",
+          "gap_minutes": 50
+        },
+        {
+          "symbol": "GBPCHF",
+          "timeframe": "D1",
+          "previous_bar": "2019-12-13 00:00 UTC",
+          "next_bar": "2019-12-17 00:00 UTC",
+          "gap": "4d",
+          "gap_minutes": 5760
+        },
+        {
+          "symbol": "GBPCHF",
+          "timeframe": "D1",
+          "previous_bar": "2020-05-14 00:00 UTC",
+          "next_bar": "2020-05-18 00:00 UTC",
+          "gap": "4d",
+          "gap_minutes": 5760
+        },
+        {
+          "symbol": "GBPCHF",
+          "timeframe": "D1",
+          "previous_bar": "2020-12-24 00:00 UTC",
+          "next_bar": "2020-12-28 00:00 UTC",
+          "gap": "4d",
+          "gap_minutes": 5760
+        },
+        {
+          "symbol": "GBPCHF",
+          "timeframe": "H1",
+          "previous_bar": "2024-12-31 12:00 UTC",
+          "next_bar": "2025-01-01 18:00 UTC",
+          "gap": "1d 6h",
+          "gap_minutes": 1800
+        },
+        {
+          "symbol": "GBPCHF",
+          "timeframe": "H1",
+          "previous_bar": "2024-12-24 12:00 UTC",
+          "next_bar": "2024-12-25 13:00 UTC",
+          "gap": "1d 1h",
+          "gap_minutes": 1500
+        },
+        {
+          "symbol": "GBPCHF",
+          "timeframe": "H1",
+          "previous_bar": "2025-12-24 12:00 UTC",
+          "next_bar": "2025-12-25 13:00 UTC",
+          "gap": "1d 1h",
+          "gap_minutes": 1500
+        },
+        {
+          "symbol": "GBPCHF",
+          "timeframe": "M30",
+          "previous_bar": "2024-12-31 12:30 UTC",
+          "next_bar": "2025-01-01 18:00 UTC",
+          "gap": "1d 5h 30m",
+          "gap_minutes": 1770
+        },
+        {
+          "symbol": "GBPCHF",
+          "timeframe": "M30",
+          "previous_bar": "2024-12-24 12:30 UTC",
+          "next_bar": "2024-12-25 13:00 UTC",
+          "gap": "1d 30m",
+          "gap_minutes": 1470
+        },
+        {
+          "symbol": "GBPCHF",
+          "timeframe": "M30",
+          "previous_bar": "2025-12-24 12:30 UTC",
+          "next_bar": "2025-12-25 13:00 UTC",
+          "gap": "1d 30m",
+          "gap_minutes": 1470
+        },
+        {
+          "symbol": "GBPCHF",
+          "timeframe": "M5",
+          "previous_bar": "2025-12-24 12:55 UTC",
+          "next_bar": "2025-12-25 13:00 UTC",
+          "gap": "1d 5m",
+          "gap_minutes": 1445
+        },
+        {
+          "symbol": "GBPCHF",
+          "timeframe": "M5",
+          "previous_bar": "2025-12-31 12:55 UTC",
+          "next_bar": "2026-01-01 13:00 UTC",
+          "gap": "1d 5m",
+          "gap_minutes": 1445
+        },
+        {
+          "symbol": "GBPJPY",
+          "timeframe": "D1",
+          "previous_bar": "2020-05-14 00:00 UTC",
+          "next_bar": "2020-05-18 00:00 UTC",
+          "gap": "4d",
+          "gap_minutes": 5760
+        },
+        {
+          "symbol": "GBPJPY",
+          "timeframe": "D1",
+          "previous_bar": "2020-12-31 00:00 UTC",
+          "next_bar": "2021-01-04 00:00 UTC",
+          "gap": "4d",
+          "gap_minutes": 5760
+        },
+        {
+          "symbol": "GBPJPY",
+          "timeframe": "D1",
+          "previous_bar": "2021-06-03 00:00 UTC",
+          "next_bar": "2021-06-07 00:00 UTC",
+          "gap": "4d",
+          "gap_minutes": 5760
+        },
+        {
+          "symbol": "GBPNZD",
+          "timeframe": "D1",
+          "previous_bar": "1996-12-05 00:00 UTC",
+          "next_bar": "1997-01-20 00:00 UTC",
+          "gap": "46d",
+          "gap_minutes": 66240
+        },
+        {
+          "symbol": "GBPNZD",
+          "timeframe": "D1",
+          "previous_bar": "1996-10-04 00:00 UTC",
+          "next_bar": "1996-10-21 00:00 UTC",
+          "gap": "17d",
+          "gap_minutes": 24480
+        },
+        {
+          "symbol": "GBPNZD",
+          "timeframe": "D1",
+          "previous_bar": "1996-09-03 00:00 UTC",
+          "next_bar": "1996-09-12 00:00 UTC",
+          "gap": "9d",
+          "gap_minutes": 12960
+        },
+        {
+          "symbol": "GBPNZD",
+          "timeframe": "M5",
+          "previous_bar": "2026-06-12 20:55 UTC",
+          "next_bar": "2026-07-19 21:00 UTC",
+          "gap": "37d 5m",
+          "gap_minutes": 53285
+        },
+        {
+          "symbol": "GBPNZD",
+          "timeframe": "M5",
+          "previous_bar": "2025-12-24 12:55 UTC",
+          "next_bar": "2025-12-25 13:00 UTC",
+          "gap": "1d 5m",
+          "gap_minutes": 1445
+        },
+        {
+          "symbol": "GBPNZD",
+          "timeframe": "M5",
+          "previous_bar": "2025-12-31 12:55 UTC",
+          "next_bar": "2026-01-01 13:00 UTC",
+          "gap": "1d 5m",
+          "gap_minutes": 1445
+        },
+        {
+          "symbol": "GBPUSD",
+          "timeframe": "D1",
+          "previous_bar": "2025-04-17 00:00 UTC",
+          "next_bar": "2025-04-22 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "GBPUSD",
+          "timeframe": "H1",
+          "previous_bar": "2026-06-24 13:00 UTC",
+          "next_bar": "2026-07-19 21:00 UTC",
+          "gap": "25d 8h",
+          "gap_minutes": 36480
+        },
+        {
+          "symbol": "GBPUSD",
+          "timeframe": "M30",
+          "previous_bar": "2026-06-24 13:30 UTC",
+          "next_bar": "2026-07-19 21:00 UTC",
+          "gap": "25d 7h 30m",
+          "gap_minutes": 36450
+        },
+        {
+          "symbol": "GBPUSD",
+          "timeframe": "M5",
+          "previous_bar": "2025-09-26 20:55 UTC",
+          "next_bar": "2026-01-19 00:00 UTC",
+          "gap": "114d 3h 5m",
+          "gap_minutes": 164345
+        },
+        {
+          "symbol": "GBPUSD",
+          "timeframe": "M5",
+          "previous_bar": "2026-04-02 23:55 UTC",
+          "next_bar": "2026-04-07 00:00 UTC",
+          "gap": "4d 5m",
+          "gap_minutes": 5765
+        },
+        {
+          "symbol": "GBPUSD",
+          "timeframe": "M5",
+          "previous_bar": "2026-07-09 21:00 UTC",
+          "next_bar": "2026-07-09 21:30 UTC",
+          "gap": "30m",
+          "gap_minutes": 30
+        },
+        {
+          "symbol": "GOOGL",
+          "timeframe": "D1",
+          "previous_bar": "2006-12-29 00:00 UTC",
+          "next_bar": "2007-01-03 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "GOOGL",
+          "timeframe": "D1",
+          "previous_bar": "2012-10-26 00:00 UTC",
+          "next_bar": "2012-10-31 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "GOOGL",
+          "timeframe": "D1",
+          "previous_bar": "2004-09-03 00:00 UTC",
+          "next_bar": "2004-09-07 00:00 UTC",
+          "gap": "4d",
+          "gap_minutes": 5760
+        },
+        {
+          "symbol": "HYPEUSD",
+          "timeframe": "D1",
+          "previous_bar": "2026-04-24 00:00 UTC",
+          "next_bar": "2026-05-31 00:00 UTC",
+          "gap": "37d",
+          "gap_minutes": 53280
+        },
+        {
+          "symbol": "JPM",
+          "timeframe": "D1",
+          "previous_bar": "2026-06-18 00:00 UTC",
+          "next_bar": "2026-06-22 00:00 UTC",
+          "gap": "4d",
+          "gap_minutes": 5760
+        },
+        {
+          "symbol": "JPM",
+          "timeframe": "D1",
+          "previous_bar": "2026-07-02 00:00 UTC",
+          "next_bar": "2026-07-06 00:00 UTC",
+          "gap": "4d",
+          "gap_minutes": 5760
+        },
+        {
+          "symbol": "LINKUSD",
+          "timeframe": "H1",
+          "previous_bar": "2026-06-24 13:00 UTC",
+          "next_bar": "2026-07-18 00:00 UTC",
+          "gap": "23d 11h",
+          "gap_minutes": 33780
+        },
+        {
+          "symbol": "LINKUSD",
+          "timeframe": "M30",
+          "previous_bar": "2026-06-24 13:30 UTC",
+          "next_bar": "2026-07-18 00:00 UTC",
+          "gap": "23d 10h 30m",
+          "gap_minutes": 33750
+        },
+        {
+          "symbol": "LSERIO",
+          "timeframe": "D1",
+          "previous_bar": "2025-04-17 00:00 UTC",
+          "next_bar": "2025-04-22 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "LSERIO",
+          "timeframe": "D1",
+          "previous_bar": "2025-12-24 00:00 UTC",
+          "next_bar": "2025-12-29 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "LSERIO",
+          "timeframe": "D1",
+          "previous_bar": "2026-04-02 00:00 UTC",
+          "next_bar": "2026-04-07 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "MSFT",
+          "timeframe": "D1",
+          "previous_bar": "2001-09-10 00:00 UTC",
+          "next_bar": "2001-09-17 00:00 UTC",
+          "gap": "7d",
+          "gap_minutes": 10080
+        },
+        {
+          "symbol": "MSFT",
+          "timeframe": "D1",
+          "previous_bar": "2006-12-29 00:00 UTC",
+          "next_bar": "2007-01-03 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "MSFT",
+          "timeframe": "D1",
+          "previous_bar": "2012-10-26 00:00 UTC",
+          "next_bar": "2012-10-31 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "NZDJPY",
+          "timeframe": "D1",
+          "previous_bar": "2018-11-09 00:00 UTC",
+          "next_bar": "2018-11-13 00:00 UTC",
+          "gap": "4d",
+          "gap_minutes": 5760
+        },
+        {
+          "symbol": "NZDJPY",
+          "timeframe": "D1",
+          "previous_bar": "2019-10-24 00:00 UTC",
+          "next_bar": "2019-10-28 00:00 UTC",
+          "gap": "4d",
+          "gap_minutes": 5760
+        },
+        {
+          "symbol": "NZDJPY",
+          "timeframe": "D1",
+          "previous_bar": "2020-03-06 00:00 UTC",
+          "next_bar": "2020-03-10 00:00 UTC",
+          "gap": "4d",
+          "gap_minutes": 5760
+        },
+        {
+          "symbol": "NZDJPY",
+          "timeframe": "H1",
+          "previous_bar": "2024-12-31 12:00 UTC",
+          "next_bar": "2025-01-01 17:00 UTC",
+          "gap": "1d 5h",
+          "gap_minutes": 1740
+        },
+        {
+          "symbol": "NZDJPY",
+          "timeframe": "H1",
+          "previous_bar": "2024-12-24 12:00 UTC",
+          "next_bar": "2024-12-25 15:00 UTC",
+          "gap": "1d 3h",
+          "gap_minutes": 1620
+        },
+        {
+          "symbol": "NZDJPY",
+          "timeframe": "H1",
+          "previous_bar": "2025-12-24 12:00 UTC",
+          "next_bar": "2025-12-25 13:00 UTC",
+          "gap": "1d 1h",
+          "gap_minutes": 1500
+        },
+        {
+          "symbol": "NZDJPY",
+          "timeframe": "M5",
+          "previous_bar": "2026-05-29 20:55 UTC",
+          "next_bar": "2026-07-01 04:00 UTC",
+          "gap": "32d 7h 5m",
+          "gap_minutes": 46505
+        },
+        {
+          "symbol": "NZDJPY",
+          "timeframe": "M5",
+          "previous_bar": "2025-12-24 12:55 UTC",
+          "next_bar": "2025-12-25 13:00 UTC",
+          "gap": "1d 5m",
+          "gap_minutes": 1445
+        },
+        {
+          "symbol": "NZDJPY",
+          "timeframe": "M5",
+          "previous_bar": "2025-12-31 12:55 UTC",
+          "next_bar": "2026-01-01 13:00 UTC",
+          "gap": "1d 5m",
+          "gap_minutes": 1445
+        },
+        {
+          "symbol": "NZDUSD",
+          "timeframe": "D1",
+          "previous_bar": "2019-10-24 00:00 UTC",
+          "next_bar": "2019-10-28 00:00 UTC",
+          "gap": "4d",
+          "gap_minutes": 5760
+        },
+        {
+          "symbol": "NZDUSD",
+          "timeframe": "D1",
+          "previous_bar": "2020-12-10 00:00 UTC",
+          "next_bar": "2020-12-14 00:00 UTC",
+          "gap": "4d",
+          "gap_minutes": 5760
+        },
+        {
+          "symbol": "NZDUSD",
+          "timeframe": "D1",
+          "previous_bar": "2021-06-25 00:00 UTC",
+          "next_bar": "2021-06-29 00:00 UTC",
+          "gap": "4d",
+          "gap_minutes": 5760
+        },
+        {
+          "symbol": "NZDUSD",
+          "timeframe": "M5",
+          "previous_bar": "2026-06-26 03:55 UTC",
+          "next_bar": "2026-07-01 04:00 UTC",
+          "gap": "5d 5m",
+          "gap_minutes": 7205
+        },
+        {
+          "symbol": "NZDUSD",
+          "timeframe": "M5",
+          "previous_bar": "2025-12-24 12:55 UTC",
+          "next_bar": "2025-12-25 13:00 UTC",
+          "gap": "1d 5m",
+          "gap_minutes": 1445
+        },
+        {
+          "symbol": "NZDUSD",
+          "timeframe": "M5",
+          "previous_bar": "2025-12-31 12:55 UTC",
+          "next_bar": "2026-01-01 13:00 UTC",
+          "gap": "1d 5m",
+          "gap_minutes": 1445
+        },
+        {
+          "symbol": "SOLUSD",
+          "timeframe": "H1",
+          "previous_bar": "2022-11-18 23:00 UTC",
+          "next_bar": "2022-11-19 14:00 UTC",
+          "gap": "15h",
+          "gap_minutes": 900
+        },
+        {
+          "symbol": "SOLUSD",
+          "timeframe": "H1",
+          "previous_bar": "2022-02-19 13:00 UTC",
+          "next_bar": "2022-02-19 21:00 UTC",
+          "gap": "8h",
+          "gap_minutes": 480
+        },
+        {
+          "symbol": "SOLUSD",
+          "timeframe": "H1",
+          "previous_bar": "2022-11-17 23:00 UTC",
+          "next_bar": "2022-11-18 05:00 UTC",
+          "gap": "6h",
+          "gap_minutes": 360
+        },
+        {
+          "symbol": "SOLUSD",
+          "timeframe": "M30",
+          "previous_bar": "2022-11-18 23:00 UTC",
+          "next_bar": "2022-11-19 14:30 UTC",
+          "gap": "15h 30m",
+          "gap_minutes": 930
+        },
+        {
+          "symbol": "SOLUSD",
+          "timeframe": "M30",
+          "previous_bar": "2022-02-19 13:30 UTC",
+          "next_bar": "2022-02-19 21:00 UTC",
+          "gap": "7h 30m",
+          "gap_minutes": 450
+        },
+        {
+          "symbol": "SOLUSD",
+          "timeframe": "M30",
+          "previous_bar": "2026-05-08 01:00 UTC",
+          "next_bar": "2026-05-08 07:30 UTC",
+          "gap": "6h 30m",
+          "gap_minutes": 390
+        },
+        {
+          "symbol": "SOLUSD",
+          "timeframe": "M5",
+          "previous_bar": "2022-11-18 23:20 UTC",
+          "next_bar": "2022-11-19 14:50 UTC",
+          "gap": "15h 30m",
+          "gap_minutes": 930
+        },
+        {
+          "symbol": "SOLUSD",
+          "timeframe": "M5",
+          "previous_bar": "2022-02-19 13:45 UTC",
+          "next_bar": "2022-02-19 21:00 UTC",
+          "gap": "7h 15m",
+          "gap_minutes": 435
+        },
+        {
+          "symbol": "SOLUSD",
+          "timeframe": "M5",
+          "previous_bar": "2026-05-08 01:15 UTC",
+          "next_bar": "2026-05-08 07:50 UTC",
+          "gap": "6h 35m",
+          "gap_minutes": 395
+        },
+        {
+          "symbol": "SPY",
+          "timeframe": "D1",
+          "previous_bar": "2006-12-29 00:00 UTC",
+          "next_bar": "2007-01-03 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "SPY",
+          "timeframe": "D1",
+          "previous_bar": "2012-10-26 00:00 UTC",
+          "next_bar": "2012-10-31 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "SPY",
+          "timeframe": "D1",
+          "previous_bar": "2006-09-01 00:00 UTC",
+          "next_bar": "2006-09-05 00:00 UTC",
+          "gap": "4d",
+          "gap_minutes": 5760
+        },
+        {
+          "symbol": "USDCAD",
+          "timeframe": "D1",
+          "previous_bar": "1971-02-11 00:00 UTC",
+          "next_bar": "1971-02-16 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "USDCAD",
+          "timeframe": "D1",
+          "previous_bar": "1982-02-11 00:00 UTC",
+          "next_bar": "1982-02-16 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "USDCAD",
+          "timeframe": "D1",
+          "previous_bar": "1971-05-28 00:00 UTC",
+          "next_bar": "1971-06-01 00:00 UTC",
+          "gap": "4d",
+          "gap_minutes": 5760
+        },
+        {
+          "symbol": "USDCAD",
+          "timeframe": "H1",
+          "previous_bar": "2023-12-22 21:00 UTC",
+          "next_bar": "2023-12-26 05:00 UTC",
+          "gap": "3d 8h",
+          "gap_minutes": 4800
+        },
+        {
+          "symbol": "USDCAD",
+          "timeframe": "H1",
+          "previous_bar": "2023-12-29 21:00 UTC",
+          "next_bar": "2024-01-02 05:00 UTC",
+          "gap": "3d 8h",
+          "gap_minutes": 4800
+        },
+        {
+          "symbol": "USDCAD",
+          "timeframe": "H1",
+          "previous_bar": "2025-12-24 19:00 UTC",
+          "next_bar": "2025-12-26 06:00 UTC",
+          "gap": "1d 11h",
+          "gap_minutes": 2100
+        },
+        {
+          "symbol": "USDCAD",
+          "timeframe": "M30",
+          "previous_bar": "2025-12-24 19:00 UTC",
+          "next_bar": "2025-12-26 06:30 UTC",
+          "gap": "1d 11h 30m",
+          "gap_minutes": 2130
+        },
+        {
+          "symbol": "USDCAD",
+          "timeframe": "M30",
+          "previous_bar": "2025-12-31 19:00 UTC",
+          "next_bar": "2026-01-02 06:30 UTC",
+          "gap": "1d 11h 30m",
+          "gap_minutes": 2130
+        },
+        {
+          "symbol": "USDCAD",
+          "timeframe": "M30",
+          "previous_bar": "2024-12-24 19:00 UTC",
+          "next_bar": "2024-12-26 05:00 UTC",
+          "gap": "1d 10h",
+          "gap_minutes": 2040
+        },
+        {
+          "symbol": "USDCAD",
+          "timeframe": "M5",
+          "previous_bar": "2026-06-24 14:05 UTC",
+          "next_bar": "2026-07-01 04:00 UTC",
+          "gap": "6d 13h 55m",
+          "gap_minutes": 9475
+        },
+        {
+          "symbol": "USDCHF",
+          "timeframe": "D1",
+          "previous_bar": "1971-08-13 00:00 UTC",
+          "next_bar": "1971-08-23 00:00 UTC",
+          "gap": "10d",
+          "gap_minutes": 14400
+        },
+        {
+          "symbol": "USDCHF",
+          "timeframe": "D1",
+          "previous_bar": "1971-02-11 00:00 UTC",
+          "next_bar": "1971-02-16 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "USDCHF",
+          "timeframe": "D1",
+          "previous_bar": "1982-02-11 00:00 UTC",
+          "next_bar": "1982-02-16 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "USDCHF",
+          "timeframe": "H1",
+          "previous_bar": "2023-12-22 21:00 UTC",
+          "next_bar": "2023-12-26 05:00 UTC",
+          "gap": "3d 8h",
+          "gap_minutes": 4800
+        },
+        {
+          "symbol": "USDCHF",
+          "timeframe": "H1",
+          "previous_bar": "2023-12-29 21:00 UTC",
+          "next_bar": "2024-01-02 05:00 UTC",
+          "gap": "3d 8h",
+          "gap_minutes": 4800
+        },
+        {
+          "symbol": "USDCHF",
+          "timeframe": "H1",
+          "previous_bar": "2025-12-24 19:00 UTC",
+          "next_bar": "2025-12-26 06:00 UTC",
+          "gap": "1d 11h",
+          "gap_minutes": 2100
+        },
+        {
+          "symbol": "USDCHF",
+          "timeframe": "M30",
+          "previous_bar": "2025-12-24 19:00 UTC",
+          "next_bar": "2025-12-26 06:30 UTC",
+          "gap": "1d 11h 30m",
+          "gap_minutes": 2130
+        },
+        {
+          "symbol": "USDCHF",
+          "timeframe": "M30",
+          "previous_bar": "2025-12-31 19:00 UTC",
+          "next_bar": "2026-01-02 06:30 UTC",
+          "gap": "1d 11h 30m",
+          "gap_minutes": 2130
+        },
+        {
+          "symbol": "USDCHF",
+          "timeframe": "M30",
+          "previous_bar": "2024-12-24 19:00 UTC",
+          "next_bar": "2024-12-26 05:00 UTC",
+          "gap": "1d 10h",
+          "gap_minutes": 2040
+        },
+        {
+          "symbol": "USDCHF",
+          "timeframe": "M5",
+          "previous_bar": "2025-10-09 03:55 UTC",
+          "next_bar": "2026-04-05 22:00 UTC",
+          "gap": "178d 18h 5m",
+          "gap_minutes": 257405
+        },
+        {
+          "symbol": "USDCHF",
+          "timeframe": "M5",
+          "previous_bar": "2026-04-29 20:55 UTC",
+          "next_bar": "2026-04-29 22:00 UTC",
+          "gap": "1h 5m",
+          "gap_minutes": 65
+        },
+        {
+          "symbol": "USDCHF",
+          "timeframe": "M5",
+          "previous_bar": "2026-04-07 21:30 UTC",
+          "next_bar": "2026-04-07 22:00 UTC",
+          "gap": "30m",
+          "gap_minutes": 30
+        },
+        {
+          "symbol": "USDJPY",
+          "timeframe": "D1",
+          "previous_bar": "1971-08-13 00:00 UTC",
+          "next_bar": "1971-08-31 00:00 UTC",
+          "gap": "18d",
+          "gap_minutes": 25920
+        },
+        {
+          "symbol": "USDJPY",
+          "timeframe": "D1",
+          "previous_bar": "1971-02-11 00:00 UTC",
+          "next_bar": "1971-02-16 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "USDJPY",
+          "timeframe": "D1",
+          "previous_bar": "1982-02-11 00:00 UTC",
+          "next_bar": "1982-02-16 00:00 UTC",
+          "gap": "5d",
+          "gap_minutes": 7200
+        },
+        {
+          "symbol": "USDJPY",
+          "timeframe": "M5",
+          "previous_bar": "2025-11-17 04:55 UTC",
+          "next_bar": "2026-06-21 21:00 UTC",
+          "gap": "216d 16h 5m",
+          "gap_minutes": 312005
+        },
+        {
+          "symbol": "USDJPY",
+          "timeframe": "M5",
+          "previous_bar": "2026-06-24 14:05 UTC",
+          "next_bar": "2026-07-01 04:00 UTC",
+          "gap": "6d 13h 55m",
+          "gap_minutes": 9475
+        },
+        {
+          "symbol": "USDJPY",
+          "timeframe": "M5",
+          "previous_bar": "2025-10-14 05:30 UTC",
+          "next_bar": "2025-10-14 06:10 UTC",
+          "gap": "40m",
+          "gap_minutes": 40
+        },
+        {
+          "symbol": "USO",
+          "timeframe": "D1",
+          "previous_bar": "1993-12-23 00:00 UTC",
+          "next_bar": "1993-12-30 00:00 UTC",
+          "gap": "7d",
+          "gap_minutes": 10080
+        },
+        {
+          "symbol": "USO",
+          "timeframe": "D1",
+          "previous_bar": "1995-06-30 00:00 UTC",
+          "next_bar": "1995-07-06 00:00 UTC",
+          "gap": "6d",
+          "gap_minutes": 8640
+        },
+        {
+          "symbol": "USO",
+          "timeframe": "D1",
+          "previous_bar": "1998-01-21 00:00 UTC",
+          "next_bar": "1998-01-27 00:00 UTC",
+          "gap": "6d",
+          "gap_minutes": 8640
+        },
+        {
+          "symbol": "XAGUSD",
+          "timeframe": "D1",
+          "previous_bar": "1971-02-26 00:00 UTC",
+          "next_bar": "1971-03-31 00:00 UTC",
+          "gap": "33d",
+          "gap_minutes": 47520
+        },
+        {
+          "symbol": "XAGUSD",
+          "timeframe": "D1",
+          "previous_bar": "1972-04-28 00:00 UTC",
+          "next_bar": "1972-05-31 00:00 UTC",
+          "gap": "33d",
+          "gap_minutes": 47520
+        },
+        {
+          "symbol": "XAGUSD",
+          "timeframe": "D1",
+          "previous_bar": "1972-12-29 00:00 UTC",
+          "next_bar": "1973-01-31 00:00 UTC",
+          "gap": "33d",
+          "gap_minutes": 47520
+        },
+        {
+          "symbol": "XAGUSD",
+          "timeframe": "H1",
+          "previous_bar": "2026-06-19 20:00 UTC",
+          "next_bar": "2026-06-21 21:00 UTC",
+          "gap": "2d 1h",
+          "gap_minutes": 2940
+        },
+        {
+          "symbol": "XAGUSD",
+          "timeframe": "H1",
+          "previous_bar": "2026-06-26 20:00 UTC",
+          "next_bar": "2026-06-28 21:00 UTC",
+          "gap": "2d 1h",
+          "gap_minutes": 2940
+        },
+        {
+          "symbol": "XAGUSD",
+          "timeframe": "H1",
+          "previous_bar": "2026-07-03 20:00 UTC",
+          "next_bar": "2026-07-05 21:00 UTC",
+          "gap": "2d 1h",
+          "gap_minutes": 2940
+        },
+        {
+          "symbol": "XAGUSD",
+          "timeframe": "M30",
+          "previous_bar": "2026-06-19 20:30 UTC",
+          "next_bar": "2026-06-21 21:00 UTC",
+          "gap": "2d 30m",
+          "gap_minutes": 2910
+        },
+        {
+          "symbol": "XAGUSD",
+          "timeframe": "M30",
+          "previous_bar": "2026-06-26 20:30 UTC",
+          "next_bar": "2026-06-28 21:00 UTC",
+          "gap": "2d 30m",
+          "gap_minutes": 2910
+        },
+        {
+          "symbol": "XAGUSD",
+          "timeframe": "M30",
+          "previous_bar": "2026-07-03 20:30 UTC",
+          "next_bar": "2026-07-05 21:00 UTC",
+          "gap": "2d 30m",
+          "gap_minutes": 2910
+        },
+        {
+          "symbol": "XAGUSD",
+          "timeframe": "M5",
+          "previous_bar": "2025-10-09 03:55 UTC",
+          "next_bar": "2026-06-21 21:00 UTC",
+          "gap": "255d 17h 5m",
+          "gap_minutes": 368225
+        },
+        {
+          "symbol": "XAGUSD",
+          "timeframe": "M5",
+          "previous_bar": "2026-06-24 14:05 UTC",
+          "next_bar": "2026-07-01 04:00 UTC",
+          "gap": "6d 13h 55m",
+          "gap_minutes": 9475
+        },
+        {
+          "symbol": "XAGUSD",
+          "timeframe": "M5",
+          "previous_bar": "2025-08-15 20:50 UTC",
+          "next_bar": "2025-08-17 22:00 UTC",
+          "gap": "2d 1h 10m",
+          "gap_minutes": 2950
+        },
+        {
+          "symbol": "XAUUSD",
+          "timeframe": "D1",
+          "previous_bar": "1838-01-05 00:00 UTC",
+          "next_bar": "1841-01-05 00:00 UTC",
+          "gap": "1096d",
+          "gap_minutes": 1578240
+        },
+        {
+          "symbol": "XAUUSD",
+          "timeframe": "D1",
+          "previous_bar": "1860-01-05 00:00 UTC",
+          "next_bar": "1863-01-05 00:00 UTC",
+          "gap": "1096d",
+          "gap_minutes": 1578240
+        },
+        {
+          "symbol": "XAUUSD",
+          "timeframe": "D1",
+          "previous_bar": "1866-01-05 00:00 UTC",
+          "next_bar": "1869-01-05 00:00 UTC",
+          "gap": "1096d",
+          "gap_minutes": 1578240
+        },
+        {
+          "symbol": "XAUUSD",
+          "timeframe": "H1",
+          "previous_bar": "2023-12-22 21:00 UTC",
+          "next_bar": "2023-12-26 05:00 UTC",
+          "gap": "3d 8h",
+          "gap_minutes": 4800
+        },
+        {
+          "symbol": "XAUUSD",
+          "timeframe": "H1",
+          "previous_bar": "2023-12-29 21:00 UTC",
+          "next_bar": "2024-01-02 05:00 UTC",
+          "gap": "3d 8h",
+          "gap_minutes": 4800
+        },
+        {
+          "symbol": "XAUUSD",
+          "timeframe": "H1",
+          "previous_bar": "2023-04-06 20:00 UTC",
+          "next_bar": "2023-04-09 22:00 UTC",
+          "gap": "3d 2h",
+          "gap_minutes": 4440
+        },
+        {
+          "symbol": "XAUUSD",
+          "timeframe": "M30",
+          "previous_bar": "2024-03-28 20:30 UTC",
+          "next_bar": "2024-03-31 22:00 UTC",
+          "gap": "3d 1h 30m",
+          "gap_minutes": 4410
+        },
+        {
+          "symbol": "XAUUSD",
+          "timeframe": "M30",
+          "previous_bar": "2025-04-17 20:30 UTC",
+          "next_bar": "2025-04-20 22:00 UTC",
+          "gap": "3d 1h 30m",
+          "gap_minutes": 4410
+        },
+        {
+          "symbol": "XAUUSD",
+          "timeframe": "M30",
+          "previous_bar": "2026-04-03 15:00 UTC",
+          "next_bar": "2026-04-05 22:00 UTC",
+          "gap": "2d 7h",
+          "gap_minutes": 3300
+        },
+        {
+          "symbol": "XAUUSD",
+          "timeframe": "M5",
+          "previous_bar": "2026-04-03 15:20 UTC",
+          "next_bar": "2026-04-05 22:00 UTC",
+          "gap": "2d 6h 40m",
+          "gap_minutes": 3280
+        },
+        {
+          "symbol": "XAUUSD",
+          "timeframe": "M5",
+          "previous_bar": "2026-04-10 20:40 UTC",
+          "next_bar": "2026-04-12 22:00 UTC",
+          "gap": "2d 1h 20m",
+          "gap_minutes": 2960
+        },
+        {
+          "symbol": "XAUUSD",
+          "timeframe": "M5",
+          "previous_bar": "2026-04-17 20:40 UTC",
+          "next_bar": "2026-04-19 22:00 UTC",
+          "gap": "2d 1h 20m",
+          "gap_minutes": 2960
+        }
+      ]
+    }
+  },
+  "sources": [
+    {
+      "id": "estate_gap_query",
+      "label": "Fragarach II governed-estate SQLite snapshot",
+      "query": {
+        "engine": "sqlite",
+        "description": "Consecutive governed-bar continuity scan, joined to current lane validation summaries.",
+        "sql": "WITH intervals AS (SELECT asset,timeframe,open_time_utc AS next_timestamp,lag(open_time_utc) OVER (PARTITION BY asset,timeframe ORDER BY open_time_utc) AS previous_timestamp FROM bars) SELECT * FROM intervals;",
+        "tables_used": [
+          "bars",
+          "evidence_lanes",
+          "instrument_registrations",
+          "lane_state"
+        ],
+        "filters": [
+          "All current evidence lanes",
+          "Expected FX Friday-to-Sunday/Monday weekend closures excluded"
+        ],
+        "executed_at": "2026-07-24T12:00:15.771786Z",
+        "language": "sql"
+      }
+    }
+  ]
+}
