@@ -1748,7 +1748,18 @@ def _run_due_acquisitions_unlocked(
             # Explicit operator work supersedes an ordinary check for the
             # same lane; a single provider request owns that lane this cycle.
             for item in operator_due:
-                merged[f"{item['symbol']}:{item['timeframe']}"] = item
+                lane_id = f"{item['symbol']}:{item['timeframe']}"
+                claimed_normal = merged.get(lane_id)
+                if claimed_normal is not None and claimed_normal.get("work_class") == "NORMAL":
+                    # ``claim_due`` has already moved the normal register row
+                    # to RUNNING.  Preserve that ownership while the explicit
+                    # fetch takes precedence so its terminal path can settle
+                    # the claim instead of leaving a phantom RUNNING lane.
+                    item = {
+                        **item,
+                        "_register_claimed": True,
+                    }
+                merged[lane_id] = item
             due = list(merged.values())
     else:
         due = _due_lanes(database_path, observed, journal, catch_up=catch_up)
@@ -2787,9 +2798,21 @@ def _run_due_acquisitions_unlocked(
             # M5 history appear permanently "in progress".
             if outcome == "SUCCESS" or not time_triggered:
                 recorded.pop("operator_fetch_pending", None)
-        if time_triggered and work["work_class"] == "NORMAL" and update_register is not None:
+        if time_triggered and update_register is not None and (
+            work["work_class"] == "NORMAL" or bool(work.get("_register_claimed"))
+        ):
             try:
-                if outcome == "SUCCESS":
+                if work["work_class"] != "NORMAL":
+                    # The explicit fetch replaced an already claimed normal
+                    # boundary. It may be historical and therefore cannot
+                    # prove that boundary complete; make the original claim
+                    # immediately eligible for its own bounded check.
+                    update_register.retry(
+                        asset=str(symbol), timeframe=str(timeframe),
+                        reason="OPERATOR_FETCH_SUPERSEDED_NORMAL",
+                        at=observed, not_before=observed,
+                    )
+                elif outcome == "SUCCESS":
                     update_register.record_checked(
                         asset=str(symbol), timeframe=str(timeframe),
                         checked_boundary=str(work["scheduled_boundary"]), at=observed,

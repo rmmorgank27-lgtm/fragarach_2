@@ -218,6 +218,30 @@ def test_time_triggered_wake_dispatches_a_pending_operator_fetch(tmp_path: Path)
     assert lane["operator_fetch_pending"]["id"] == submitted["operation_id"]
 
 
+def test_operator_fetch_that_replaces_claimed_normal_work_settles_register_claim(tmp_path: Path) -> None:
+    database = _m5_lane(tmp_path)
+    journal = tmp_path / "scheduler.json"
+    register = LaneUpdateRegister(database)
+    register.audit_estate(at=NOW, reason="TEST")
+
+    submitted = run_operator_fetch(
+        database, symbol="AUDUSD", timeframe="M5", credential="fixture",
+        requested_mode="force", requested_start="2026-07-13", requested_end="2026-07-14",
+        reviewed_historical_range=True, journal_path=journal, at=NOW, defer_dispatch=True,
+    )
+    assert submitted["outcome"] == "QUEUED"
+
+    run_due_acquisitions(
+        database, at=NOW, credential="fixture", journal_path=journal,
+        acquirer=lambda _database, **_kwargs: {"inserted": 0, "corrected": 0},
+        time_triggered=True,
+    )
+
+    row = next(item for item in register.rows() if item["asset"] == "AUDUSD" and item["timeframe"] == "M5")
+    assert row["state"] == "RETRY"
+    assert row["last_outcome"] == "OPERATOR_FETCH_SUPERSEDED_NORMAL"
+
+
 def test_empty_intraday_lane_upgrades_an_operator_update_to_initial_history(tmp_path: Path) -> None:
     database = tmp_path / "authority.sqlite3"
     _create_lane(database, "AUDUSD", ["2026-07-13"])
