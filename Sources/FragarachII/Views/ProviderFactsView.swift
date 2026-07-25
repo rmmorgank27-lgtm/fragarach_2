@@ -17,6 +17,7 @@ struct ProviderFactsView: View {
                     }
                 }
                 if let facts = store.providerFacts {
+                    providerInventory(facts.providerInventory ?? [])
                     reconciliation(facts.reconciliation)
                     mappingSection("Resolved Automatically", mappings: facts.resolvedAutomatically, empty: "No automatic mappings have been recorded yet.")
                     reviewSection(facts.needsMaterialReview)
@@ -47,8 +48,8 @@ struct ProviderFactsView: View {
         GroupBox {
             HStack(alignment: .center, spacing: 16) {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text("Twelve Data Facts").font(.title2.bold())
-                    Text("Representation mappings are resolved once per instrument. Timeframe support is recorded separately.")
+                    Text("Provider Facts").font(.title2.bold())
+                    Text("Configured providers, approved routes, and Twelve Data representation facts.")
                         .foregroundStyle(.secondary)
                     if let revision=store.providerFacts?.revision { Text("Current provider facts revision \(revision)").font(.caption.monospaced()).foregroundStyle(.secondary) }
                 }
@@ -70,6 +71,35 @@ struct ProviderFactsView: View {
         return Label(state, systemImage: state == "Configured" ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
             .foregroundStyle(color)
             .help("Only the credential state is displayed. The credential is never included in provider facts.")
+    }
+
+    private func providerInventory(_ providers:[ProviderInventoryItem])->some View {
+        GroupBox("Configured Providers") {
+            VStack(alignment:.leading,spacing:10) {
+                if providers.isEmpty { Text("Provider inventory is loading.").foregroundStyle(.secondary) }
+                ForEach(providers) { provider in
+                    VStack(alignment:.leading,spacing:6) {
+                        HStack {
+                            Label(provider.provider.replacingOccurrences(of:"_",with:" "),systemImage:provider.enabled ? "checkmark.circle.fill":"pause.circle.fill")
+                                .foregroundStyle(provider.enabled ? .green:.secondary).font(.headline)
+                            Spacer()
+                            Text(provider.credentialRequirement == "Required" ? provider.credentialState : "Public access")
+                                .foregroundStyle(provider.credentialState == "Available" || provider.credentialRequirement == "Not required" ? .green:.secondary)
+                        }
+                        Facts([
+                            ("Rate budget","\(provider.operationalLimit) / \(provider.requestLimit) per \(provider.requestWindowSeconds)s · \(provider.concurrencyLimit) workers"),
+                            ("Approved routes","\(provider.approvedMappings) · \(provider.supportedTimeframes.joined(separator:", "))"),
+                            ("Markets",provider.supportedAssetClasses.joined(separator:", ")),
+                            ("Policy",provider.ratePolicyVerified ? "Verified" : "Needs review"),
+                        ])
+                        if provider.provider == "TWELVE_DATA" {
+                            Button("Configure & Validate Twelve Data") { showingCredential=true }
+                        }
+                    }.padding(.vertical,5)
+                    if provider.id != providers.last?.id { Divider() }
+                }
+            }.frame(maxWidth:.infinity,alignment:.leading).padding(.vertical,4)
+        }
     }
 
     @ViewBuilder private func reconciliation(_ value: ProviderFactsReconciliation?) -> some View {

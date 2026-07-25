@@ -29,7 +29,7 @@ POLICIES = {
     "MAXIMUM_CATCH_UP": {
         "label": "High", "minimum": 0.65, "maximum": 1.00,
         # Provider concurrency and rolling budgets remain the hard ceilings.
-        "batch": 16, "worker_cap": None, "catch_up_delay_seconds": 0.0,
+        "batch": 55, "worker_cap": None, "catch_up_delay_seconds": 0.0,
     },
 }
 

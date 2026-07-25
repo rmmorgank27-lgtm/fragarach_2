@@ -250,6 +250,35 @@ def provider_facts_snapshot(
     credential_state = "Invalid" if stored_credential_state == "Invalid" else "Configured" if credential else stored_credential_state
     if credential_state not in {"Configured", "Missing", "Invalid"}:
         credential_state = "Missing"
+    # Provider Facts began as a Twelve Data representation resolver.  The
+    # operational console also needs a governed inventory of every configured
+    # provider so public fallbacks are visible instead of looking absent.
+    from .acquisition_orchestrator import load_provider_profiles
+    from .credentials import CredentialAuthority, CredentialState
+    authority = CredentialAuthority()
+    inventory = []
+    for profile in load_provider_profiles():
+        resolution = authority.resolve(profile.provider)
+        requires_credential = profile.credential_environment is not None
+        access = (
+            resolution.state.value if requires_credential
+            else "Not required"
+        )
+        inventory.append({
+            "provider": profile.provider,
+            "enabled": profile.enabled,
+            "credential_requirement": "Required" if requires_credential else "Not required",
+            "credential_state": access,
+            "entitlement": profile.entitlement_state,
+            "request_limit": profile.request_limit,
+            "operational_limit": int(profile.operational_limit or profile.request_limit),
+            "request_window_seconds": profile.request_window_seconds,
+            "concurrency_limit": profile.concurrency_limit,
+            "approved_mappings": len(profile.mappings),
+            "supported_asset_classes": list(profile.supported_asset_classes),
+            "supported_timeframes": list(profile.supported_timeframes),
+            "rate_policy_verified": profile.rate_policy_verified,
+        })
     return {
         "contract": PROVIDER_FACTS_CONTRACT,
         "resolver_version": PROVIDER_FACTS_RESOLVER_VERSION,
@@ -259,6 +288,7 @@ def provider_facts_snapshot(
         ),
         "generated_at": datetime.now(UTC).isoformat(),
         "credential_state": credential_state,
+        "provider_inventory": inventory,
         "resolved_automatically": sorted(resolved, key=lambda item: str(item.get("canonical_symbol"))),
         "needs_material_review": sorted(reviews, key=lambda item: str(item.get("canonical_symbol"))),
         "credential_or_access_issue": None if credential_state == "Configured" else {

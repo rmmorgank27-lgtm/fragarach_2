@@ -68,7 +68,7 @@ def test_time_triggered_speed_modes_bound_workers_and_catch_up_delay() -> None:
 
     assert slow == {"claim_limit": 1, "worker_limit": 1, "catch_up_delay_seconds": 30.0}
     assert balanced == {"claim_limit": 4, "worker_limit": 4, "catch_up_delay_seconds": 1.0}
-    assert high == {"claim_limit": 16, "worker_limit": 4, "catch_up_delay_seconds": 0.0}
+    assert high == {"claim_limit": 55, "worker_limit": 4, "catch_up_delay_seconds": 0.0}
 
 
 def test_operator_fetch_is_first_and_reserves_capacity_during_backlog() -> None:

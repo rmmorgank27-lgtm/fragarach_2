@@ -9,9 +9,9 @@
       "credential_environment": "TWELVE_DATA_API_KEY",
       "entitlement_state": "AVAILABLE",
       "request_limit": 55,
-      "operational_limit": 50,
+      "operational_limit": 55,
       "request_window_seconds": 60,
-      "dispatch_interval_seconds": 1.2,
+      "dispatch_interval_seconds": 1.1,
       "endpoint_credit_costs": {
         "default": 1,
         "time_series": 1,
