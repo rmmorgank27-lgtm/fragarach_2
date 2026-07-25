@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 from .models import CalendarDefinition
-from .rules import good_friday
+from .rules import australian_equities_holidays,good_friday,uk_equities_holidays,us_equities_holidays
 
 
 def session_classification(
@@ -31,6 +31,12 @@ def session_classification(
         if (value.month, value.day) == (closure.month, closure.day):
             return False, None
     if "GOOD_FRIDAY" in definition.calculated_closures and value == good_friday(value.year):
+        return False, None
+    if "US_EQUITIES_HOLIDAYS" in definition.calculated_closures and value in us_equities_holidays(value.year):
+        return False, None
+    if "AUSTRALIAN_EQUITIES_HOLIDAYS" in definition.calculated_closures and value in australian_equities_holidays(value.year):
+        return False, None
+    if "UK_EQUITIES_HOLIDAYS" in definition.calculated_closures and value in uk_equities_holidays(value.year):
         return False, None
     return True, None
 

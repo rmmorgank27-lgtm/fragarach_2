@@ -18,6 +18,8 @@ from fragarach_ii.storage import open_read_only, registered_writer, transaction,
 from fragarach_ii.validation import validate_lane
 from fragarach_ii.fx_orientation import validate_direct_mapping
 from fragarach_ii.retirement import is_permanently_removed,is_retired
+from fragarach_ii.credentials import CredentialAuthority, CredentialState
+from fragarach_ii.twelve_data_credit import authority_for_credential, endpoint_credit_cost
 
 from .config import ProviderConfig, ProviderConfigurationError, load_provider_config
 from .http import (
@@ -39,9 +41,16 @@ Sleeper = Callable[[float], None]
 
 
 class AcquisitionError(RuntimeError):
-    def __init__(self, code: str, message: str, *, evidence_committed: bool = False) -> None:
+    def __init__(
+        self, code: str, message: str, *, evidence_committed: bool = False,
+        http_status: int | None = None, response_body: bytes | None = None,
+        retry_after: str | None = None,
+    ) -> None:
         self.code = code
         self.evidence_committed = evidence_committed
+        self.http_status = http_status
+        self.response_body = response_body
+        self.retry_after = retry_after
         super().__init__(message)
 
 
@@ -80,6 +89,7 @@ class AcquisitionResult:
     validation_outside_expected: int
     validation_result_checksum: str
     read_only_verification: bool
+    sqlite_write: dict[str, object]
     warnings: tuple[str, ...]
 
     def as_dict(self) -> dict[str, object]:
@@ -105,6 +115,11 @@ def acquire_twelve_data(
     before_ingest: Callable[[], None] | None = None,
     validator: Callable[..., object] = validate_lane,
     provider_symbol_override: str | None = None,
+    mapping_class: str | None = None,
+    defer_validation: bool = False,
+    allow_empty: bool = False,
+    progress: Callable[[str], None] | None = None,
+    credit_authority_managed: bool = False,
 ) -> AcquisitionResult:
     normalized_asset = asset.strip().upper()
     normalized_timeframe = timeframe.strip().upper()
@@ -126,7 +141,15 @@ def acquire_twelve_data(
         initialize_database(database_path)
         registration = registration_for_lane(database_path, normalized_asset, normalized_timeframe)
         asset_class=normalized_asset_class(database_path,normalized_asset,normalized_timeframe)
-        config=replace(config,timezone="UTC" if asset_class=="CRYPTO" else "America/New_York" if normalized_timeframe!="D1" else config.timezone)
+        if asset_class == "CRYPTO":
+            provider_timezone = "UTC"
+        elif asset_class == "US_EQUITIES":
+            provider_timezone = "America/New_York"
+        elif normalized_timeframe != "D1":
+            provider_timezone = "America/New_York"
+        else:
+            provider_timezone = config.timezone
+        config = replace(config, timezone=provider_timezone)
         if provider_symbol_override:
             provider_symbol = provider_symbol_override
         else:
@@ -151,9 +174,15 @@ def acquire_twelve_data(
             "request exceeds the 4,000-bar reviewed request ceiling",
         )
     request = _request(config, provider_symbol, start, end, outputsize)
-    response = _acquire_response(
-        transport or BoundedHttpsTransport(), request, credential, config, sleeper
+    authority = None if credit_authority_managed else authority_for_credential(
+        credential, clock=clock, sleeper=sleeper
     )
+    response = _acquire_response(
+        transport or BoundedHttpsTransport(), request, credential, config, sleeper,
+        authority=authority, endpoint="time_series",
+    )
+    _record_authority_response(credential, CredentialState.AVAILABLE, "Twelve Data HTTP response", "Accepted", response.status)
+    if progress:progress("validating")
     received_at = (clock or (lambda: datetime.now(UTC)))().astimezone(UTC).isoformat()
     raw_block_id, checksum = evidence_identity(response.body)
     try:
@@ -166,11 +195,17 @@ def acquire_twelve_data(
             raw_block_id=raw_block_id,
             received_at=received_at,
             timeframe=normalized_timeframe,asset_class=asset_class,observed_at=datetime.fromisoformat(received_at),
+            allow_empty=allow_empty,
         )
     except ProviderPayloadError as error:
-        raise AcquisitionError(error.code, str(error)) from error
+        if error.code == "AUTHENTICATION_FAILED":
+            _record_authority_response(credential, CredentialState.INVALID, "Twelve Data response payload", "Authentication Failed", response.status)
+        raise AcquisitionError(
+            error.code, str(error), http_status=response.status, response_body=response.body
+        ) from error
     if before_ingest is not None:
         before_ingest()
+    if progress:progress("ingesting")
     evidence = RawEvidence(
         raw_block_id=raw_block_id,
         checksum=checksum,
@@ -197,32 +232,36 @@ def acquire_twelve_data(
             "provider_contract": config.provider_contract,
             "provider_symbol": provider_symbol,
             "mapping_state": "CONFIRMED_BY_VALID_EVIDENCE",
+            "mapping_class": mapping_class or "EXACT_REPRESENTATION",
             "response_bytes": len(response.body),
             "through_date": through_date,
             "timeframe": normalized_timeframe,
         },
         preserve_rejected_evidence=True,
     )
-    try:
-        validation = validator(
-            database_path,
-            symbol=normalized_asset,
-            timeframe=normalized_timeframe,
-            through_date=through_date,
-            persist=True,
-            clock=clock,
-        )
-    except BaseException as error:
-        _clear_validation_summary(database_path, normalized_asset, normalized_timeframe)
-        raise AcquisitionError(
-            "POST_INGEST_VALIDATION_FAILED",
-            f"evidence committed but validation failed: {type(error).__name__}",
-            evidence_committed=True,
-        ) from error
+    validation = None
+    if not defer_validation and batch.bars:
+        try:
+            validation = validator(
+                database_path,
+                symbol=normalized_asset,
+                timeframe=normalized_timeframe,
+                through_date=through_date,
+                persist=True,
+                clock=clock,
+            )
+        except BaseException as error:
+            _clear_validation_summary(database_path, normalized_asset, normalized_timeframe)
+            raise AcquisitionError(
+                "POST_INGEST_VALIDATION_FAILED",
+                f"evidence committed but validation failed: {type(error).__name__}",
+                evidence_committed=True,
+            ) from error
     verified = _verify_committed(
-        database_path, ingestion, response.body, len(batch.bars), normalized_asset,normalized_timeframe
+        database_path, ingestion, response.body, len(batch.bars), normalized_asset,normalized_timeframe,
+        require_validation=not defer_validation and bool(batch.bars),
     )
-    validation_data = validation.as_dict()  # type: ignore[attr-defined]
+    validation_data = validation.as_dict() if validation is not None else {}  # type: ignore[attr-defined]
     return AcquisitionResult(
         provider_id=config.provider_id,
         provider_contract=config.provider_contract,
@@ -249,14 +288,15 @@ def acquire_twelve_data(
         raw_block_id=ingestion.raw_block_id,
         raw_block_reused=ingestion.raw_block_reused,
         canonical_high_watermark=ingestion.latest,
-        validation_calendar_id=validation_data["calendar_id"],
-        validation_boundary=validation_data.get("through_date",validation_data.get("boundary_utc")),
-        validation_expected=validation_data.get("expected_session_count",validation_data.get("expected_interval_count")),
-        validation_present_expected=validation_data.get("present_expected_session_count",validation_data.get("present_expected_interval_count")),
-        validation_missing_expected=validation_data.get("missing_expected_session_count",validation_data.get("missing_expected_interval_count")),
-        validation_outside_expected=validation_data.get("outside_expected_session_count",validation_data.get("outside_expected_interval_count")),
-        validation_result_checksum=validation_data["result_checksum"],
+        validation_calendar_id=validation_data.get("calendar_id","DEFERRED"),
+        validation_boundary=validation_data.get("through_date",validation_data.get("boundary_utc",through_date)),
+        validation_expected=validation_data.get("expected_session_count",validation_data.get("expected_interval_count",0)),
+        validation_present_expected=validation_data.get("present_expected_session_count",validation_data.get("present_expected_interval_count",0)),
+        validation_missing_expected=validation_data.get("missing_expected_session_count",validation_data.get("missing_expected_interval_count",0)),
+        validation_outside_expected=validation_data.get("outside_expected_session_count",validation_data.get("outside_expected_interval_count",0)),
+        validation_result_checksum=validation_data.get("result_checksum","DEFERRED"),
         read_only_verification=verified,
+        sqlite_write=ingestion.sqlite_write,
         warnings=(f"{len(batch.rejections)} row-local provider observation(s) quarantined; valid observations were preserved.",) if batch.rejections else (),
     )
 
@@ -275,16 +315,21 @@ def _request(
     end: date,
     outputsize: int,
 ) -> HttpRequest:
+    # A date-only D1 start/end pair for the same day is interpreted as an empty
+    # timestamp range by Twelve Data. Cover the complete requested day for every
+    # interval so the reviewed canonical boundary is actually included.
+    start_bound = f"{start.isoformat()}T00:00:00"
+    end_bound = f"{end.isoformat()}T23:59:59"
     parameters = [
-        ("end_date", end.isoformat()),
         ("format", "JSON"),
         ("interval", config.interval),
         ("order", config.order),
-        ("outputsize", str(outputsize)),
-        ("start_date", start.isoformat()),
-        ("symbol", symbol),
-        ("timezone", config.timezone),
     ]
+    if config.interval == "1day" and start == end:
+        parameters.append(("outputsize", "5"))
+    else:
+        parameters.extend((("start_date", start_bound), ("end_date", end_bound)))
+    parameters.extend((("symbol", symbol), ("timezone", config.timezone)))
     return HttpRequest(
         host=config.provider_host,
         target=f"{config.endpoint_path}?{urlencode(parameters)}",
@@ -298,39 +343,92 @@ def _acquire_response(
     credential: str,
     config: ProviderConfig,
     sleeper: Sleeper,
+    *,
+    authority=None,
+    endpoint: str = "time_series",
 ) -> HttpResponse:
-    retryable_statuses = {429, 500, 502, 503, 504}
-    for attempt in range(config.max_attempts):
-        try:
-            response = transport.send(request, credential, config)
-        except ResponseTooLarge as error:
-            raise AcquisitionError("RESPONSE_TOO_LARGE", str(error)) from error
-        except (TimeoutError, socket.timeout, OSError, http.client.HTTPException) as error:
-            if attempt + 1 == config.max_attempts:
-                raise AcquisitionError(
-                    "RETRY_EXHAUSTED", f"transport failed after {config.max_attempts} attempts"
-                ) from error
-            sleeper(config.retry_backoff_seconds[attempt])
-            continue
-        if response.host != config.provider_host:
-            raise AcquisitionError("UNEXPECTED_HOST", "response host is not configured provider")
-        if 300 <= response.status < 400:
-            raise AcquisitionError("UNEXPECTED_REDIRECT", "provider redirect is not accepted")
-        if response.status in retryable_statuses:
-            if attempt + 1 == config.max_attempts:
-                code = "RATE_LIMIT" if response.status == 429 else "RETRY_EXHAUSTED"
-                raise AcquisitionError(code, f"provider HTTP {response.status} after bounded retries")
-            sleeper(config.retry_backoff_seconds[attempt])
-            continue
-        if response.status != 200:
-            raise AcquisitionError("HTTP_ERROR", f"provider HTTP status {response.status}")
-        media_type = response.content_type.split(";", 1)[0].strip().lower()
-        if media_type != "application/json":
-            raise AcquisitionError("UNSUPPORTED_MEDIA_TYPE", "provider response is not JSON")
-        if len(response.body) > config.max_response_bytes:
-            raise AcquisitionError("RESPONSE_TOO_LARGE", "response exceeds configured byte limit")
-        return response
-    raise AssertionError("bounded retry loop did not terminate")
+    if authority is not None:
+        reservation = authority.reserve(endpoint_credit_cost(endpoint), endpoint=endpoint)
+        if not reservation["eligible"]:
+            raise AcquisitionError(
+                "TWELVEDATA_CREDIT_WINDOW_EXHAUSTED",
+                f"Twelve Data credit window unavailable until {reservation.get('next_available')}",
+            )
+        authority.dispatch(str(reservation["reservation_id"]), endpoint_credit_cost(endpoint))
+    try:
+        response = transport.send(request, credential, config)
+    except ResponseTooLarge as error:
+        raise AcquisitionError("TWELVEDATA_INVALID_RESPONSE", str(error)) from error
+    except (TimeoutError, socket.timeout, OSError, http.client.HTTPException) as error:
+        raise AcquisitionError("TWELVEDATA_TRANSPORT_FAILURE", str(error)) from error
+    if response.host != config.provider_host:
+        raise AcquisitionError("TWELVEDATA_INVALID_RESPONSE", "response host is not configured provider")
+    if response.status == 429:
+        retry_after = response.header("retry-after")
+        if authority is not None:
+            authority.record_429(
+                response_body=response.body, retry_after=retry_after, endpoint=endpoint,
+            )
+        raise AcquisitionError(
+            "TWELVEDATA_RATE_LIMIT_429", "Twelve Data HTTP 429",
+            http_status=429, response_body=response.body, retry_after=retry_after,
+        )
+    if response.status >= 500:
+        raise AcquisitionError(
+            "TWELVEDATA_UPSTREAM_5XX", f"Twelve Data HTTP {response.status}",
+            http_status=response.status, response_body=response.body,
+        )
+    if 300 <= response.status < 400:
+        raise AcquisitionError(
+            "TWELVEDATA_INVALID_RESPONSE", "provider redirect is not accepted",
+            http_status=response.status, response_body=response.body,
+        )
+    if response.status in {401, 403}:
+        _record_authority_response(credential, CredentialState.INVALID, "Twelve Data HTTP response", "Authentication Failed", response.status)
+        raise AcquisitionError(
+            "AUTHENTICATION_FAILED", f"Twelve Data HTTP {response.status}",
+            http_status=response.status, response_body=response.body,
+        )
+    if response.status != 200:
+        raise AcquisitionError(
+            "TWELVEDATA_INVALID_RESPONSE", f"provider HTTP status {response.status}",
+            http_status=response.status, response_body=response.body,
+        )
+    media_type = response.content_type.split(";", 1)[0].strip().lower()
+    if media_type != "application/json":
+        raise AcquisitionError(
+            "TWELVEDATA_INVALID_RESPONSE", "provider response is not JSON",
+            http_status=response.status, response_body=response.body,
+        )
+    if len(response.body) > config.max_response_bytes:
+        raise AcquisitionError(
+            "TWELVEDATA_INVALID_RESPONSE", "response exceeds configured byte limit",
+            http_status=response.status, response_body=response.body,
+        )
+    return response
+
+
+def _record_authority_response(
+    credential: str,
+    state: CredentialState,
+    source: str,
+    provider_response_state: str,
+    response_code: int,
+) -> None:
+    """Update authority metadata only when the request used its canonical key."""
+    authority = CredentialAuthority()
+    current = authority.resolve("TWELVE_DATA")
+    if current.credential != credential:
+        return
+    try:
+        authority.record_validation(
+            "TWELVE_DATA", credential_state=state, validation_source=source,
+            provider_response_state=provider_response_state,
+            provider_response_code=response_code,
+        )
+    except OSError:
+        # Provider response remains factual even if non-secret metadata cannot persist.
+        pass
 
 
 def _verify_committed(
@@ -340,6 +438,8 @@ def _verify_committed(
     staged_count: int,
     asset: str,
     timeframe: str,
+    *,
+    require_validation: bool = True,
 ) -> bool:
     connection = open_read_only(database_path)
     try:
@@ -363,8 +463,7 @@ def _verify_committed(
             raw == (body, len(body))
             and run == ("committed", ingestion.raw_block_id)
             and provenance == staged_count
-            and lane is not None
-            and lane[0] is not None
+            and (not require_validation or (lane is not None and lane[0] is not None))
         )
     finally:
         connection.close()

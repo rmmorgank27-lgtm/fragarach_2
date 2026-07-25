@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import tempfile
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fragarach_ii.authority_service import serve_historical_authority
@@ -11,13 +12,15 @@ from tests.validation.test_d1_session_validation import _create_lane
 
 
 class TruthEngineTests(unittest.TestCase):
+    AS_OF = datetime(2026, 7, 14, 3, 0, tzinfo=UTC)
+
     def test_truth_state_is_deterministic_explainable_and_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "authority.sqlite3"
             _create_lane(database, "AUDUSD", ["2026-07-09", "2026-07-10"])
             before = database.read_bytes()
-            first = truth_state_for_lane(database, symbol="AUDUSD", timeframe="D1")
-            second = truth_state_for_lane(database, symbol="AUDUSD", timeframe="D1")
+            first = truth_state_for_lane(database, symbol="AUDUSD", timeframe="D1", as_of=self.AS_OF)
+            second = truth_state_for_lane(database, symbol="AUDUSD", timeframe="D1", as_of=self.AS_OF)
             self.assertEqual(first, second)
             self.assertEqual(first["contract"], TRUTH_STATE_CONTRACT)
             self.assertEqual(set(first["explanation"]["components"]), {"authority", "integrity", "freshness", "historical_depth", "continuity", "provider"})
@@ -29,9 +32,10 @@ class TruthEngineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "authority.sqlite3"
             _create_lane(database, "AUDUSD", ["2026-07-10"])
-            state = truth_state_for_lane(database, symbol="AUDUSD", timeframe="D1")
+            state = truth_state_for_lane(database, symbol="AUDUSD", timeframe="D1", as_of=self.AS_OF)
             self.assertIsNone(state["provider_score"])
-            self.assertIsNone(state["freshness_score"])
+            self.assertEqual(state["freshness_score"], 0)
+            self.assertEqual(state["freshness"]["state"], "Behind")
             self.assertIsNone(state["validation_score"])
             self.assertEqual(state["provider_summary"]["confidence"], "NOT_MEASURED")
             self.assertEqual(state["epoch"], "UNKNOWN")
@@ -41,10 +45,11 @@ class TruthEngineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "authority.sqlite3"
             _create_lane(database, "AUDUSD", ["2026-07-09", "2026-07-10"])
-            complete = serve_historical_authority(database, symbol="AUDUSD", timeframe="D1")
+            clock = lambda: self.AS_OF
+            complete = serve_historical_authority(database, symbol="AUDUSD", timeframe="D1", clock=clock)
             latest = complete["historical_bars"][-1]["open_time_utc"]
-            sliced = serve_historical_authority(database, symbol="AUDUSD", timeframe="D1", start_time_utc=latest)
-            engine = truth_state_for_lane(database, symbol="AUDUSD", timeframe="D1")
+            sliced = serve_historical_authority(database, symbol="AUDUSD", timeframe="D1", start_time_utc=latest, clock=clock)
+            engine = truth_state_for_lane(database, symbol="AUDUSD", timeframe="D1", as_of=self.AS_OF, authority_generated=self.AS_OF.isoformat())
             self.assertEqual(complete["truth_state"], engine)
             self.assertEqual(sliced["truth_state"], engine)
             self.assertEqual(complete["truth_score"]["score"], engine["truth_score"])

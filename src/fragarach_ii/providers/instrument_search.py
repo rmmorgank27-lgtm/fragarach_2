@@ -6,6 +6,7 @@ from urllib.parse import urlencode
 from fragarach_ii.storage import Alias, RegistrationCandidate, open_read_only
 from .config import load_provider_config
 from .http import BoundedHttpsTransport, HttpRequest, HttpTransport
+from fragarach_ii.twelve_data_credit import credited_send
 
 class InstrumentSearchError(RuntimeError):
     def __init__(self, code: str, message: str) -> None: self.code=code;super().__init__(message)
@@ -26,7 +27,8 @@ def search_instrument(database_path: str, query: str, *, credential: str | None,
         candidate,status=existing;return InstrumentSearchResult("fragarach_ii.instrument_search_result.v1",normalized,True,True,candidate,status)
     if not credential: raise InstrumentSearchError("PROVIDER_UNAVAILABLE","Provider authentication is unavailable")
     config=load_provider_config();request=HttpRequest(config.provider_host,"/symbol_search?"+urlencode({"symbol":normalized,"outputsize":30}),"Fragarach-II/1 SPEC-006")
-    response=(transport or BoundedHttpsTransport()).send(request,credential,config)
+    network=transport or BoundedHttpsTransport()
+    response=credited_send(credential,endpoint="symbol_search",send=lambda:network.send(request,credential,config))
     if response.status!=200: raise InstrumentSearchError("PROVIDER_UNAVAILABLE",f"Provider returned HTTP {response.status}")
     try: payload=json.loads(response.body)
     except (UnicodeDecodeError,json.JSONDecodeError) as error: raise InstrumentSearchError("PROVIDER_UNAVAILABLE","Provider returned malformed data") from error
@@ -62,7 +64,7 @@ def _candidate(row: object):
     if not symbol or not name or not currency or not provider_type:return None
     compact=re.sub(r"[^A-Z0-9]","",symbol)
     if provider_type=="Physical Currency":asset_class,representation,instrument_type,calendar,exchange="FX","FX_SPOT_PAIR","FX_SPOT_PAIR","FX_D1_V1","OTC"
-    elif provider_type=="Digital Currency":asset_class,representation,instrument_type,calendar="CRYPTO","CRYPTO_SPOT_PAIR","CRYPTO_SPOT_PAIR","CRYPTO_D1_V1"
+    elif provider_type in {"Digital Currency","Cryptocurrency","Crypto"}:asset_class,representation,instrument_type,calendar="CRYPTO","CRYPTO_SPOT_PAIR","CRYPTO_SPOT_PAIR","CRYPTO_D1_V1"
     elif provider_type=="Precious Metal":asset_class,representation,instrument_type,calendar,exchange="METALS","SPOT","PRECIOUS_METAL_SPOT_PAIR","METALS_D1_V1","OTC"
     else:raise InstrumentSearchError("CALENDAR_UNAVAILABLE",provider_type)
     aliases=()

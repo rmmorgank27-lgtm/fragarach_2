@@ -1,4 +1,4 @@
-"""Deterministic, read-only SPEC-009B operational Truth Engine."""
+"""Read-only SPEC-009B operational Truth Engine."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .freshness import assess_lane_freshness, authority_revision_for_lane, normalized_utc
 from .storage import open_read_only
 from .retirement import is_permanently_removed,is_retired
 
@@ -35,7 +36,12 @@ class TruthEngineError(RuntimeError):
 
 
 def truth_state_for_lane(
-    database_path: str | Path, *, symbol: str, timeframe: str
+    database_path: str | Path,
+    *,
+    symbol: str,
+    timeframe: str,
+    as_of: datetime | None = None,
+    authority_generated: str | None = None,
 ) -> dict[str, object]:
     """Calculate TruthState from persisted authority for one canonical lane."""
 
@@ -71,7 +77,7 @@ def truth_state_for_lane(
         validation = json.loads(state_row[0]) if state_row and state_row[0] else None
         ledger = connection.execute(
             """
-            SELECT canonical_payload FROM authority_events
+            SELECT authority_event_id,canonical_payload FROM authority_events
             WHERE entity_kind='EVIDENCE_LANE'
               AND (json_extract(canonical_payload,'$.body.legacy_key.asset')=? OR json_extract(canonical_payload,'$.body.asset')=?)
               AND (json_extract(canonical_payload,'$.body.legacy_key.timeframe')=? OR json_extract(canonical_payload,'$.body.timeframe')=?)
@@ -79,7 +85,26 @@ def truth_state_for_lane(
             """,
             (symbol,symbol,timeframe,timeframe),
         ).fetchone()
-        return _calculate(symbol, timeframe, registration, range_row, validation, ledger)
+        freshness = assess_lane_freshness(
+            connection,
+            symbol=symbol,
+            timeframe=timeframe,
+            as_of=normalized_utc(as_of),
+        )
+        authority_revision = authority_revision_for_lane(
+            connection, symbol=symbol, timeframe=timeframe
+        )
+        return _calculate(
+            symbol,
+            timeframe,
+            registration,
+            range_row,
+            validation,
+            ledger,
+            freshness,
+            authority_revision,
+            authority_generated,
+        )
     finally:
         connection.close()
 
@@ -102,9 +127,80 @@ def truth_states(database_path: str | Path) -> list[dict[str, object]]:
     return [truth_state_for_lane(database_path, symbol=row[0], timeframe=row[1]) for row in lanes]
 
 
-def _calculate(symbol, timeframe, registration, range_row, validation, ledger):
+def truth_state_from_persisted_facts(
+    *,
+    symbol: str,
+    timeframe: str,
+    registration: tuple[object, object, object, object],
+    range_row: tuple[int, int, int, int],
+    validation: dict[str, object] | None,
+    ledger_bound: bool,
+    freshness: dict[str, object],
+    authority_revision: str,
+    authority_generated: str | None = None,
+) -> dict[str, object]:
+    """Build TruthState from an already-indexed Estate projection row.
+
+    Estate reads use this to avoid reopening SQLite and repeating the lane
+    freshness/revision work that has already been performed for the same
+    authoritative snapshot.  The single-lane public API remains unchanged.
+    """
+    return _calculate(
+        symbol, timeframe, registration, range_row, validation,
+        ("ESTATE_PROJECTION",) if ledger_bound else None, freshness,
+        authority_revision, authority_generated,
+    )
+
+
+def _calculate(
+    symbol,
+    timeframe,
+    registration,
+    range_row,
+    validation,
+    ledger,
+    freshness=None,
+    authority_revision="UNPUBLISHED_TEST_AUTHORITY",
+    authority_generated=None,
+):
     row_count, earliest, latest, latest_close = range_row
-    caodt = _iso_utc(latest if timeframe=="D1" else latest_close)
+    if freshness is None:
+        intraday_validation = bool(
+            validation
+            and validation.get("format")
+            == "fragarach_ii.lane_validation_summary.v2"
+        )
+        presence_key = (
+            "latest_expected_closed_interval_present"
+            if intraday_validation
+            else "latest_expected_session_present"
+        )
+        expected_key = (
+            "latest_expected_closed_interval_end_utc"
+            if intraday_validation
+            else "latest_expected_session"
+        )
+        freshness = {
+            "state": (
+                "Current"
+                if validation and validation.get(presence_key)
+                else "Behind"
+                if validation
+                else "Unavailable"
+            ),
+            "latest_canonical_observation": _iso_utc(
+                latest if timeframe == "D1" else latest_close
+            ),
+            "expected_latest": validation.get(expected_key) if validation else None,
+            "reason_code": (
+                "LATEST_CANONICAL_OBSERVATION_AT_OR_AHEAD_OF_EXPECTED_LATEST"
+                if validation and validation.get(presence_key)
+                else "LATEST_CANONICAL_OBSERVATION_BEHIND_EXPECTED_LATEST"
+                if validation
+                else "NOT_MEASURED"
+            ),
+        }
+    caodt = freshness["latest_canonical_observation"]
     authority_score = 100 if registration[3] == "REGISTERED_WITH_EVIDENCE" and ledger else 90 if registration[3] == "REGISTERED_WITH_EVIDENCE" else 75
     authority_basis = f"{registration[3]};" + ("LEDGER_BOUND" if ledger else "LEDGER_BINDING_NOT_PRESENT")
     validation_state, integrity_score = _integrity(validation)
@@ -116,10 +212,15 @@ def _calculate(symbol, timeframe, registration, range_row, validation, ledger):
     # Retained as a compatibility alias for accepted v1 consumers. Coverage is
     # no longer a separately weighted Truth component.
     coverage_score = round(100 * present / expected) if expected else None
-    freshness_key="latest_expected_closed_interval_present" if intraday else "latest_expected_session_present"
-    freshness_score = 100 if validation and validation.get(freshness_key) else (0 if validation else None)
+    freshness_score = (
+        100
+        if freshness["state"] == "Current"
+        else 0
+        if freshness["state"] == "Behind"
+        else None
+    )
     depth_score, depth_basis = _historical_depth(timeframe, earliest, latest)
-    gap_classification, gap_impact = _gaps(validation)
+    gap_classification, gap_impact = _gaps(validation, freshness)
     provider_summary = {
         "provider": registration[0],
         "provider_contract": registration[1] if timeframe=="D1" else f"TWELVE_DATA_TIME_SERIES_{timeframe}_V1",
@@ -130,7 +231,7 @@ def _calculate(symbol, timeframe, registration, range_row, validation, ledger):
     }
     components: dict[str, dict[str, object]] = {
         "authority": {"score": authority_score, "basis": authority_basis},
-        "freshness": {"score": freshness_score, "basis": "LATEST_EXPECTED_SESSION_PRESENT" if freshness_score == 100 else "LATEST_EXPECTED_SESSION_NOT_CONFIRMED" if validation else "NOT_MEASURED"},
+        "freshness": {"score": freshness_score, "basis": freshness["reason_code"]},
         "integrity": {"score": integrity_score, "basis": validation_state},
         "historical_depth": {"score": depth_score, "basis": depth_basis},
         "continuity": {"score": continuity_score, "basis": f"{missing} missing of {expected} expected sessions" if expected else "NOT_MEASURED"},
@@ -149,8 +250,12 @@ def _calculate(symbol, timeframe, registration, range_row, validation, ledger):
     if truth_score == 100 and any(score < 100 for score in measured.values()):
         truth_score = 99
     state = "GREEN" if truth_score >= 80 else "AMBER" if truth_score >= 50 else "RED"
+    if freshness.get("severity") == "CRITICAL":
+        state = "RED"
+    elif freshness.get("state") == "Behind" and state == "GREEN":
+        state = "AMBER"
     limitations = [name.upper() + "_NOT_MEASURED" for name, item in components.items() if item["score"] is None]
-    return {
+    result = {
         "contract": TRUTH_STATE_CONTRACT,
         "engine_version": TRUTH_ENGINE_VERSION,
         "symbol": symbol,
@@ -165,15 +270,32 @@ def _calculate(symbol, timeframe, registration, range_row, validation, ledger):
         "validation_score": integrity_score,
         "provider_score": None,
         "authority_state": state,
+        "evidence_integrity": {
+            "state": "Healthy" if validation_state == "PASS" else "Attention" if validation_state == "WARNING" else "Limited",
+            "score": integrity_score,
+        },
+        "freshness_dimension": {
+            "state": freshness.get("severity"),
+            "label": freshness.get("operational_state", freshness.get("state")),
+            "lag": freshness.get("lag"),
+        },
+        "overall_operational_state": (
+            "Critical" if state == "RED" else "Attention" if state == "AMBER" else "Healthy"
+        ),
+        "operational_state_label": f"{'Valid' if validation_state == 'PASS' else 'Incomplete'} · {freshness.get('operational_state', freshness.get('state'))}",
         "validation_state": validation_state,
         "caodt": caodt,
+        "latest_canonical_observation": caodt,
+        "authority_revision": authority_revision,
+        "freshness": freshness,
+        "validation": {"state": validation_state, "summary": validation},
         "gap_classification": gap_classification,
         "gap_impact": gap_impact,
         "coverage": {
             "earliest_bar": _iso_utc(earliest),
             "latest_bar": caodt,
             "row_count": row_count,
-            "expected_range": {"start": _iso_utc(earliest), "end": validation.get("latest_expected_closed_interval_end_utc" if intraday else "latest_expected_session") if validation else None},
+            "expected_range": {"start": _iso_utc(earliest), "end": freshness["expected_latest"]},
             "available_range": {"start": _iso_utc(earliest), "end": caodt},
             "expected_session_count": expected,
             "available_expected_session_count": present,
@@ -192,6 +314,9 @@ def _calculate(symbol, timeframe, registration, range_row, validation, ledger):
             "limitations": limitations,
         },
     }
+    if authority_generated is not None:
+        result["authority_generated"] = authority_generated
+    return result
 
 
 def _integrity(validation: dict[str, Any] | None) -> tuple[str, int | None]:
@@ -234,7 +359,11 @@ def _historical_depth(timeframe: str, earliest: int, latest: int) -> tuple[int, 
     return score, basis
 
 
-def _gaps(validation: dict[str, Any] | None) -> tuple[str, str]:
+def _gaps(
+    validation: dict[str, Any] | None, freshness: dict[str, object]
+) -> tuple[str, str]:
+    if freshness["state"] == "Behind":
+        return "CURRENT", "HIGH"
     if validation is None:
         return "NOT_MEASURED", "HIGH"
     missing = validation.get("missing_expected_interval_count",validation.get("missing_expected_session_count", 0))

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 from datetime import UTC, datetime
 
 from fragarach_ii.ingestion.validation import (
@@ -22,7 +23,15 @@ from fragarach_ii.validation.intraday_profiles import (
 
 REQUIRED_FIELDS = frozenset({"timestamp", "open", "high", "low", "close"})
 OPTIONAL_FIELDS = frozenset({"volume", "symbol", "timeframe"})
-HEADER_ALIASES = {"time": "timestamp"}
+PROVENANCE_FIELDS = frozenset({
+    "source_event_id",
+    "ingest_run_id",
+    "raw_symbol",
+    "source_exchange_prefix",
+    "raw_timeframe",
+})
+HEADER_ALIASES = {"time": "timestamp", "timestamp_utc": "timestamp"}
+_SLASH_D1_DATE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})$")
 
 
 def stage_csv_bytes(
@@ -35,6 +44,7 @@ def stage_csv_bytes(
     received_at: str,
     asset_class: str | None = None,
     source_timezone: str | None = None,
+    d1_date_format: str = "AUTO",
 ) -> StagingBatch:
     try:
         text = payload.decode("utf-8-sig")
@@ -56,17 +66,25 @@ def stage_csv_bytes(
             return _file_rejection(
                 "MISSING_COLUMNS", f"required columns missing: {', '.join(missing)}"
             )
-        unsupported = sorted(set(normalized_headers) - REQUIRED_FIELDS - OPTIONAL_FIELDS)
+        unsupported = sorted(
+            set(normalized_headers) - REQUIRED_FIELDS - OPTIONAL_FIELDS - PROVENANCE_FIELDS
+        )
         if unsupported:
             return _file_rejection(
                 "UNSUPPORTED_COLUMNS", f"unsupported columns: {', '.join(unsupported)}"
             )
         reader.fieldnames = normalized_headers
 
+        rows = list(reader)
+        effective_d1_date_format = _resolve_d1_date_format(
+            rows,
+            timeframe=timeframe,
+            requested=d1_date_format,
+        )
         bars = []
         rejections: list[StagingRejection] = []
         source_rows = 0
-        for source_row_number, fields in enumerate(reader, start=2):
+        for source_row_number, fields in enumerate(rows, start=2):
             source_rows += 1
             if None in fields:
                 rejections.append(
@@ -88,6 +106,7 @@ def stage_csv_bytes(
                         source_row_number=source_row_number,
                         received_at=received_at,
                         source_timezone=source_timezone,
+                        d1_date_format=effective_d1_date_format,
                     )
                 if bar.timeframe != "D1":
                     if asset_class is None:
@@ -140,6 +159,27 @@ def stage_csv_bytes(
         duplicate_identical=identical,
         duplicate_conflicting=conflicting,
     )
+
+
+def _resolve_d1_date_format(
+    rows: list[dict[str | None, str | None]], *, timeframe: str | None, requested: str
+) -> str:
+    """Infer a consistent D1 slash-date order only when the file proves it."""
+    normalized = requested.strip().upper().replace("-", "_")
+    if normalized != "AUTO" or (timeframe or "").strip().upper() != "D1":
+        return normalized
+    detected: set[str] = set()
+    for row in rows:
+        value = (row.get("timestamp") or "").strip()
+        match = _SLASH_D1_DATE.fullmatch(value)
+        if match is None:
+            continue
+        first, second, _ = (int(part) for part in match.groups())
+        if first > 12:
+            detected.add("DAY_FIRST")
+        if second > 12:
+            detected.add("MONTH_FIRST")
+    return detected.pop() if len(detected) == 1 else normalized
 
 
 def _file_rejection(code: str, message: str) -> StagingBatch:

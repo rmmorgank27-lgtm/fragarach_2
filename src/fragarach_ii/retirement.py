@@ -30,6 +30,8 @@ def is_permanently_removed(database_path,asset,timeframe=None):
 def reactivate_instrument(database_path:str|Path,asset:str,*,reactivated_at:str|None=None):
     symbol=asset.strip().upper();retired=retirement_state(database_path,symbol)
     if not retired:raise RetirementError("INSTRUMENT_NOT_RETIRED",symbol)
+    if retired.get("reason")=="INCORRECT_INSTRUMENT_IDENTITY" or retired.get("lifecycle_state")=="RETIRED_INCORRECT_IDENTITY":
+        raise RetirementError("INCORRECT_IDENTITY_REACTIVATION_PROHIBITED","Keep this registration retired and register the correct instrument separately.")
     lanes=tuple(retired["selected_lanes"]);observed=reactivated_at or datetime.now(UTC).isoformat()
     reactivation_id=hashlib.sha256(json.dumps([symbol,lanes,retired["retirement_id"],observed],separators=(",",":")).encode()).hexdigest()
     results=[]
@@ -40,6 +42,14 @@ def reactivate_instrument(database_path:str|Path,asset:str,*,reactivated_at:str|
             body={"reactivation_id":reactivation_id,"asset":symbol,"timeframe":lane,"selected_lanes":lanes,"lifecycle_state":"ACTIVE","reactivated_at":observed,"reactivates_retirement_id":retired["retirement_id"],**extra}
             manifest=AuthorityEventManifest(kind,predecessor[1],event,observed,"SPEC-023_OPERATOR",(),"COMPATIBLE",(),body,supersedes_event_id=predecessor[0])
             results.append(append_authority_event(database_path,manifest,recorded_at_utc=observed))
+    try:
+        from .scheduler_service import SchedulerJournal
+        from .scheduler_integrity import reconcile_operational_state
+        journal=SchedulerJournal(database_path);reconcile_operational_state(database_path,journal.data,at=datetime.fromisoformat(observed));journal.save()
+    except (OSError,ValueError):
+        pass
+    from .publication_service import enqueue_publication
+    enqueue_publication(database_path, [(symbol, lane) for lane in lanes], trigger="INSTRUMENT_REACTIVATION")
     return {"contract":"fragarach_ii.instrument_reactivation_receipt.v1","outcome":"REACTIVATED","canonical_instrument":symbol,"reactivation_id":reactivation_id,"reactivates_retirement_id":retired["retirement_id"],"selected_lanes":lanes,"new_authority_state":"ACTIVE","evidence_state":"PRESERVED","provider_mapping_state":"PRESERVED","completed_timestamp":observed,"events_appended":len(results)}
 
 def permanent_removal_impact(database_path:str|Path,asset:str):
@@ -47,7 +57,9 @@ def permanent_removal_impact(database_path:str|Path,asset:str):
     if not retired:raise RetirementError("INSTRUMENT_NOT_RETIRED",symbol)
     impact=retirement_impact(database_path,symbol,retired["scope"],tuple(retired["selected_lanes"]))
     removable=impact["canonical_bars"]==0 and impact["provenance_records"]==0 and impact["raw_evidence_blocks"]==0
-    return {"contract":"fragarach_ii.permanent_removal_impact.v1","canonical_instrument":symbol,"retirement_id":retired["retirement_id"],"retired_at":retired["completed_at"],"reason":retired["reason"],"selected_lanes":tuple(retired["selected_lanes"]),"canonical_bars":impact["canonical_bars"],"provenance_records":impact["provenance_records"],"raw_evidence_blocks":impact["raw_evidence_blocks"],"removable":removable,"blocking_reason":None if removable else "Accepted evidence and provenance are immutable; reactivate this instrument instead.","required_confirmation":f"PERMANENTLY REMOVE {symbol}"}
+    incorrect=retired.get("reason")=="INCORRECT_INSTRUMENT_IDENTITY"
+    blocking=None if removable else ("This registration contains immutable evidence and cannot be deleted. Keep it retired and register the correct instrument separately." if incorrect else "Accepted evidence and provenance are immutable; reactivation preserves existing authority and evidence.")
+    return {"contract":"fragarach_ii.permanent_removal_impact.v1","canonical_instrument":symbol,"retirement_id":retired["retirement_id"],"retired_at":retired["completed_at"],"reason":retired["reason"],"selected_lanes":tuple(retired["selected_lanes"]),"canonical_bars":impact["canonical_bars"],"provenance_records":impact["provenance_records"],"raw_evidence_blocks":impact["raw_evidence_blocks"],"removable":removable,"blocking_reason":blocking,"recommended_action":"REGISTER_CORRECT_INSTRUMENT" if incorrect else "REACTIVATE","required_confirmation":f"PERMANENTLY REMOVE {symbol}"}
 
 def permanently_remove_instrument(database_path:str|Path,asset:str,*,typed_confirmation:str,removed_at:str|None=None):
     impact=permanent_removal_impact(database_path,asset);symbol=impact["canonical_instrument"]
@@ -61,6 +73,8 @@ def permanently_remove_instrument(database_path:str|Path,asset:str,*,typed_confi
             body={"removal_id":removal_id,"asset":symbol,"timeframe":lane,"selected_lanes":impact["selected_lanes"],"lifecycle_state":"PERMANENTLY_REMOVED","removed_at":observed,"removes_retirement_id":impact["retirement_id"],**extra}
             manifest=AuthorityEventManifest(kind,predecessor[1],event,observed,"SPEC-023_OPERATOR",(),"COMPATIBLE",(),body,supersedes_event_id=predecessor[0])
             results.append(append_authority_event(database_path,manifest,recorded_at_utc=observed))
+    from .publication_service import enqueue_publication
+    enqueue_publication(database_path, [(symbol, lane) for lane in impact["selected_lanes"]], trigger="INSTRUMENT_REMOVAL")
     return {"contract":"fragarach_ii.permanent_removal_receipt.v1","outcome":"PERMANENTLY_REMOVED","canonical_instrument":symbol,"removal_id":removal_id,"removed_retirement_id":impact["retirement_id"],"selected_lanes":impact["selected_lanes"],"new_authority_state":"PERMANENTLY_REMOVED","completed_timestamp":observed,"events_appended":len(results),"audit_history_preserved":True}
 
 def restore_removed_registration(database_path:str|Path,asset:str,*,registered_at:str):
@@ -119,7 +133,16 @@ def retire_instrument(database_path:str|Path,asset:str,*,scope:str,selected_lane
                 declared_result=append_authority_event(database_path,AuthorityEventManifest(kind,entity,declaration,observed,"SPEC-013_OPERATOR",(),"COMPATIBLE",(),declared),recorded_at_utc=observed);results.append(declared_result);predecessor=(declared_result.authority_event_id,entity)
             body={**base,"timeframe":lane,**extra};manifest=AuthorityEventManifest(kind,entity,event,observed,"SPEC-013_OPERATOR",(),"UNRESOLVED_MATERIAL_FACT",({"code":"OPERATOR_REVIEWED_RETIREMENT"},),body,supersedes_event_id=predecessor[0])
             results.append(append_authority_event(database_path,manifest,recorded_at_utc=observed))
-    verification=retirement_impact(database_path,symbol,scope,tuple(impact["selected_lanes"]));return {"contract":"fragarach_ii.retirement_receipt.v1","outcome":"RETIRED","retirement_id":retirement_id,"canonical_instrument":symbol,"scope":scope,"selected_lanes":impact["selected_lanes"],"reason":reason,"operator_note":operator_note.strip(),"previous_authority_state":"ACTIVE","new_authority_state":_lifecycle(reason),"acquisition_shutdown_state":"DISABLED","evidence_quarantine_state":"QUARANTINED" if impact["canonical_bars"] else "NOT_REQUIRED","truth_serving_state":"NOT_SERVED","affected_registration_versions":impact["active_registration_versions"],"affected_acquisition_runs":impact["completed_acquisition_runs"],"affected_raw_blocks":impact["raw_evidence_blocks"],"affected_canonical_bars":impact["canonical_bars"],"completed_timestamp":observed,"warnings":(),"per_lane_outcomes":tuple({"timeframe":lane,"outcome":"RETIRED"} for lane in impact["selected_lanes"]),"verification_results":{"active_lanes":verification["active_timeframe_lanes"],"historical_rows_preserved":True,"events_appended":len(results)}}
+    verification=retirement_impact(database_path,symbol,scope,tuple(impact["selected_lanes"]));receipt={"contract":"fragarach_ii.retirement_receipt.v1","outcome":"RETIRED","retirement_id":retirement_id,"canonical_instrument":symbol,"scope":scope,"selected_lanes":impact["selected_lanes"],"reason":reason,"operator_note":operator_note.strip(),"previous_authority_state":"ACTIVE","new_authority_state":_lifecycle(reason),"acquisition_shutdown_state":"DISABLED","evidence_quarantine_state":"QUARANTINED" if impact["canonical_bars"] else "NOT_REQUIRED","truth_serving_state":"NOT_SERVED","affected_registration_versions":impact["active_registration_versions"],"affected_acquisition_runs":impact["completed_acquisition_runs"],"affected_raw_blocks":impact["raw_evidence_blocks"],"affected_canonical_bars":impact["canonical_bars"],"completed_timestamp":observed,"warnings":(),"per_lane_outcomes":tuple({"timeframe":lane,"outcome":"RETIRED"} for lane in impact["selected_lanes"]),"verification_results":{"active_lanes":verification["active_timeframe_lanes"],"historical_rows_preserved":True,"events_appended":len(results)}}
+    try:
+        from .scheduler_service import SchedulerJournal
+        from .scheduler_integrity import reconcile_operational_state
+        journal=SchedulerJournal(database_path);reconcile_operational_state(database_path,journal.data,at=datetime.fromisoformat(observed));journal.save()
+    except (OSError,ValueError):
+        pass
+    from .publication_service import enqueue_publication
+    enqueue_publication(database_path, [(symbol, lane) for lane in impact["selected_lanes"]], trigger="INSTRUMENT_RETIREMENT")
+    return receipt
 
 def _lifecycle(reason):
     return {"INCORRECT_INSTRUMENT_IDENTITY":"RETIRED_INCORRECT_IDENTITY","INCORRECT_PAIR_ORIENTATION":"RETIRED_INCORRECT_ORIENTATION","WRONG_SYMBOL":"RETIRED_WRONG_SYMBOL","DUPLICATE_REGISTRATION":"RETIRED_DUPLICATE","INCORRECT_PROVIDER_MAPPING":"QUARANTINED_PROVIDER_MISMATCH","PROVIDER_EVIDENCE_MISMATCH":"QUARANTINED_EVIDENCE_CONCERN"}.get(reason,"RETIRED_OPERATOR_REQUEST")

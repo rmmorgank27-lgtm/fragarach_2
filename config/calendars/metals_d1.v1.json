@@ -3,11 +3,15 @@
   "calculated_closures": ["GOOD_FRIDAY"],
   "calendar_id": "METALS_D1_V1",
   "calendar_version": 1,
-  "definition_checksum": "38e099907749091ac3b3d0038ff4814b0f0f5d5f4dca0b7fbd0dc46f3730a1a9",
+  "definition_checksum": "17982f3fd5de57c2065d8a9d1365ff34a70edeb1b5d42af5f575db96ad3fccd8",
   "effective_from": "1900-01-01",
   "effective_to": null,
   "format": "fragarach_ii.calendar_definition.v1",
   "overrides": [],
+  "session_close_local": "17:00:00",
+  "session_timezone": "America/New_York",
+  "session_close_owner_day_offset": 0,
+  "acquisition_delay_seconds": 0,
   "recurring_full_day_closures": [
     {"day": 1, "month": 1, "reason": "New Year's Day"},
     {"day": 25, "month": 12, "reason": "Christmas Day"}

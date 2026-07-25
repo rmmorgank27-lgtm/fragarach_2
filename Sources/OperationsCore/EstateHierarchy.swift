@@ -10,14 +10,15 @@ public struct EstateGroupSummary: Equatable, Sendable {
     public let criticalCount: Int
     public let coveragePercent: Int?
     public let freshnessPercent: Int?
-    public let caodt: String?
+    public let latestCanonicalObservation: String?
+    public var caodt: String? { latestCanonicalObservation }
     public let providers: [String]
     public let attentionSymbols: [String]
 
     public init(lanes: [EstateTruthLane]) {
         let scores = lanes.map(\.truthState.truthScore)
         truthScore = scores.isEmpty ? nil : Int((Double(scores.reduce(0, +)) / Double(scores.count)).rounded())
-        authorityState = Self.state(for: truthScore)
+        authorityState = Self.aggregateAuthorityState(lanes.map(\.truthState.authorityState))
         symbolCount = Set(lanes.map(\.symbol)).count
         laneCount = lanes.count
         healthyCount = lanes.filter { $0.truthState.authorityState == "GREEN" }.count
@@ -25,7 +26,7 @@ public struct EstateGroupSummary: Equatable, Sendable {
         criticalCount = lanes.filter { $0.truthState.authorityState == "RED" }.count
         coveragePercent = Self.average(lanes.compactMap(\.truthState.coverageScore))
         freshnessPercent = Self.average(lanes.compactMap(\.truthState.freshnessScore))
-        caodt = lanes.map(\.truthState.caodt).min()
+        latestCanonicalObservation = lanes.map(\.latestCanonicalObservation).max()
         providers = Array(Set(lanes.compactMap(\.providerSummary.provider).filter { !$0.isEmpty })).sorted()
         attentionSymbols = Array(Set(lanes.filter { $0.truthState.authorityState != "GREEN" }.map(\.symbol))).sorted()
     }
@@ -34,9 +35,11 @@ public struct EstateGroupSummary: Equatable, Sendable {
         values.isEmpty ? nil : Int((Double(values.reduce(0, +)) / Double(values.count)).rounded())
     }
 
-    private static func state(for score: Int?) -> String {
-        guard let score else { return "NOT_MEASURED" }
-        return score >= 80 ? "GREEN" : score >= 50 ? "AMBER" : "RED"
+    public static func aggregateAuthorityState(_ states: [String]) -> String {
+        if states.contains("RED") { return "RED" }
+        if states.contains("AMBER") { return "AMBER" }
+        if states.contains("GREEN") { return "GREEN" }
+        return "NOT_MEASURED"
     }
 }
 

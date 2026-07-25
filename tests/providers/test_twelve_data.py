@@ -12,6 +12,7 @@ from pathlib import Path
 
 from fragarach_ii.commands.acquire import main as command_main
 from fragarach_ii.providers import AcquisitionError, acquire_twelve_data
+from fragarach_ii.providers.maximum_history import acquire_maximum_twelve_data
 from fragarach_ii.providers.config import load_provider_config
 from fragarach_ii.providers.http import HttpRequest, HttpResponse, ResponseTooLarge
 from fragarach_ii.storage import open_read_only, verify_integrity, RegistrationCandidate, register_instrument
@@ -118,6 +119,54 @@ class TwelveDataAcquisitionTests(unittest.TestCase):
             acquire_twelve_data(self.database,asset="AUDEUR",timeframe="D1",from_date="2026-07-09",through_date="2026-07-10",credential="secret",transport=transport,sleeper=lambda _:None)
         self.assertEqual(raised.exception.code,"PROVIDER_ORIENTATION_MISMATCH");self.assertEqual(transport.requests,[]);self.assertEqual(_counts(self.database),before)
 
+    def test_us_stock_d1_uses_market_timezone_and_operational_calendar(self) -> None:
+        from fragarach_ii.storage import initialize_database
+
+        initialize_database(self.database)
+        candidate = RegistrationCandidate(
+            asset="GOOGL",
+            timeframe="D1",
+            instrument_family="GOOGL",
+            local_symbol="GOOGL",
+            display_name="Alphabet Class A Common Stock",
+            instrument_type="COMMON_STOCK",
+            asset_class="US_EQUITIES",
+            representation_type="COMMON_STOCK",
+            trading_currency="USD",
+            exchange_name="NASDAQ",
+            provider_id="TWELVE_DATA",
+            provider_contract="TWELVE_DATA_TIME_SERIES_D1_V1",
+            provider_symbol="GOOGL",
+            provider_instrument_type="Common Stock",
+            provider_exchange="NASDAQ",
+            calendar_id="REGISTRY_D1_V1",
+            calendar_version=1,
+            gap_doctrine_id="FRAGARACH_II_D1_GAP_DOCTRINE_V1",
+            gap_doctrine_version=1,
+        )
+        register_instrument(self.database, candidate, registered_at_utc=NOW.isoformat())
+        body = json.dumps(
+            {
+                "meta": {"symbol": "GOOGL", "interval": "1day", "type": "Common Stock"},
+                "values": [
+                    {"datetime": "2026-07-10", "open": "100", "high": "102", "low": "99", "close": "101"},
+                    {"datetime": "2026-07-09", "open": "99", "high": "101", "low": "98", "close": "100"},
+                ],
+                "status": "ok",
+            }
+        ).encode()
+        result, transport = self.acquire(body, asset="GOOGL")
+        self.assertIn("timezone=America%2FNew_York", transport.requests[0].target)
+        self.assertEqual(result.validation_calendar_id, "US_EQUITIES_D1_V1")
+        connection = open_read_only(self.database)
+        try:
+            stored = connection.execute(
+                "SELECT calendar_id FROM instrument_registrations WHERE asset='GOOGL' AND timeframe='D1'"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertEqual(stored, "REGISTRY_D1_V1")
+
     def test_provider_configuration_checksum_drift_is_detected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -143,11 +192,27 @@ class TwelveDataAcquisitionTests(unittest.TestCase):
         target = transport.requests[0].target
         self.assertEqual(
             target,
-            "/time_series?end_date=2026-07-10&format=JSON&interval=1day&order=ASC&outputsize=2&start_date=2026-07-09&symbol=AUD%2FUSD&timezone=UTC",
+            "/time_series?format=JSON&interval=1day&order=ASC&start_date=2026-07-09T00%3A00%3A00&end_date=2026-07-10T23%3A59%3A59&symbol=AUD%2FUSD&timezone=UTC",
         )
         self.assertNotIn("test-secret-value", target)
         self.assertNotIn("test-secret-value", result.as_json())
         self.assertEqual(result.provider_symbol, "AUD/USD")
+
+    def test_initial_history_resolves_earliest_and_acquires_backward_in_chunks(self) -> None:
+        earliest=b'{"status":"ok","datetime":"2010-01-04 00:00:00"}'
+        def history(day: str) -> bytes:
+            return json.dumps({"status":"ok","meta":{"symbol":"AUD/USD","interval":"1day"},"values":[{"datetime":day,"open":"1.0","high":"1.2","low":"0.9","close":"1.1"}]},separators=(",",":")).encode()
+        transport=FakeTransport(_response(earliest),_response(history("2026-07-10")),_response(history("2010-01-04")))
+        result=acquire_maximum_twelve_data(self.database,asset="AUDUSD",timeframe="D1",through_date="2026-07-10",merge_mode="preserve",credential="secret",transport=transport)
+        self.assertEqual((result["request_count"],result["history_request_count"]),(3,2))
+        self.assertEqual(result["termination_reason"],"PROVIDER_REPORTED_EARLIEST_AVAILABLE_OBSERVATION")
+        self.assertEqual((result["provider_rows_received"],result["unique_observations_received"]),(2,2))
+        self.assertIn("/earliest_timestamp?",transport.requests[0].target)
+        self.assertIn("end_date=2026-07-10",transport.requests[1].target)
+        self.assertIn("start_date=2010-01-04",transport.requests[2].target)
+        with open_read_only(self.database) as connection:
+            self.assertEqual(connection.execute("select count(*) from raw_blocks").fetchone()[0],3)
+            self.assertEqual(connection.execute("select count(*) from bars").fetchone()[0],2)
 
     def test_exact_bytes_staging_order_volume_and_read_only_verification(self) -> None:
         body = _fixture("btcusd_d1_2026-07-09_2026-07-10.json")
@@ -243,6 +308,9 @@ class TwelveDataAcquisitionTests(unittest.TestCase):
     def test_retryable_failure_can_recover_without_duplicate_attempt_state(self) -> None:
         body = _fixture("audusd_d1_2026-07-09_2026-07-10.json")
         transport = FakeTransport(TimeoutError(), _response(body))
+        with self.assertRaises(AcquisitionError) as failure:
+            self.acquire(body, transport=transport)
+        self.assertEqual(failure.exception.code, "TWELVEDATA_TRANSPORT_FAILURE")
         result, _ = self.acquire(body, transport=transport)
         self.assertEqual(result.inserted, 2)
         self.assertEqual(len(transport.requests), 2)
@@ -291,19 +359,20 @@ class TwelveDataAcquisitionTests(unittest.TestCase):
         self.acquire(body)
         before = _counts(self.database)
         cases = (
-            (FakeTransport(TimeoutError(), TimeoutError(), TimeoutError()), "RETRY_EXHAUSTED"),
-            (FakeTransport(_response(b"{}", status=500), _response(b"{}", status=500), _response(b"{}", status=500)), "RETRY_EXHAUSTED"),
-            (FakeTransport(_response(b"{}", status=429), _response(b"{}", status=429), _response(b"{}", status=429)), "RATE_LIMIT"),
-            (FakeTransport(_response(b"{}", status=400)), "HTTP_ERROR"),
-            (FakeTransport(_response(b"{}", status=302)), "UNEXPECTED_REDIRECT"),
-            (FakeTransport(_response(body, content_type="text/html")), "UNSUPPORTED_MEDIA_TYPE"),
-            (FakeTransport(_response(body, host="other.example")), "UNEXPECTED_HOST"),
-            (FakeTransport(ResponseTooLarge("too large")), "RESPONSE_TOO_LARGE"),
+            (FakeTransport(TimeoutError()), "TWELVEDATA_TRANSPORT_FAILURE"),
+            (FakeTransport(_response(b"{}", status=500)), "TWELVEDATA_UPSTREAM_5XX"),
+            (FakeTransport(_response(b"{}", status=400)), "TWELVEDATA_INVALID_RESPONSE"),
+            (FakeTransport(_response(b"{}", status=302)), "TWELVEDATA_INVALID_RESPONSE"),
+            (FakeTransport(_response(body, content_type="text/html")), "TWELVEDATA_INVALID_RESPONSE"),
+            (FakeTransport(_response(body, host="other.example")), "TWELVEDATA_INVALID_RESPONSE"),
+            (FakeTransport(ResponseTooLarge("too large")), "TWELVEDATA_INVALID_RESPONSE"),
+            (FakeTransport(_response(b"{}", status=429)), "TWELVEDATA_RATE_LIMIT_429"),
         )
-        for transport, code in cases:
+        for index, (transport, code) in enumerate(cases):
             with self.assertRaises(AcquisitionError) as raised:
-                self.acquire(body, transport=transport)
+                self.acquire(body, transport=transport, credential=f"failure-fixture-{index}")
             self.assertEqual(raised.exception.code, code)
+            self.assertEqual(len(transport.requests), 1)
             self.assertEqual(_counts(self.database), before)
 
     def test_interruption_before_ingest_leaves_no_state_and_rerun_succeeds(self) -> None:
@@ -334,7 +403,8 @@ class TwelveDataAcquisitionTests(unittest.TestCase):
     def test_missing_credential_command_redacts_and_does_not_create_database(self) -> None:
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            with mock.patch.dict("os.environ", {}, clear=True):
+            with mock.patch("fragarach_ii.commands.acquire.CredentialAuthority") as credential_authority:
+                credential_authority.return_value.credential_for.return_value = None
                 status = command_main(
                     ["--database", str(self.database), "--provider", "TWELVE_DATA",
                      "--asset", "AUDUSD", "--timeframe", "D1",

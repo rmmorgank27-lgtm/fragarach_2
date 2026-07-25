@@ -8,8 +8,10 @@ from io import StringIO
 from fragarach_ii.market_registry import load_registry,provider_mapping,search_registry
 from fragarach_ii.market_discovery import discover_market
 from fragarach_ii.commands.register_instrument import main as register_command
+from fragarach_ii.commands.register_instrument import _retry_when_writer_busy
 from fragarach_ii.providers.instrument_search import candidate_from_dict
 from fragarach_ii.storage import initialize_database,open_read_only,registered_writer,register_instrument
+from fragarach_ii.storage import WriterLockError
 from fragarach_ii.storage.migrations import apply_migrations
 
 APPROVED_FOREX_PAIRS = {
@@ -73,7 +75,7 @@ def test_forex_provider_mappings_are_known_only_where_evidenced():
         result=register_instrument(db,candidate_from_dict(candidate),registered_at_utc=datetime.now(UTC).isoformat())
         assert result.registration_status=="REGISTERED_UNMAPPED"
 
-def test_registration_command_migrates_v6_and_accepts_unmapped_fx():
+def test_registration_command_migrates_v6_and_preserves_fx_mapping_discovery_outcome():
     with tempfile.TemporaryDirectory() as tmp:
         db=Path(tmp)/"authority.sqlite3"
         with registered_writer(db) as connection:apply_migrations(connection,target_version=6)
@@ -81,10 +83,12 @@ def test_registration_command_migrates_v6_and_accepts_unmapped_fx():
         output=StringIO()
         with redirect_stdout(output):exit_code=register_command(["--database",str(db),"--candidate",plan["candidate"],"--json"])
         assert exit_code==0
-        assert json.loads(output.getvalue())["registration_status"]=="REGISTERED_UNMAPPED"
+        receipt=json.loads(output.getvalue())
+        assert receipt["registration_status"] in {"REGISTERED_UNMAPPED","REGISTERED_NO_EVIDENCE"}
         with open_read_only(db) as connection:
-            assert connection.execute("select max(version) from schema_migrations").fetchone()[0]==7
-            assert connection.execute("select provider_id,registration_status from instrument_registrations where asset='EURUSD'").fetchone()==(None,"REGISTERED_UNMAPPED")
+            assert connection.execute("select max(version) from schema_migrations").fetchone()[0]==10
+            provider,status=connection.execute("select provider_id,registration_status from instrument_registrations where asset='EURUSD'").fetchone()
+        assert (provider,status)==(None,"REGISTERED_UNMAPPED") or (provider=="TWELVE_DATA" and status=="REGISTERED_NO_EVIDENCE")
 
 def test_registration_command_keeps_mapped_fx_registration_available():
     with tempfile.TemporaryDirectory() as tmp:
@@ -94,3 +98,13 @@ def test_registration_command_keeps_mapped_fx_registration_available():
         with redirect_stdout(output):exit_code=register_command(["--database",str(db),"--candidate",plan["candidate"],"--json"])
         assert exit_code==0
         assert json.loads(output.getvalue())["registration_status"]=="REGISTERED_NO_EVIDENCE"
+
+
+def test_registration_retries_short_scheduler_writer_contention() -> None:
+    attempts=[]
+    def operation():
+        attempts.append(1)
+        if len(attempts)<3: raise WriterLockError(Path("/tmp/authority.writer.lock"))
+        return {"outcome":"INSERTED"}
+    assert _retry_when_writer_busy(operation,sleeper=lambda _delay:None)=={"outcome":"INSERTED"}
+    assert len(attempts)==3

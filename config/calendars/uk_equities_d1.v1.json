@@ -1,0 +1,19 @@
+{
+  "asset_class": "UK_EQUITIES",
+  "calculated_closures": ["UK_EQUITIES_HOLIDAYS"],
+  "calendar_id": "UK_EQUITIES_D1_V1",
+  "calendar_version": 1,
+  "definition_checksum": "9d508f05dea5ab4ce20d55f248d28c6bc00611018834cc58eb5efb99a4ec262f",
+  "effective_from": "1970-01-01",
+  "effective_to": null,
+  "format": "fragarach_ii.calendar_definition.v1",
+  "overrides": [],
+  "session_close_local": "16:30:00",
+  "session_timezone": "Europe/London",
+  "session_close_owner_day_offset": 0,
+  "acquisition_delay_seconds": 0,
+  "recurring_full_day_closures": [],
+  "timeframe": "D1",
+  "timezone_basis": "Europe/London",
+  "weekdays_expected": [1, 2, 3, 4, 5]
+}

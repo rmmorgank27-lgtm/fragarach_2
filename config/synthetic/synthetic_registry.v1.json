@@ -1,0 +1,100 @@
+{
+  "contract": "fragarach_ii.synthetic_registry.v1",
+  "rules": [
+    {
+      "rule_id": "FX_M5_TO_M15_SESSION_V1",
+      "version": 1,
+      "source_timeframe": "M5",
+      "target_timeframe": "M15",
+      "calendar": "FX_24X5_NEW_YORK_ROLLOVER_V1",
+      "session_anchor": "17:00",
+      "interval_closure": "LEFT_CLOSED_RIGHT_OPEN",
+      "timezone": "America/New_York",
+      "required_component_count": 3,
+      "ohlc_calculation": "FIRST_OPEN_MAX_HIGH_MIN_LOW_LAST_CLOSE",
+      "volume_handling": "SUM_IF_ALL_PRESENT_ELSE_NULL",
+      "missing_component_behaviour": "INCOMPLETE_NO_PUBLICATION",
+      "partial_current_period_behaviour": "UNPUBLISHED"
+    },
+    {
+      "rule_id": "FX_M30_TO_H2_SESSION_V1",
+      "version": 1,
+      "source_timeframe": "M30",
+      "target_timeframe": "H2",
+      "calendar": "FX_24X5_NEW_YORK_ROLLOVER_V1",
+      "session_anchor": "17:00",
+      "interval_closure": "LEFT_CLOSED_RIGHT_OPEN",
+      "timezone": "America/New_York",
+      "required_component_count": 4,
+      "ohlc_calculation": "FIRST_OPEN_MAX_HIGH_MIN_LOW_LAST_CLOSE",
+      "volume_handling": "SUM_IF_ALL_PRESENT_ELSE_NULL",
+      "missing_component_behaviour": "INCOMPLETE_NO_PUBLICATION",
+      "partial_current_period_behaviour": "UNPUBLISHED"
+    },
+    {
+      "rule_id": "FX_H1_TO_H4_SESSION_V1",
+      "version": 1,
+      "source_timeframe": "H1",
+      "target_timeframe": "H4",
+      "calendar": "FX_24X5_NEW_YORK_ROLLOVER_V1",
+      "session_anchor": "17:00",
+      "interval_closure": "LEFT_CLOSED_RIGHT_OPEN",
+      "timezone": "America/New_York",
+      "required_component_count": 4,
+      "ohlc_calculation": "FIRST_OPEN_MAX_HIGH_MIN_LOW_LAST_CLOSE",
+      "volume_handling": "SUM_IF_ALL_PRESENT_ELSE_NULL",
+      "missing_component_behaviour": "INCOMPLETE_NO_PUBLICATION",
+      "partial_current_period_behaviour": "UNPUBLISHED"
+    }
+  ],
+  "registrations": [
+    {
+      "symbol": "AUDUSD",
+      "target_timeframe": "M15",
+      "evidence_class": "SYNTHETIC",
+      "immediate_source_symbol": "AUDUSD",
+      "immediate_source_timeframe": "M5",
+      "immediate_source_evidence_class": "REAL",
+      "originating_real_symbol": "AUDUSD",
+      "originating_real_timeframe": "M5",
+      "aggregation_rule": "FX_M5_TO_M15_SESSION_V1",
+      "aggregation_rule_version": 1,
+      "calendar_authority": "FX_24X5_NEW_YORK_ROLLOVER_V1",
+      "session_alignment": "17:00 America/New_York",
+      "authorised_consumers": ["SignalBar", "MorphixFC"],
+      "status": "ACTIVE"
+    },
+    {
+      "symbol": "AUDUSD",
+      "target_timeframe": "H2",
+      "evidence_class": "SYNTHETIC",
+      "immediate_source_symbol": "AUDUSD",
+      "immediate_source_timeframe": "M30",
+      "immediate_source_evidence_class": "REAL",
+      "originating_real_symbol": "AUDUSD",
+      "originating_real_timeframe": "M30",
+      "aggregation_rule": "FX_M30_TO_H2_SESSION_V1",
+      "aggregation_rule_version": 1,
+      "calendar_authority": "FX_24X5_NEW_YORK_ROLLOVER_V1",
+      "session_alignment": "17:00 America/New_York",
+      "authorised_consumers": ["SignalBar", "MorphixFC"],
+      "status": "ACTIVE"
+    },
+    {
+      "symbol": "AUDUSD",
+      "target_timeframe": "H4",
+      "evidence_class": "SYNTHETIC",
+      "immediate_source_symbol": "AUDUSD",
+      "immediate_source_timeframe": "H1",
+      "immediate_source_evidence_class": "REAL",
+      "originating_real_symbol": "AUDUSD",
+      "originating_real_timeframe": "H1",
+      "aggregation_rule": "FX_H1_TO_H4_SESSION_V1",
+      "aggregation_rule_version": 1,
+      "calendar_authority": "FX_24X5_NEW_YORK_ROLLOVER_V1",
+      "session_alignment": "17:00 America/New_York",
+      "authorised_consumers": ["SignalBar", "MorphixFC"],
+      "status": "ACTIVE"
+    }
+  ]
+}

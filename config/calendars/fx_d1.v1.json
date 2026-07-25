@@ -3,11 +3,15 @@
   "calculated_closures": [],
   "calendar_id": "FX_D1_V1",
   "calendar_version": 1,
-  "definition_checksum": "a19ab5557787748619e7130c3cf89aa524a117073f08aa4c9b97e432db5e0926",
+  "definition_checksum": "5cb061b25279bba5d1d40a6ba4df1ae3ce8608dd02ebd28635c763331c8f5817",
   "effective_from": "1900-01-01",
   "effective_to": null,
   "format": "fragarach_ii.calendar_definition.v1",
   "overrides": [],
+  "session_close_local": "17:00:00",
+  "session_timezone": "America/New_York",
+  "session_close_owner_day_offset": 0,
+  "acquisition_delay_seconds": 0,
   "recurring_full_day_closures": [
     {"day": 1, "month": 1, "reason": "New Year's Day"},
     {"day": 25, "month": 12, "reason": "Christmas Day"}

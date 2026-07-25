@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, time
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +34,10 @@ class CalendarDefinition:
     recurring_full_day_closures: tuple[RecurringClosure, ...]
     calculated_closures: tuple[str, ...]
     overrides: tuple[CalendarOverride, ...]
+    session_close_local: time = time(0, 0)
+    session_timezone: str = "UTC"
+    session_close_owner_day_offset: int = 0
+    acquisition_delay_seconds: int = 0
 
 
 @dataclass(frozen=True, slots=True)

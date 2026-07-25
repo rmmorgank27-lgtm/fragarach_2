@@ -20,7 +20,7 @@ class AuthorityLedgerAmendmentTests(unittest.TestCase):
     def tearDown(self): self.tmp.cleanup()
 
     def test_migration_six_exact_ten_tables_and_history(self):
-        report=verify_integrity(self.db);self.assertEqual(report.application_tables,APPLICATION_TABLES);self.assertEqual(len(APPLICATION_TABLES),10)
+        report=verify_integrity(self.db);self.assertEqual(report.application_tables,APPLICATION_TABLES);self.assertEqual(len(APPLICATION_TABLES),12)
         c=open_read_only(self.db)
         try:
             self.assertEqual(c.execute("select checksum_sha256 from schema_migrations where version=6").fetchone()[0],migration_6_checksum())

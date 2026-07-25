@@ -5,8 +5,8 @@ struct SystemWorkspaceView:View {
     @EnvironmentObject private var store:ConsoleStore
     var body:some View { VStack(alignment:.leading,spacing:14) {
         WorkspaceHeader(title:"System",purpose:"Health, protection, configuration, and audit evidence.")
-        Picker("Section",selection:$store.systemSection){ForEach(SystemSection.allCases){Text($0.rawValue).tag($0)}}.pickerStyle(.segmented).frame(maxWidth:620)
-        Group { switch store.systemSection { case .status:SystemStatusView();case .backups:IntegrityBackupView();case .settings:DiagnosticsSettingsView();case .audit:AuditWorkspaceView() } }.frame(maxWidth:.infinity,maxHeight:.infinity)
+        Picker("Section",selection:$store.systemSection){ForEach(SystemSection.allCases){Text($0.rawValue).tag($0)}}.pickerStyle(.segmented).frame(maxWidth:760)
+        Group { switch store.systemSection { case .status:SystemStatusView();case .providerFacts:ProviderFactsView();case .backups:IntegrityBackupView();case .settings:DiagnosticsSettingsView();case .audit:AuditWorkspaceView() } }.frame(maxWidth:.infinity,maxHeight:.infinity)
     }.padding() }
 }
 

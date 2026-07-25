@@ -13,7 +13,11 @@ APP_CONTENTS="$APP_BUNDLE/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
-BUILD_ID="$(git -C "$ROOT_DIR" rev-parse --short=12 HEAD)"
+SOURCE_REVISION="$(git -C "$ROOT_DIR" rev-parse --short=12 HEAD)"
+BUILD_ID="$SOURCE_REVISION"
+if [[ -n "$(git -C "$ROOT_DIR" status --porcelain)" ]]; then
+  BUILD_ID="${SOURCE_REVISION}-local-$(date -u +%Y%m%d%H%M%S)"
+fi
 ICON_SOURCE="$ROOT_DIR/assets/macos/FragarachII.icns"
 
 pkill -x "$APP_NAME" >/dev/null 2>&1 || true
@@ -40,14 +44,17 @@ chmod +x "$APP_BINARY"
 /usr/bin/codesign --force --deep --sign - "$APP_BUNDLE"
 
 open_app() {
-  local launch_arguments=()
+  local args=()
   if [[ -n "${FRAGARACH_LAUNCH_MODE:-}" ]]; then
-    launch_arguments+=(--args --mode "$FRAGARACH_LAUNCH_MODE")
+    args+=(--mode "$FRAGARACH_LAUNCH_MODE")
     if [[ -n "${FRAGARACH_LAUNCH_SYMBOL:-}" ]]; then
-      launch_arguments+=(--symbol "$FRAGARACH_LAUNCH_SYMBOL")
+      args+=(--symbol "$FRAGARACH_LAUNCH_SYMBOL")
     fi
   fi
-  /usr/bin/open -n "$APP_BUNDLE" "${launch_arguments[@]}"
+  if [[ "${FRAGARACH_SCHEDULER_DISABLED:-0}" == "1" ]]; then
+    args+=(--disable-scheduler)
+  fi
+  if [[ ${#args[@]} -gt 0 ]]; then /usr/bin/open -n "$APP_BUNDLE" --args "${args[@]}"; else /usr/bin/open -n "$APP_BUNDLE"; fi
 }
 case "$MODE" in
   run) open_app ;;

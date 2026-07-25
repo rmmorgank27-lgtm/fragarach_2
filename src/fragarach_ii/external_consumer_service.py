@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .history_depth import D1_MORPHIX_MIN_OBSERVATIONS, has_morphix_d1_depth
 from .storage import open_read_only
 from .truth_engine import TruthEngineError, truth_state_for_lane
+from .publication_service import lane_publication_state
 
 
 CONTRACT = "fragarach_ii.external_consumer_history.v1"
 INTRADAY_CONTRACT="fragarach_ii.external_consumer_history.v2"
 CATALOG_CONTRACT = "fragarach_ii.external_consumer_catalog.v2"
+ESTATE_CATALOGUE_CONTRACT = "fragarach.catalogue.v1"
 SUPPORTED_TIMEFRAMES={"D1","H1","M30","M5"}
 DATABASE_ENVIRONMENT_VARIABLE = "FRAGARACH_AUTHORITY_DATABASE"
 DEFAULT_DATABASE = (
@@ -50,6 +55,16 @@ def list_histories() -> dict[str, object]:
     return HistoryService(canonical_database_path()).list_histories()
 
 
+def get_catalogue() -> dict[str, object]:
+    """Return one atomic, read-only active-Estate projection for consumers.
+
+    This intentionally reports authority facts only.  It neither consults a
+    provider nor derives a replacement Estate from consumer cache state.
+    """
+
+    return HistoryService(canonical_database_path()).get_catalogue()
+
+
 class HistoryService:
     """Read-only service bound by Fragarach to one canonical database."""
 
@@ -66,6 +81,15 @@ class HistoryService:
         if requested_timeframe not in SUPPORTED_TIMEFRAMES:
             raise ExternalConsumerServiceError(
                 "UNSUPPORTED_TIMEFRAME",requested_timeframe
+            )
+        publication = lane_publication_state(
+            self.database_path, requested_symbol, requested_timeframe
+        )
+        if publication != "PUBLISHED":
+            return _unavailable(
+                "PUBLICATION_PENDING" if publication == "PUBLISHING" else publication,
+                requested_symbol, requested_timeframe,
+                f"{requested_symbol}:{requested_timeframe} canonical evidence is {publication.lower()}",
             )
 
         connection = open_read_only(self.database_path)
@@ -189,6 +213,196 @@ class HistoryService:
             "histories": histories,
             "capabilities":estate_truth_state(self.database_path)["timeframe_capabilities"],
         }
+
+    def get_catalogue(self) -> dict[str, object]:
+        """Project registration, lifecycle and canonical D1 availability once."""
+
+        # A single read transaction gives this response one SQLite snapshot.
+        connection = open_read_only(self.database_path)
+        try:
+            connection.execute("BEGIN")
+            registrations = connection.execute(
+                """
+                SELECT asset,asset_class,registration_status,registered_at_utc,provider_id
+                FROM instrument_registrations
+                WHERE timeframe='D1'
+                ORDER BY asset
+                """
+            ).fetchall()
+            lanes = {
+                str(row[0]) for row in connection.execute(
+                    "SELECT asset FROM evidence_lanes WHERE timeframe='D1'"
+                ).fetchall()
+            }
+            bar_counts = {
+                str(row[0]): int(row[1]) for row in connection.execute(
+                    "SELECT asset,count(*) FROM bars WHERE timeframe='D1' GROUP BY asset"
+                ).fetchall()
+            }
+            latest_ingests = {
+                str(row[0]): {
+                    "provider": row[1],
+                    "provider_symbol": row[2],
+                    "from_date": row[3],
+                    "through_date": row[4],
+                    "source_rows": int(row[5] or 0),
+                    "inserted": int(row[6] or 0),
+                    "unchanged": int(row[7] or 0),
+                    "corrected": int(row[8] or 0),
+                    "rejected": int(row[9] or 0),
+                }
+                for row in connection.execute(
+                    """
+                    WITH ranked AS (
+                        SELECT json_extract(detail,'$.asset') asset,
+                               json_extract(detail,'$.provider') provider,
+                               json_extract(detail,'$.provider_symbol') provider_symbol,
+                               json_extract(detail,'$.from_date') from_date,
+                               json_extract(detail,'$.through_date') through_date,
+                               json_extract(detail,'$.source_rows') source_rows,
+                               json_extract(detail,'$.inserted') inserted,
+                               json_extract(detail,'$.unchanged') unchanged,
+                               json_extract(detail,'$.corrected') corrected,
+                               json_extract(detail,'$.rejected') rejected,
+                               row_number() OVER (
+                                   PARTITION BY json_extract(detail,'$.asset')
+                                   ORDER BY finished_at_utc DESC, ingest_run_id DESC
+                               ) ordinal
+                        FROM ingest_runs
+                        WHERE status='committed'
+                          AND json_extract(detail,'$.timeframe')='D1'
+                    )
+                    SELECT asset,provider,provider_symbol,from_date,through_date,
+                           source_rows,inserted,unchanged,corrected,rejected
+                    FROM ranked WHERE ordinal=1
+                    """
+                ).fetchall()
+                if row[0]
+            }
+            events = connection.execute(
+                """
+                SELECT authority_event_id,supersedes_event_id,recorded_at_utc,canonical_payload
+                FROM authority_events
+                ORDER BY recorded_at_utc,authority_event_id
+                """
+            ).fetchall()
+            connection.execute("COMMIT")
+        except BaseException:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+
+        # This is the established Fragarach lifecycle interpretation used by
+        # the scheduler integrity projection; importing it avoids a second
+        # membership doctrine in a consumer endpoint.
+        from .scheduler_integrity import _lifecycle_projection
+
+        lifecycle = _lifecycle_projection(events)
+        symbols: list[dict[str, object]] = []
+        revision_facts: list[dict[str, object]] = []
+        for asset, asset_class, registration_status, registered_at, provider_id in registrations:
+            symbol = str(asset)
+            leaf = lifecycle.get((symbol, "D1")) or lifecycle.get((symbol, None)) or {}
+            lifecycle_state = str(leaf.get("lifecycle_state") or "ACTIVE")
+            registered = str(registration_status).startswith("REGISTERED_")
+            retired = lifecycle_state.startswith(("RETIRED", "QUARANTINED")) or lifecycle_state == "PERMANENTLY_REMOVED"
+            active = registered and not retired
+            bars = bar_counts.get(symbol, 0)
+            d1_governed = symbol in lanes and bars > 0
+            availability = "AVAILABLE" if d1_governed else "UNAVAILABLE"
+            morphix_ready = active and d1_governed and has_morphix_d1_depth(bars)
+            morphix_reason = None if morphix_ready else _morphix_ineligibility_reason(
+                asset_class=str(asset_class),
+                provider_id=str(provider_id or ""),
+                bar_count=bars,
+                latest_ingest=latest_ingests.get(symbol),
+                active=active,
+                d1_governed=d1_governed,
+            )
+            market = _catalogue_market(str(asset_class))
+            item = {
+                "symbol": symbol,
+                "market": market,
+                "lifecycle": lifecycle_state if not active else "ACTIVE",
+                "availability": availability,
+                "histories": [{
+                    "timeframe": "D1",
+                    "governed": d1_governed,
+                    "eligible_for_morphix": morphix_ready,
+                    "morphix_eligibility_reason": morphix_reason,
+                    "minimum_required_bar_count": D1_MORPHIX_MIN_OBSERVATIONS,
+                    "bar_count": bars,
+                }],
+            }
+            symbols.append(item)
+            revision_facts.append({
+                "symbol": symbol, "market": market, "lifecycle": item["lifecycle"],
+                "availability": availability, "d1_governed": d1_governed,
+                "registered_at": registered_at, "bar_count": bars,
+                "eligible_for_morphix": morphix_ready,
+                "morphix_eligibility_reason": morphix_reason,
+            })
+        revision = "sha256:" + hashlib.sha256(
+            json.dumps(revision_facts, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        return {
+            "contract": ESTATE_CATALOGUE_CONTRACT,
+            "status": "AVAILABLE",
+            "catalogue_revision": revision,
+            "generated_at": datetime.now(UTC).isoformat(),
+            "symbols": symbols,
+        }
+
+
+def _catalogue_market(asset_class: str) -> str:
+    """Expose the existing authoritative asset class as the consumer market."""
+
+    return {
+        "CRYPTO": "Crypto",
+        "FX": "Forex",
+        "US_EQUITIES": "Equities",
+        "METALS": "Metals",
+        "ENERGY": "Energy",
+        "INDICES": "Indices",
+        "AUSTRALIAN_EQUITIES": "Equities",
+        "UK_EQUITIES": "Equities",
+        "GERMAN_EQUITIES": "Equities",
+    }.get(asset_class, asset_class)
+
+
+def _morphix_ineligibility_reason(
+    *,
+    asset_class: str,
+    provider_id: str,
+    bar_count: int,
+    latest_ingest: dict[str, object] | None,
+    active: bool,
+    d1_governed: bool,
+) -> str:
+    if not active:
+        return "LIFECYCLE_INACTIVE"
+    if not d1_governed or bar_count == 0:
+        return "NO_HISTORICAL_ROWS_RETURNED"
+    if latest_ingest and int(latest_ingest.get("rejected") or 0) > 0:
+        return "VALIDATION_REJECTED_ROWS"
+    if "EQUITIES" in asset_class and provider_id and provider_id != "YAHOO_FINANCE":
+        return "WRONG_PROVIDER_SELECTED"
+    if latest_ingest and _requested_day_span(
+        latest_ingest.get("from_date"), latest_ingest.get("through_date")
+    ) < 365:
+        return "SHORT_HISTORY_FETCH_USED"
+    return "PROVIDER_HISTORY_LIMIT"
+
+
+def _requested_day_span(start: object, end: object) -> int:
+    try:
+        first = datetime.fromisoformat(str(start)).date()
+        last = datetime.fromisoformat(str(end)).date()
+    except (TypeError, ValueError):
+        return 0
+    return max(0, (last - first).days + 1)
 
 
 def _registered_symbol(connection, symbol: str, timeframe: str) -> str | None:

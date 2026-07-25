@@ -131,7 +131,7 @@ class ProvenanceAmendmentTests(unittest.TestCase):
                 connection.execute(
                     "SELECT version FROM schema_migrations ORDER BY version"
                 ).fetchall(),
-                [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,)],
+                [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,)],
             )
             self.assertEqual(connection.execute("SELECT count(*) FROM raw_blocks").fetchone()[0], 1)
             self.assertEqual(connection.execute("SELECT count(*) FROM bars").fetchone()[0], 1)

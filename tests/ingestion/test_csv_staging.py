@@ -42,6 +42,55 @@ class CsvStagingTests(unittest.TestCase):
         self.assertEqual(batch.rejections, ())
         self.assertEqual(batch.bars[0].source_timestamp_text, "2026-07-09")
 
+    def test_timestamp_utc_header_maps_to_logical_timestamp(self) -> None:
+        batch = self.stage(
+            "timestamp_utc,open,high,low,close\n"
+            "2026-07-10T12:00:00Z,1,2,0,1\n",
+            timeframe="M5",
+            asset_class="FX",
+            received_at="2026-07-10T12:30:00+00:00",
+        )
+        self.assertEqual(batch.rejections, ())
+        self.assertEqual(batch.bars[0].source_timestamp_text, "2026-07-10T12:00:00Z")
+
+    def test_canonical_export_provenance_columns_are_accepted(self) -> None:
+        batch = self.stage(
+            "timestamp_utc,open,high,low,close,volume,source_event_id,ingest_run_id,raw_symbol,source_exchange_prefix,raw_timeframe\n"
+            "2026-07-10T12:00:00Z,1,2,0,1,10,event,run,AUDUSD,,M5\n",
+            timeframe="M5",
+            asset_class="FX",
+            received_at="2026-07-10T12:30:00+00:00",
+        )
+        self.assertEqual(batch.rejections, ())
+        self.assertEqual(len(batch.bars), 1)
+
+    def test_daily_tradingview_slash_dates_are_auto_detected_without_timezone(self) -> None:
+        batch = self.stage(
+            "timestamp,open,high,low,close\n"
+            "13/07/2026,1,2,0,1\n"
+            "14/07/2026,1,2,0,1\n"
+        )
+        self.assertEqual(batch.rejections, ())
+        self.assertEqual(
+            batch.bars[0].source_timezone_interpretation,
+            "D1_DATE_DAY_FIRST_AT_UTC_MIDNIGHT",
+        )
+        self.assertEqual(batch.bars[0].timestamp, int(datetime(2026, 7, 13, tzinfo=UTC).timestamp()))
+
+    def test_daily_slash_dates_can_use_an_explicit_operator_date_order(self) -> None:
+        batch = self.stage(
+            "timestamp,open,high,low,close\n"
+            "03/04/2026,1,2,0,1\n",
+            d1_date_format="DAY_FIRST",
+        )
+        self.assertEqual(batch.rejections, ())
+        self.assertEqual(batch.bars[0].timestamp, int(datetime(2026, 4, 3, tzinfo=UTC).timestamp()))
+
+    def test_unambiguous_year_first_daily_slash_date_needs_no_timezone(self) -> None:
+        batch = self.stage("timestamp,open,high,low,close\n2026/07/13,1,2,0,1\n")
+        self.assertEqual(batch.rejections, ())
+        self.assertEqual(batch.bars[0].source_timezone_interpretation, "D1_DATE_YEAR_FIRST_AT_UTC_MIDNIGHT")
+
     def test_csv_identity_must_agree_with_explicit_identity(self) -> None:
         batch = self.stage(
             "symbol,timeframe,timestamp,open,high,low,close\n"

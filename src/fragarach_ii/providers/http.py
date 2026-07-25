@@ -22,6 +22,11 @@ class HttpResponse:
     content_type: str
     body: bytes
     host: str
+    headers: tuple[tuple[str, str], ...] = ()
+
+    def header(self, name: str) -> str | None:
+        expected = name.lower()
+        return next((value for key, value in self.headers if key.lower() == expected), None)
 
 
 class HttpTransport(Protocol):
@@ -63,6 +68,11 @@ class BoundedHttpsTransport:
                 content_type=response.getheader("Content-Type", ""),
                 body=body,
                 host=request.host,
+                headers=tuple(
+                    (key, value)
+                    for key, value in response.getheaders()
+                    if key.lower() in {"api-credits-used", "api-credits-left", "retry-after"}
+                ),
             )
         finally:
             connection.close()

@@ -10,6 +10,7 @@ from fragarach_ii.lane_commissioning import ensure_commissioned_lane,market_poli
 from fragarach_ii.truth_engine import truth_state_for_lane
 from fragarach_ii.estate_truth_service import estate_truth_state
 from fragarach_ii.external_consumer_service import HistoryService,INTRADAY_CONTRACT
+from fragarach_ii.estate_timeframe_audit import audit_target_timeframes
 
 NOW=datetime(2026,7,10,16,30,tzinfo=UTC)
 class Transport:
@@ -23,19 +24,25 @@ class Spec025IntradayTests(unittest.TestCase):
     def tearDown(self):self.tmp.cleanup()
     def test_migration_8_preserves_v1_and_table_boundary(self):
         with open_read_only(self.db) as c:
-            self.assertEqual(c.execute("select max(version) from schema_migrations").fetchone()[0],8)
-            self.assertEqual(c.execute("select count(*) from sqlite_schema where type='table' and name not like 'sqlite_%'").fetchone()[0],10)
+            self.assertEqual(c.execute("select max(version) from schema_migrations").fetchone()[0],10)
+            self.assertEqual(c.execute("select count(*) from sqlite_schema where type='table' and name not like 'sqlite_%'").fetchone()[0],12)
         self.assertTrue(verify_integrity(self.db).ok)
     def test_policy_is_separate_from_lane_state(self):
         self.assertEqual(market_policy("US_EQUITIES","H1"),"INTENTIONALLY_DEFERRED")
         ensure_commissioned_lane(self.db,"AUDUSD","H1",observed_at="2026-07-10T01:00:00+00:00")
         with open_read_only(self.db) as c:self.assertEqual(c.execute("select registration_timeframe from evidence_lanes where asset='AUDUSD' and timeframe='H1'").fetchone()[0],"D1")
 
-    def test_crypto_remains_a_local_authority_fact_stop(self):
-        with self.assertRaisesRegex(ValueError,"LOCAL_AUTHORITY_STOP: CRYPTO"):
-            ensure_commissioned_lane(self.db,"BTCUSD","H1",observed_at="2026-07-10T01:00:00+00:00")
+    def test_crypto_uses_approved_continuous_authority(self):
+        ensure_commissioned_lane(self.db,"BTCUSD","H1",observed_at="2026-07-10T01:00:00+00:00")
         capability=next(x for x in estate_truth_state(self.db)["timeframe_capabilities"] if x["symbol"]=="BTCUSD")
-        self.assertEqual(capability["blocked_timeframes"],["H1","M30","M5"])
+        self.assertEqual(capability["blocked_timeframes"],[])
+        self.assertIn("H1",capability["active_timeframes"])
+
+    def test_target_estate_audit_is_registration_derived_and_records_every_lane(self):
+        audit=audit_target_timeframes(self.db)
+        rows=[row for row in audit["rows"] if row["symbol"]=="BTCUSD"]
+        self.assertEqual([row["timeframe"] for row in rows],["D1","H1","M30","M5"])
+        self.assertEqual(rows[1]["missing_reason"],"EVIDENCE_LANE_NOT_DECLARED")
     def test_audusd_h1_chain_quarantines_bad_row_and_serves_truth(self):
         ensure_commissioned_lane(self.db,"AUDUSD","H1",observed_at="2026-07-10T01:00:00+00:00")
         body=json.dumps({"status":"ok","meta":{"symbol":"AUD/USD","interval":"1h"},"values":[

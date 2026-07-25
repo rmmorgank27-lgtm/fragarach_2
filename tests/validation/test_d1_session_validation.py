@@ -7,7 +7,12 @@ import unittest
 from datetime import UTC, date, datetime
 from pathlib import Path
 
-from fragarach_ii.storage import open_read_only, registered_writer
+from fragarach_ii.storage import (
+    RegistrationCandidate,
+    open_read_only,
+    register_instrument,
+    registered_writer,
+)
 from fragarach_ii.storage.migrations import apply_migrations
 from fragarach_ii.validation import ValidationError, validate_lane
 
@@ -106,6 +111,126 @@ class D1SessionValidationTests(unittest.TestCase):
         fx = self.root / "fx.sqlite3"
         _create_lane(fx, "AUDUSD", ["2026-07-10", "2026-07-13"])
         self.assertEqual(self.validate(fx, "AUDUSD", "2026-07-13").as_dict()["missing_session_dates"], [])
+
+    def test_legacy_stock_registration_resolves_operational_calendar_without_identity_rewrite(self) -> None:
+        path = self.root / "googl.sqlite3"
+        register_instrument(
+            path,
+            RegistrationCandidate(
+                asset="GOOGL",
+                timeframe="D1",
+                instrument_family="GOOGL",
+                local_symbol="GOOGL",
+                display_name="Alphabet Class A Common Stock",
+                instrument_type="COMMON_STOCK",
+                asset_class="US_EQUITIES",
+                representation_type="COMMON_STOCK",
+                trading_currency="USD",
+                exchange_name="NASDAQ",
+                provider_id="TWELVE_DATA",
+                provider_contract="TWELVE_DATA_TIME_SERIES_D1_V1",
+                provider_symbol="GOOGL",
+                provider_instrument_type="Common Stock",
+                provider_exchange="NASDAQ",
+                calendar_id="REGISTRY_D1_V1",
+                calendar_version=1,
+                gap_doctrine_id="FRAGARACH_II_D1_GAP_DOCTRINE_V1",
+                gap_doctrine_version=1,
+            ),
+            registered_at_utc=OBSERVED.isoformat(),
+        )
+        _create_lane(path, "GOOGL", ["2026-07-02", "2026-07-06"])
+        result = self.validate(path, "GOOGL", "2026-07-06").as_dict()
+        self.assertEqual(result["calendar_id"], "US_EQUITIES_D1_V1")
+        self.assertEqual(result["expected_session_count"], 2)
+        connection = open_read_only(path)
+        try:
+            stored = connection.execute(
+                "SELECT calendar_id FROM instrument_registrations WHERE asset='GOOGL' AND timeframe='D1'"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertEqual(stored, "REGISTRY_D1_V1")
+
+    def test_legacy_australian_stock_registration_resolves_asx_calendar(self) -> None:
+        path = self.root / "asxbhp.sqlite3"
+        register_instrument(
+            path,
+            RegistrationCandidate(
+                asset="ASXBHP",
+                timeframe="D1",
+                instrument_family="ASXBHP",
+                local_symbol="ASXBHP",
+                display_name="BHP Group Limited",
+                instrument_type="COMMON_STOCK",
+                asset_class="AUSTRALIAN_EQUITIES",
+                representation_type="COMMON_STOCK",
+                trading_currency="AUD",
+                exchange_name="ASX",
+                provider_id="YAHOO_FINANCE",
+                provider_contract="YAHOO_FINANCE_CHART_D1_V1",
+                provider_symbol="BHP.AX",
+                provider_instrument_type="Common Stock",
+                provider_exchange="ASX",
+                calendar_id="REGISTRY_D1_V1",
+                calendar_version=1,
+                gap_doctrine_id="FRAGARACH_II_D1_GAP_DOCTRINE_V1",
+                gap_doctrine_version=1,
+            ),
+            registered_at_utc=OBSERVED.isoformat(),
+        )
+        _create_lane(path, "ASXBHP", ["2026-07-15", "2026-07-16"])
+        result = self.validate(path, "ASXBHP", "2026-07-16").as_dict()
+        self.assertEqual(result["calendar_id"], "AUSTRALIAN_EQUITIES_D1_V1")
+        self.assertEqual(result["expected_session_count"], 2)
+        connection = open_read_only(path)
+        try:
+            stored = connection.execute(
+                "SELECT calendar_id FROM instrument_registrations WHERE asset='ASXBHP' AND timeframe='D1'"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertEqual(stored, "REGISTRY_D1_V1")
+
+    def test_legacy_uk_stock_registration_resolves_lse_calendar(self) -> None:
+        path = self.root / "lserio.sqlite3"
+        register_instrument(
+            path,
+            RegistrationCandidate(
+                asset="LSERIO",
+                timeframe="D1",
+                instrument_family="LSERIO",
+                local_symbol="LSERIO",
+                display_name="Rio Tinto plc",
+                instrument_type="COMMON_STOCK",
+                asset_class="UK_EQUITIES",
+                representation_type="COMMON_STOCK",
+                trading_currency="GBP",
+                exchange_name="LSE",
+                provider_id="YAHOO_FINANCE",
+                provider_contract="YAHOO_FINANCE_CHART_D1_V1",
+                provider_symbol="RIO.L",
+                provider_instrument_type="Common Stock",
+                provider_exchange="LSE",
+                calendar_id="REGISTRY_D1_V1",
+                calendar_version=1,
+                gap_doctrine_id="FRAGARACH_II_D1_GAP_DOCTRINE_V1",
+                gap_doctrine_version=1,
+            ),
+            registered_at_utc=OBSERVED.isoformat(),
+        )
+        _create_lane(path, "LSERIO", ["2026-07-15", "2026-07-16"])
+        result = self.validate(path, "LSERIO", "2026-07-16").as_dict()
+        self.assertEqual(result["calendar_id"], "UK_EQUITIES_D1_V1")
+        self.assertEqual(result["expected_session_count"], 2)
+        connection = open_read_only(path)
+        try:
+            stored = connection.execute(
+                "SELECT calendar_id FROM instrument_registrations WHERE asset='LSERIO' AND timeframe='D1'"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertEqual(stored, "REGISTRY_D1_V1")
 
     def test_weekend_bar_is_outside_and_future_bar_is_beyond_boundary(self) -> None:
         path = self.root / "outside.sqlite3"

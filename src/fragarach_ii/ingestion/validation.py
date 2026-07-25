@@ -12,6 +12,9 @@ from fragarach_ii.staging.contract import StagedBar, StagingRejection
 
 
 DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+DAILY_SLASH_DATE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})$")
+DAILY_YEAR_FIRST_SLASH_DATE = re.compile(r"^(\d{4})/(\d{1,2})/(\d{1,2})$")
+D1_DATE_FORMATS = frozenset({"AUTO", "DAY_FIRST", "MONTH_FIRST", "YEAR_FIRST"})
 
 
 class RowValidationError(ValueError):
@@ -38,6 +41,7 @@ def stage_record(
     source_row_number: int,
     received_at: str,
     source_timezone: str | None = None,
+    d1_date_format: str = "AUTO",
 ) -> StagedBar:
     csv_symbol = (fields.get("symbol") or "").strip() or None
     csv_timeframe = (fields.get("timeframe") or "").strip() or None
@@ -48,7 +52,10 @@ def stage_record(
 
     source_timestamp = (fields.get("timestamp") or "").strip()
     timestamp, timezone_interpretation = interpret_timestamp(
-        source_timestamp, timeframe, source_timezone=source_timezone
+        source_timestamp,
+        timeframe,
+        source_timezone=source_timezone,
+        d1_date_format=d1_date_format,
     )
     open_value = parse_decimal(fields.get("open"), "open")
     high_value = parse_decimal(fields.get("high"), "high")
@@ -116,15 +123,32 @@ def deduplicate_bars(
     return ordered, tuple(rejections), identical, conflicting
 
 
-def parse_utc_timestamp(value: str, timeframe: str, source_timezone: str | None = None) -> int:
-    return interpret_timestamp(value, timeframe, source_timezone=source_timezone)[0]
+def parse_utc_timestamp(
+    value: str,
+    timeframe: str,
+    source_timezone: str | None = None,
+    d1_date_format: str = "AUTO",
+) -> int:
+    return interpret_timestamp(
+        value,
+        timeframe,
+        source_timezone=source_timezone,
+        d1_date_format=d1_date_format,
+    )[0]
 
 
 def interpret_timestamp(
-    value: str, timeframe: str, *, source_timezone: str | None = None
+    value: str,
+    timeframe: str,
+    *,
+    source_timezone: str | None = None,
+    d1_date_format: str = "AUTO",
 ) -> tuple[int, str]:
     if not value:
         raise RowValidationError("INVALID_TIMESTAMP", "timestamp is required")
+    date_format = d1_date_format.strip().upper().replace("-", "_")
+    if date_format not in D1_DATE_FORMATS:
+        raise RowValidationError("INVALID_D1_DATE_FORMAT", f"unsupported D1 date format {d1_date_format}")
     if DATE_ONLY.fullmatch(value):
         if timeframe != "D1":
             raise RowValidationError(
@@ -136,6 +160,11 @@ def interpret_timestamp(
             raise RowValidationError("INVALID_TIMESTAMP", str(error)) from error
         parsed = datetime.combine(parsed_date, datetime.min.time(), UTC)
         interpretation = "D1_DATE_AT_UTC_MIDNIGHT"
+    elif timeframe == "D1" and (
+        DAILY_SLASH_DATE.fullmatch(value) or DAILY_YEAR_FIRST_SLASH_DATE.fullmatch(value)
+    ):
+        parsed_date, interpretation = _parse_slash_daily_date(value, date_format)
+        parsed = datetime.combine(parsed_date, datetime.min.time(), UTC)
     else:
         if "/" in value:
             raise RowValidationError(
@@ -165,6 +194,31 @@ def interpret_timestamp(
             interpretation = f"EXPLICIT_OFFSET:{_format_offset(parsed.utcoffset())}"
         parsed = parsed.astimezone(UTC)
     return int(parsed.timestamp()), interpretation
+
+
+def _parse_slash_daily_date(value: str, date_format: str) -> tuple[date, str]:
+    year_first = DAILY_YEAR_FIRST_SLASH_DATE.fullmatch(value)
+    if year_first is not None:
+        year, month, day = (int(part) for part in year_first.groups())
+        try:
+            parsed = date(year, month, day)
+        except ValueError as error:
+            raise RowValidationError("INVALID_TIMESTAMP", str(error)) from error
+        return parsed, "D1_DATE_YEAR_FIRST_AT_UTC_MIDNIGHT"
+    match = DAILY_SLASH_DATE.fullmatch(value)
+    assert match is not None
+    first, second, year = (int(part) for part in match.groups())
+    if date_format == "AUTO":
+        raise RowValidationError(
+            "AMBIGUOUS_TIMESTAMP",
+            "D1 slash date is ambiguous; choose Day/Month/Year or Month/Day/Year",
+        )
+    day, month = (first, second) if date_format == "DAY_FIRST" else (second, first)
+    try:
+        parsed = date(year, month, day)
+    except ValueError as error:
+        raise RowValidationError("INVALID_TIMESTAMP", str(error)) from error
+    return parsed, f"D1_DATE_{date_format}_AT_UTC_MIDNIGHT"
 
 
 def _localize_reviewed_source_time(value: datetime, timezone_name: str) -> datetime:

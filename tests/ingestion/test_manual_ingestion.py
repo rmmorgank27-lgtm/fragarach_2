@@ -9,6 +9,7 @@ from pathlib import Path
 from fragarach_ii.ingestion.manual import ingest_manual_file
 from fragarach_ii.storage import initialize_database,open_read_only, verify_integrity
 from fragarach_ii.lane_commissioning import ensure_commissioned_lane
+from fragarach_ii.scheduler_service import SchedulerJournal
 from fragarach_ii.truth_engine import truth_state_for_lane
 
 
@@ -79,6 +80,43 @@ class ManualIngestionTests(unittest.TestCase):
         finally:
             connection.close()
         self.assertTrue(verify_integrity(self.database).ok)
+
+    def test_progress_is_driven_by_real_manual_ingestion_boundaries(self) -> None:
+        source = self.write("progress.csv", "2026-07-09,1,2,0,1,10\n")
+        stages: list[str] = []
+        result = self.ingest(source, progress=stages.append)
+        self.assertEqual(result.transaction_state, "committed")
+        self.assertEqual(stages, ["reading", "validating", "ingesting"])
+
+    def test_manual_import_returns_redacted_step_timing_trace(self) -> None:
+        source = self.write("timing.csv", "2026-07-09,1,2,0,1,10\n")
+        result = self.ingest(source)
+        names = [item["step_name"] for item in result.timing_trace]
+        self.assertEqual(names, ["file_read", "parse_and_validate", "canonical_admission"])
+        for item in result.timing_trace:
+            self.assertIn("operation_id", item)
+            self.assertIn("started_at", item)
+            self.assertIn("ended_at", item)
+            self.assertIn("duration_ms", item)
+        self.assertNotIn("payload", result.as_json())
+
+    def test_manual_csv_import_coexists_with_sqlite_scheduler_state(self) -> None:
+        journal_path = self.root / "scheduler.json"
+        journal = SchedulerJournal(self.database, journal_path)
+        journal.lane("AUDUSD", "D1").update({
+            "queue_state": "Ready", "scheduler_owned": True,
+        })
+        journal.save()
+
+        source = self.write("concurrent.csv", "2026-07-09,1,2,0,1,10\n")
+        result = self.ingest(source)
+
+        self.assertEqual(result.transaction_state, "committed")
+        restored = SchedulerJournal(self.database, journal_path)
+        self.assertEqual(restored.lane("AUDUSD", "D1")["queue_state"], "Ready")
+        with open_read_only(self.database) as connection:
+            self.assertEqual(connection.execute("SELECT count(*) FROM bars").fetchone()[0], 1)
+            self.assertEqual(connection.execute("SELECT count(*) FROM scheduler_runtime_state").fetchone()[0], 1)
 
     def test_identical_bytes_and_different_filename_are_idempotent(self) -> None:
         first = self.write("first.csv", "2026-07-09,1,2,0,1,\n")

@@ -1,9 +1,12 @@
 {
   "calendars": {
+    "AUSTRALIAN_EQUITIES_D1_V1": "australian_equities_d1.v1.json",
     "CRYPTO_D1_V1": "crypto_d1.v1.json",
     "FX_D1_V1": "fx_d1.v1.json",
-    "METALS_D1_V1": "metals_d1.v1.json"
+    "METALS_D1_V1": "metals_d1.v1.json",
+    "UK_EQUITIES_D1_V1": "uk_equities_d1.v1.json",
+    "US_EQUITIES_D1_V1": "us_equities_d1.v1.json"
   },
   "format": "fragarach_ii.calendar_registry.v1",
-  "registry_checksum": "368421535ded1e952b3d44e0d8533b18a17c0d84a47d52f1d3e2b9b3bf20275a"
+  "registry_checksum": "34f8a5517bfa5366dc8eeddcdb64fdf382cb10bbad63feb3e3d7d42fa2d2e1f9"
 }

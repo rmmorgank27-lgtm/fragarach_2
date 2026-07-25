@@ -5,6 +5,7 @@ __pycache__/
 *.sqlite3-shm
 *.sqlite3-wal
 *.writer.lock
+*.scheduler.json
 .coverage
 .pytest_cache/
 .venv/
@@ -12,3 +13,9 @@ build/
 .build/
 dist/
 *.egg-info/
+
+# Local market evidence, runtime journals, and repair bundles are operational
+# artifacts.  They are intentionally not part of the source repository.
+/data/
+/FRAGARACH_II_CONSTITUTION_FIX_V1.zip
+/FRAGARACH_II_CONSTITUTION_FIX_V1/

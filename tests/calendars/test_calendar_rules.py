@@ -45,6 +45,36 @@ class CalendarRuleTests(unittest.TestCase):
         self.assertTrue(session_classification(date(2026, 12, 24), calendar)[0])
         self.assertFalse(session_classification(date(2026, 7, 11), calendar)[0])
 
+    def test_us_equities_use_observed_holidays_and_published_emergency_closures(self) -> None:
+        calendar = self.registry.calendar_by_id("US_EQUITIES_D1_V1")
+        self.assertEqual(calendar.timezone_basis, "America/New_York")
+        self.assertFalse(session_classification(date(2026, 7, 3), calendar)[0])
+        self.assertFalse(session_classification(date(2026, 6, 19), calendar)[0])
+        self.assertFalse(session_classification(date(2012, 10, 29), calendar)[0])
+        self.assertTrue(session_classification(date(2026, 7, 6), calendar)[0])
+
+    def test_australian_equities_use_asx_cash_market_holidays(self) -> None:
+        calendar = self.registry.calendar_by_id("AUSTRALIAN_EQUITIES_D1_V1")
+        self.assertEqual(calendar.timezone_basis, "Australia/Sydney")
+        self.assertFalse(session_classification(date(2026, 1, 26), calendar)[0])
+        self.assertFalse(session_classification(date(2026, 4, 3), calendar)[0])
+        self.assertFalse(session_classification(date(2026, 4, 6), calendar)[0])
+        self.assertFalse(session_classification(date(2026, 6, 8), calendar)[0])
+        self.assertFalse(session_classification(date(2026, 12, 28), calendar)[0])
+        self.assertTrue(session_classification(date(2026, 7, 15), calendar)[0])
+
+    def test_uk_equities_use_lse_cash_market_holidays(self) -> None:
+        calendar = self.registry.calendar_by_id("UK_EQUITIES_D1_V1")
+        self.assertEqual(calendar.timezone_basis, "Europe/London")
+        self.assertFalse(session_classification(date(2026, 1, 1), calendar)[0])
+        self.assertFalse(session_classification(date(2026, 4, 3), calendar)[0])
+        self.assertFalse(session_classification(date(2026, 4, 6), calendar)[0])
+        self.assertFalse(session_classification(date(2026, 5, 4), calendar)[0])
+        self.assertFalse(session_classification(date(2026, 5, 25), calendar)[0])
+        self.assertFalse(session_classification(date(2026, 8, 31), calendar)[0])
+        self.assertFalse(session_classification(date(2026, 12, 28), calendar)[0])
+        self.assertTrue(session_classification(date(2026, 7, 15), calendar)[0])
+
     def test_explicit_overrides_take_precedence_and_are_reported(self) -> None:
         base = self.registry.calendar_by_id("FX_D1_V1")
         calendar = CalendarDefinition(

@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 from datetime import UTC,date,datetime
+from zoneinfo import ZoneInfo
 
 from fragarach_ii.ingestion.validation import RowValidationError, deduplicate_bars, stage_record
 from fragarach_ii.staging import StagingBatch, StagingRejection
@@ -33,16 +34,26 @@ def stage_twelve_data_response(
     timeframe: str="D1",
     asset_class: str="FX",
     observed_at: datetime|None=None,
+    allow_empty: bool=False,
 ) -> StagingBatch:
     try:
         payload = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ProviderPayloadError("MALFORMED_PAYLOAD", "response is not valid UTF-8 JSON") from error
     if not isinstance(payload, dict) or payload.get("status") != "ok":
-        raise ProviderPayloadError("PROVIDER_DECLARED_ERROR", "provider response status is not ok")
+        code = payload.get("code") if isinstance(payload, dict) else None
+        message = str(payload.get("message", "provider response status is not ok")) if isinstance(payload, dict) else "provider response status is not ok"
+        normalized = message.lower()
+        if code in {401, 403} or "api key" in normalized or "authentication" in normalized:
+            raise ProviderPayloadError("AUTHENTICATION_FAILED", f"Twelve Data {code or 'authentication'}: {message}")
+        if code == 429 or "rate limit" in normalized:
+            raise ProviderPayloadError("RATE_LIMITED", f"Twelve Data {code or 'rate limit'}: {message}")
+        if "quota" in normalized or "credits" in normalized:
+            raise ProviderPayloadError("QUOTA_EXCEEDED", f"Twelve Data quota: {message}")
+        raise ProviderPayloadError("PROVIDER_DECLARED_ERROR", f"Twelve Data {code or 'error'}: {message}")
     meta = payload.get("meta")
     values = payload.get("values")
-    if not isinstance(meta, dict) or not isinstance(values, list) or not values:
+    if not isinstance(meta, dict) or not isinstance(values, list) or (not values and not allow_empty):
         raise ProviderPayloadError("NO_USABLE_OBSERVATIONS", "response has no observation array")
     if meta.get("symbol") != provider_symbol:
         raise ProviderPayloadError("SYMBOL_MISMATCH", "provider response symbol mismatch")
@@ -63,7 +74,12 @@ def stage_twelve_data_response(
             else:
                 profile=profile_for(asset_class,timeframe);epoch=canonical_open(str(timestamp_text),profile)
                 if not is_expected_open(epoch,profile):raise ValueError("OUTSIDE_EXPECTED_SESSION")
-                normalized_date=datetime.fromtimestamp(epoch,UTC).date();canonical=iso(epoch)
+                # Intraday request bounds are provider-local calendar dates.
+                # Comparing the canonical UTC date rejects the final hours of
+                # every New York day once they cross 00:00 UTC.
+                normalized_date=datetime.fromtimestamp(epoch,UTC).astimezone(
+                    ZoneInfo(profile.timezone)
+                ).date();canonical=iso(epoch)
                 now=(observed_at or datetime.now(UTC)).astimezone(UTC)
                 if epoch+profile.seconds>int(now.timestamp()):raise ValueError("INCOMPLETE_CURRENT_INTERVAL")
             if not from_date<=normalized_date<=through_date:raise ValueError("OUT_OF_RANGE_OBSERVATION")

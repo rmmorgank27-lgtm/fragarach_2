@@ -2,7 +2,8 @@ import AppKit
 import OperationsCore
 import SwiftUI
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+@MainActor final class AppDelegate: NSObject, NSApplicationDelegate {
+    var terminationHandler:(()->Void)?
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
@@ -17,14 +18,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if alert.runModal() == .alertSecondButtonReturn { QuitGuard.shared.requestCancellation() }
         return .terminateCancel
     }
+    func applicationWillTerminate(_ notification: Notification) { terminationHandler?() }
 }
 
 @main struct FragarachIIApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     @StateObject private var store = ConsoleStore()
     var body: some Scene {
-        WindowGroup("Fragarach II — Operations Console") { ContentView().environmentObject(store).frame(minWidth: 980,minHeight: 650).task { await store.refresh() } }
+        WindowGroup("Fragarach II — Operations Console") { ContentView().environmentObject(store).frame(minWidth: 720,minHeight: 650).task { delegate.terminationHandler={store.disconnectSchedulerMonitor()};await store.startup() } }
             .defaultSize(width: 1280,height: 800)
+            .commands { MarketSearchCommands() }
         Settings { DiagnosticsSettingsView().environmentObject(store).frame(width:600) }
     }
 }

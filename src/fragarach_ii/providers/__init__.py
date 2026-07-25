@@ -4,3 +4,6 @@ from .twelve_data import AcquisitionError, AcquisitionResult, acquire_twelve_dat
 from .instrument_search import InstrumentSearchError, InstrumentSearchResult, search_instrument
 
 __all__ = ["AcquisitionError", "AcquisitionResult", "acquire_twelve_data", "InstrumentSearchError", "InstrumentSearchResult", "search_instrument"]
+from .orchestrated import acquire_from_provider
+
+__all__ = ["acquire_from_provider"]

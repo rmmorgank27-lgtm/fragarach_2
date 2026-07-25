@@ -39,7 +39,8 @@ class RegistrationCandidate:
     trading_currency: str; exchange_name: str; provider_id: str | None; provider_contract: str | None
     provider_symbol: str | None; provider_instrument_type: str | None; calendar_id: str
     calendar_version: int; gap_doctrine_id: str; gap_doctrine_version: int
-    aliases: tuple[Alias, ...] = (); underlying_reference: str | None = None
+    aliases: tuple[Alias, ...] = (); selected_representation: str | None = None
+    underlying_reference: str | None = None
     contract_or_series: str | None = None; jurisdiction: str | None = None
     exchange_mic: str | None = None; provider_exchange: str | None = None
     provider_country: str | None = None
@@ -75,6 +76,8 @@ def canonical_registration(candidate: RegistrationCandidate) -> tuple[str, str, 
         "semantic_equivalence": "DISTINCT_INSTRUMENT", "timeframe": candidate.timeframe,
         "trading_currency": candidate.trading_currency, "underlying_reference": candidate.underlying_reference,
     }
+    if candidate.selected_representation is not None:
+        identity["selected_representation"] = candidate.selected_representation
     identity_json = json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return aliases_json, provider_key, identity_json, hashlib.sha256(identity_json.encode()).hexdigest()
 
@@ -115,6 +118,13 @@ def register_instrument(database_path: str | Path, candidate: RegistrationCandid
         row=connection.execute("SELECT identity_json,identity_checksum_sha256 FROM instrument_registrations WHERE asset=? AND timeframe=?",(candidate.asset,candidate.timeframe)).fetchone()
         if row is None or hashlib.sha256(row[0].encode()).hexdigest()!=row[1]: raise RegistrationError("READBACK_FAILED",candidate.asset)
     finally: connection.close()
+    # Registration changes Estate/catalogue availability even before the first
+    # bar arrives.  Keep this projection work out of the durable registration
+    # transaction, but make the dirty state durable immediately afterwards.
+    from ..publication_service import enqueue_publication
+    enqueue_publication(
+        database_path, [(candidate.asset, "D1")], trigger="SYMBOL_REGISTRATION"
+    )
     return RegistrationResult("fragarach_ii.instrument_registration_result.v1",outcome,candidate.asset,candidate.timeframe,checksum,provider_key,status)
 
 

@@ -29,7 +29,7 @@ class InstrumentRegistrationTests(unittest.TestCase):
     def tearDown(self): self.tmp.cleanup()
 
     def test_migration_checksum_nine_tables_and_initial_catalogue(self):
-        report=verify_integrity(self.db);self.assertEqual(report.application_tables,APPLICATION_TABLES);self.assertEqual(len(APPLICATION_TABLES),10)
+        report=verify_integrity(self.db);self.assertEqual(report.application_tables,APPLICATION_TABLES);self.assertEqual(len(APPLICATION_TABLES),12)
         c=open_read_only(self.db)
         try:
             self.assertEqual(c.execute("SELECT checksum_sha256 FROM schema_migrations WHERE version=4").fetchone()[0],migration_4_checksum())

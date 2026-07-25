@@ -5,13 +5,15 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from collections.abc import Callable
 
+from .freshness import normalized_utc
 from .storage import open_read_only
 from .truth_engine import TruthEngineError, truth_state_for_lane
 
 
 AUTHORITY_CONTRACT = "fragarach_ii.operational_authority.v1"
-AUTHORITY_VERSION = 1
+AUTHORITY_VERSION = 2
 
 
 class AuthorityServiceError(RuntimeError):
@@ -29,6 +31,7 @@ def serve_historical_authority(
     timeframe: str,
     start_time_utc: int | None = None,
     end_time_utc: int | None = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> dict[str, object]:
     """Return one consumer-independent authority response without mutation."""
 
@@ -91,17 +94,32 @@ def serve_historical_authority(
             (canonical_symbol, normalized_timeframe),
         ).fetchone()
         validation = json.loads(lane_state[0]) if lane_state and lane_state[0] else None
-        provenance_count = connection.execute(
-            "SELECT count(*) FROM provenance WHERE symbol=? AND timeframe=?",
+        provenance = connection.execute(
+            "SELECT count(*),max(recorded_at) FROM provenance WHERE symbol=? AND timeframe=?",
             (canonical_symbol, normalized_timeframe),
-        ).fetchone()[0]
+        ).fetchone()
+        authority_generated = normalized_utc(clock() if clock else None)
         try:
             truth_state = truth_state_for_lane(
-                database_path, symbol=canonical_symbol, timeframe=normalized_timeframe
+                database_path,
+                symbol=canonical_symbol,
+                timeframe=normalized_timeframe,
+                as_of=authority_generated,
+                authority_generated=authority_generated.isoformat(),
             )
         except TruthEngineError as error:
             raise AuthorityServiceError(error.code, str(error)) from error
-        return _response(canonical_symbol, normalized_timeframe, registration, bars, validation, provenance_count, truth_state)
+        return _response(
+            canonical_symbol,
+            normalized_timeframe,
+            registration,
+            bars,
+            validation,
+            provenance[0],
+            provenance[1],
+            truth_state,
+            authority_generated.isoformat(),
+        )
     finally:
         connection.close()
 
@@ -125,12 +143,27 @@ def _registration_by_alias(connection, symbol: str, timeframe: str):
     return matches[0] if matches else None
 
 
-def _response(symbol, timeframe, registration, rows, validation, provenance_count, truth_state):
+def _response(
+    symbol,
+    timeframe,
+    registration,
+    rows,
+    validation,
+    provenance_count,
+    provider_observed_at,
+    truth_state,
+    authority_generated,
+):
     earliest = rows[0][0]
-    latest = rows[-1][0]
-    caodt = _iso_utc(latest)
+    latest_canonical_observation = truth_state["latest_canonical_observation"]
     missing = validation.get("missing_expected_session_count", 0) if validation else None
-    current = 0 if validation and validation.get("latest_expected_session_present") else (1 if validation else None)
+    current = (
+        0
+        if truth_state["freshness"]["state"] == "Current"
+        else 1
+        if truth_state["freshness"]["state"] == "Behind"
+        else None
+    )
     historical = max(0, missing - (current or 0)) if missing is not None else None
     return {
         "contract": AUTHORITY_CONTRACT,
@@ -146,7 +179,12 @@ def _response(symbol, timeframe, registration, rows, validation, provenance_coun
             }
             for row in rows
         ],
-        "caodt": caodt,
+        "caodt": latest_canonical_observation,
+        "latest_canonical_observation": latest_canonical_observation,
+        "authority_generated": authority_generated,
+        "authority_revision": truth_state["authority_revision"],
+        "freshness": truth_state["freshness"],
+        "validation": {"state": truth_state["validation_state"], "summary": validation},
         "authority_state": truth_state["authority_state"],
         "validation_state": truth_state["validation_state"],
         "truth_score": {"score": truth_state["truth_score"], "maximum": 100, "components": {name: truth_state["explanation"]["components"][name] for name in ("authority", "integrity", "freshness", "historical_depth", "continuity")}},
@@ -163,14 +201,14 @@ def _response(symbol, timeframe, registration, rows, validation, provenance_coun
             "provider": registration[3],
             "provider_contract": registration[4],
             "provider_symbol": registration[5],
-            "provider_freshness": caodt,
+            "provider_freshness": provider_observed_at or "NOT_RECORDED",
             "provider_confidence": truth_state["provider_score"],
             "provider_entitlement": "NOT_RECORDED",
         },
         "operational_metadata": {
             "row_count": len(rows),
             "earliest_bar": _iso_utc(earliest),
-            "latest_bar": caodt,
+            "latest_bar": latest_canonical_observation,
             "timeframe": timeframe,
             "symbol": symbol,
             "authority_version": AUTHORITY_VERSION,

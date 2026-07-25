@@ -1,66 +1,531 @@
 import OperationsCore
 import SwiftUI
 
-struct DiscoverMarketView:View {
-    @EnvironmentObject var store:ConsoleStore
-    @State private var query="";@State private var discovery:MarketDiscoveryResult?;@State private var selectedMarketID:String?;@State private var selectedRepresentationID:String?;@State private var reviewPlan:MarketRegistrationPlan?;@State private var retirementImpact:RetirementImpact?;@State private var retirementReceipt:RetirementReceipt?;@State private var removalImpact:PermanentRemovalImpact?;@State private var reactivationReceipt:ReactivationReceipt?;@State private var removalReceipt:PermanentRemovalReceipt?;@State private var registeredSymbol:String?;@State private var registeredStatus:String?;@State private var error:String?
-    private var selectedMarket:DiscoveredMarket?{discovery?.markets.first{$0.id==selectedMarketID} ?? (discovery?.markets.count==1 ? discovery?.markets.first:nil)}
-    private var selectedRepresentation:MarketRepresentation?{selectedMarket?.representations.first{$0.id==selectedRepresentationID}}
-    private var busy:Bool{store.activeOperationID != nil}
-    var body:some View{VStack(alignment:.leading,spacing:14){
-        Text("Discover Market").font(.largeTitle);Text("Identify a market, select its tradable representation, and add it to Fragarach.").foregroundStyle(.secondary)
-        HStack{TextField("Market name, symbol, company, index, commodity, FX or crypto pair",text:$query).textFieldStyle(.roundedBorder).onSubmit{discover()};Button("Discover"){discover()}.buttonStyle(.borderedProminent).disabled(query.trimmingCharacters(in:.whitespaces).isEmpty||busy);if busy{ProgressView().controlSize(.small)}}
-        if let error{ContentUnavailableView("Operation failed",systemImage:"exclamationmark.triangle",description:Text(error))}
-        else if let discovery{if discovery.discoveryStatus=="PARTIAL"{HStack{Label(discovery.explanation,systemImage:"questionmark.circle").font(.headline).foregroundStyle(.orange);if discovery.explanation=="Did you mean Solana?"{Button("Confirm Solana"){query="Solana";discover()}.buttonStyle(.borderedProminent)}}};resultView(discovery)}
-        else{ContentUnavailableView("Describe a market",systemImage:"map",description:Text("Try XAGUSD, Silver, Google, US30, NZDJPY, Bitcoin, or a listed symbol."))}
-        Spacer(minLength:0)
-    }.padding().sheet(item:$reviewPlan){plan in RegistrationReview(plan:plan,onConfirm:{confirm(plan)},onCancel:{reviewPlan=nil})}.sheet(item:$retirementImpact){impact in RetirementReview(impact:impact,onConfirm:confirmRetirement)}.sheet(item:$retirementReceipt){receipt in RetirementSuccess(receipt:receipt,onDone:{retirementReceipt=nil;discover()})}.sheet(item:$removalImpact){impact in PermanentRemovalReview(impact:impact,onConfirm:confirmPermanentRemoval)}.sheet(item:$reactivationReceipt){receipt in ReactivationSuccess(receipt:receipt,onDone:{reactivationReceipt=nil;continueToAcquire(receipt.canonicalInstrument)})}.sheet(item:$removalReceipt){receipt in PermanentRemovalSuccess(receipt:receipt,onDone:{removalReceipt=nil;discover()})}}
-    @ViewBuilder private func resultView(_ result:MarketDiscoveryResult)->some View{
-        if result.markets.isEmpty{UnknownMarketView(discovery:result)}
-        else if result.markets.count==1,let market=result.markets.first{ScrollView{marketDetail(market).frame(maxWidth:.infinity,alignment:.leading)}}
-        else{VStack(alignment:.leading,spacing:12){Text("Select the intended underlying market").font(.headline);Picker("Market",selection:$selectedMarketID){ForEach(result.markets){Text($0.underlyingMarket).tag(Optional($0.id))}}.pickerStyle(.segmented);if let market=selectedMarket{ScrollView{marketDetail(market)}}}}
+private struct MarketSearchFocusActionKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+extension FocusedValues {
+    var focusMarketSearch: (() -> Void)? {
+        get { self[MarketSearchFocusActionKey.self] }
+        set { self[MarketSearchFocusActionKey.self] = newValue }
     }
-    private func marketDetail(_ market:DiscoveredMarket)->some View{MarketDetail(market:market,selection:$selectedRepresentationID,registeredSymbol:registeredSymbol,registeredStatus:registeredStatus,onAdd:{reviewPlan=$0},onOpen:openExisting,onAcquire:continueToAcquire,onOpenInverse:openInverse,onRetire:planRetirement,onReactivate:reactivate,onPermanentRemove:planPermanentRemoval,onHistory:openHistory)}
-    private func discover(){discovery=nil;registeredSymbol=nil;registeredStatus=nil;error=nil;Task{await store.run(.discoverMarket(query:query));guard store.lastProcessResult?.exitCode==0,let text=store.lastProcessResult?.stdout,let data=text.data(using:.utf8),let decoded=try? JSONDecoder().decode(MarketDiscoveryResult.self,from:data)else{error=store.operationError ?? "Market discovery failed";return};discovery=decoded;selectedMarketID=decoded.markets.count==1 ? decoded.markets.first?.id:nil;let m=decoded.markets.count==1 ? decoded.markets.first:nil;selectedRepresentationID=m?.recommendation.symbol.isEmpty==false ? m?.representations.first(where:{$0.symbol==m?.recommendation.symbol})?.id:nil}}
-    private func confirm(_ plan:MarketRegistrationPlan){reviewPlan=nil;Task{await store.run(.registerInstrument(candidate:plan.candidate));guard store.lastProcessResult?.exitCode==0 else{error=readableRegistrationError();return};registeredSymbol=plan.canonicalRegistrationSymbol;registeredStatus=store.lastProcessResult?.JSON?["registration_status"] as? String}}
-    private func readableRegistrationError()->String{
-        guard let payload=store.lastProcessResult?.JSON else {
-            return "Registration could not be completed. " + (store.operationError ?? "Check the configured authority database and try again.")
+}
+
+struct MarketSearchCommands: Commands {
+    @FocusedValue(\.focusMarketSearch) private var focusMarketSearch
+
+    var body: some Commands {
+        CommandMenu("Market") {
+            Button("Find Market") { focusMarketSearch?() }
+                .keyboardShortcut("f", modifiers: .command)
+                .disabled(focusMarketSearch == nil)
         }
-        let code=(payload["code"] as? String ?? "REGISTRATION_REJECTED").replacingOccurrences(of:"_",with:" ").lowercased()
-        let detail=(payload["error"] as? String ?? "The registration was rejected.").replacingOccurrences(of:"_",with:" ").lowercased()
-        return "Registration could not be completed (" + code + "): " + detail + "."
     }
-    private func openExisting(_ symbol:String){let id="\(symbol):D1";store.selectedTruthLaneID=id;store.truthNavigationRequestID=id;store.section = .truth}
-    private func continueToAcquire(_ symbol:String){store.acquisitionAsset=symbol;store.dataOperationsMode = .fetch;store.section = .dataOperations}
-    private func openInverse(_ symbol:String){query=symbol;discover()}
-    private func openHistory(_ symbol:String){store.auditFilter=symbol;store.navigate(.authorityLedger)}
-    private func planRetirement(_ symbol:String){Task{await store.run(.retirementPlan(asset:symbol,scope:"WHOLE_INSTRUMENT",lanes:["D1"]));guard store.lastProcessResult?.exitCode==0,let data=store.lastProcessResult?.stdout.data(using:.utf8),let impact=try? JSONDecoder().decode(RetirementImpact.self,from:data)else{error=store.operationError ?? "Retirement impact failed";return};retirementImpact=impact}}
-    private func confirmRetirement(_ impact:RetirementImpact,_ reason:String,_ note:String,_ confirmation:String){retirementImpact=nil;Task{await store.run(.retireInstrument(asset:impact.canonicalInstrument,scope:impact.scope,lanes:impact.selectedLanes,reason:reason,note:note,confirmation:confirmation));guard store.lastProcessResult?.exitCode==0,let data=store.lastProcessResult?.stdout.data(using:.utf8),let receipt=try? JSONDecoder().decode(RetirementReceipt.self,from:data)else{error=store.operationError ?? "Retirement failed";return};retirementReceipt=receipt}}
-    private func reactivate(_ symbol:String){Task{await store.run(.reactivateInstrument(asset:symbol));guard store.lastProcessResult?.exitCode==0,let data=store.lastProcessResult?.stdout.data(using:.utf8),let receipt=try? JSONDecoder().decode(ReactivationReceipt.self,from:data)else{error=store.operationError ?? "Reactivation failed";return};reactivationReceipt=receipt}}
-    private func planPermanentRemoval(_ symbol:String){Task{await store.run(.permanentRemovalPlan(asset:symbol));guard store.lastProcessResult?.exitCode==0,let data=store.lastProcessResult?.stdout.data(using:.utf8),let impact=try? JSONDecoder().decode(PermanentRemovalImpact.self,from:data)else{error=store.operationError ?? "Permanent removal impact failed";return};removalImpact=impact}}
-    private func confirmPermanentRemoval(_ impact:PermanentRemovalImpact,_ confirmation:String){removalImpact=nil;Task{await store.run(.permanentlyRemoveInstrument(asset:impact.canonicalInstrument,confirmation:confirmation));guard store.lastProcessResult?.exitCode==0,let data=store.lastProcessResult?.stdout.data(using:.utf8),let receipt=try? JSONDecoder().decode(PermanentRemovalReceipt.self,from:data)else{error=store.operationError ?? "Permanent removal failed";return};removalReceipt=receipt}}
 }
 
-private struct MarketDetail:View{
-    let market:DiscoveredMarket;@Binding var selection:String?;let registeredSymbol:String?;let registeredStatus:String?;let onAdd:(MarketRegistrationPlan)->Void;let onOpen:(String)->Void;let onAcquire:(String)->Void;let onOpenInverse:(String)->Void;let onRetire:(String)->Void;let onReactivate:(String)->Void;let onPermanentRemove:(String)->Void;let onHistory:(String)->Void
-    private var selected:MarketRepresentation?{market.representations.first{$0.id==selection}}
-    var body:some View{VStack(alignment:.leading,spacing:16){
-        HStack(alignment:.top){VStack(alignment:.leading,spacing:5){Text(market.underlyingMarket).font(.title2.bold());Text(market.canonicalIdentity).font(.caption.monospaced()).foregroundStyle(.secondary);Text(market.description).foregroundStyle(.secondary)};Spacer();Text(market.marketType).padding(6).background(.quaternary,in:Capsule());Text("\(market.confidence)%").padding(6).background(.quaternary,in:Capsule());primaryAction}
-        if let fx=market.fxOrientation{Panel("FX Pair Orientation"){Facts([("Ordered Identity",fx.orderedPair),("Base Currency",fx.baseCurrency),("Quote Currency",fx.quoteCurrency),("Orientation",fx.orientationState),("Direct Provider Symbol",fx.requestedProviderSymbol ?? "Not confirmed"),("Authoritative Inverse",fx.inversePair),("Inverse Provider Symbol",fx.inverseProviderSymbol ?? "Not confirmed"),("Evidence Source",fx.evidenceSource ?? "Not established")]);if fx.orientationState=="INVERSE_ONLY"{Label("The inverse market is not the same provider instrument. \(fx.orderedPair) cannot be acquired as direct evidence from \(fx.inverseProviderSymbol ?? fx.inversePair).",systemImage:"exclamationmark.triangle.fill").foregroundStyle(.orange);Button("Open \(fx.inversePair)"){onOpenInverse(fx.inversePair)}.buttonStyle(.borderedProminent)}}}
-        GroupBox("Tradable Representations"){LazyVGrid(columns:[GridItem(.adaptive(minimum:240),spacing:10)],spacing:10){ForEach(market.representations){r in Button(action:{selection=r.id},label:{VStack(alignment:.leading,spacing:6){HStack{Text(r.representationType).font(.caption).foregroundStyle(.secondary);Spacer();Image(systemName:selection==r.id ? "checkmark.circle.fill":"circle")};Text(r.displayName).fontWeight(.semibold);Text(r.symbol).font(.title3.monospaced());Text(r.contractOrShareClass ?? r.exchange ?? "Venue unknown").font(.caption).foregroundStyle(.secondary);Text(r.registrationStatus).font(.caption)}.frame(maxWidth:.infinity,alignment:.leading).padding(10).background(selection==r.id ? Color.accentColor.opacity(0.12):Color.clear,in:RoundedRectangle(cornerRadius:8))}).buttonStyle(.plain)}}.padding(.vertical,4)}
-        if let r=selected{if let retired=r.retirement{Panel("Status"){Facts([("State",retired.lifecycleState),("Retired on",retired.completedAt),("Reason",retired.reason.replacingOccurrences(of:"_",with:" ").capitalized),("Operator note",retired.operatorNote.isEmpty ? "None":retired.operatorNote)]);Text("Reactivation preserves canonical identity, provider mappings, provenance, evidence, and Truth history.").font(.caption).foregroundStyle(.secondary);HStack{Button("Reactivate"){onReactivate(r.symbol)}.buttonStyle(.borderedProminent);Button("Permanently Remove",role:.destructive){onPermanentRemove(r.symbol)}}}};TimeframeMatrix(lanes:r.timeframeLanes);LazyVGrid(columns:[GridItem(.adaptive(minimum:320),spacing:12)],spacing:12){Panel("Registration Recommendation"){Facts([("Symbol",r.symbol),("Type",r.representationType),("Status",r.registrationStatus),("Readiness",r.acquisitionReadiness)])};Panel("Provider Discovery"){Facts([("Provider",r.provider ?? "Unknown"),("Known Symbol",r.providerSymbol ?? "Unknown"),("Mapping",r.providerMappingStatus),("Entitlement","Unknown")])};Panel("Preliminary Metadata"){Facts([("Asset Class",market.assetClass),("Venue",r.exchange ?? "Unknown"),("Currency",r.currency ?? "Unknown"),("Timezone",market.metadata.timezone ?? "Unknown")])};Panel("Acquisition Readiness"){VStack(alignment:.leading,spacing:6){Text(r.acquisitionReadiness);ForEach(r.warnings,id:\.self){Label($0,systemImage:"exclamationmark.triangle").font(.caption)}}}}}
-        if registeredSymbol != nil{Panel("Registration Complete"){Facts([("Registration Identifier",registeredSymbol!), ("Authority State",registeredStatus ?? "REGISTERED_NO_EVIDENCE"),("Provider Mapping State",selected?.providerMappingStatus ?? "Unknown")]);Button("Continue to Data Operations"){onAcquire(registeredSymbol!)}.buttonStyle(.borderedProminent)}}
-    }.padding(.vertical,4)}
-    @ViewBuilder private var primaryAction:some View{if let r=selected{if r.retirement != nil{Button("Reactivate"){onReactivate(r.symbol)}.buttonStyle(.borderedProminent)}else if registeredSymbol==r.symbol{Button("Continue to Data Operations"){onAcquire(r.symbol)}.buttonStyle(.borderedProminent)}else if let plan=r.registrationPlan{Button(r.registrationStatus=="PERMANENTLY_REMOVED" ? "Register Fresh":"Add to Fragarach"){onAdd(plan)}.buttonStyle(.borderedProminent)}else if r.registrationStatus != "NOT_REGISTERED"{HStack{Button("Open Truth"){onOpen(r.symbol)};Button("Manage Data"){onAcquire(r.symbol)};Button("Authority History"){onHistory(r.symbol)};Button("Retire Instrument"){onRetire(r.symbol)}.buttonStyle(.borderedProminent).tint(.red)}}}}
-}
+struct DiscoverMarketView: View {
+    @EnvironmentObject private var store: ConsoleStore
+    @AppStorage("discoverRecentSearches") private var storedRecentSearches = ""
+    @FocusState private var searchFocused: Bool
 
-private struct RegistrationReview:View{let plan:MarketRegistrationPlan;let onConfirm:()->Void;let onCancel:()->Void;@Environment(\.dismiss) private var dismiss;var body:some View{VStack(alignment:.leading,spacing:16){Text("Review Registration").font(.title);Text("No mutation occurs until you confirm.").foregroundStyle(.secondary);Facts([("Underlying Market",plan.underlyingMarket),("Selected Representation",plan.selectedRepresentation),("Canonical Symbol",plan.canonicalRegistrationSymbol),("Display Name",plan.displayName),("Asset Class",plan.assetClass),("Instrument Type",plan.instrumentType),("Exchange / Venue",plan.exchangeOrVenue ?? "Unknown"),("Timezone",plan.timezone ?? "Unknown"),("Session Authority",plan.sessionAuthority),("Base Currency",plan.baseCurrency ?? "Unknown"),("Quote Currency",plan.quoteCurrency ?? "Unknown"),("Provider Mapping",plan.providerMappings.isEmpty ? "Provider Mapping Required":plan.providerMappings.map{"\($0.provider): \($0.symbol) [\($0.state)]"}.joined(separator:", "))]);ForEach(plan.registrationWarnings,id:\.self){Label($0,systemImage:"exclamationmark.triangle")};HStack{Button("Cancel",role:.cancel){dismiss();onCancel()};Spacer();Button("Back"){dismiss()};Button("Confirm Registration"){dismiss();onConfirm()}.buttonStyle(.borderedProminent)}}.padding(24).frame(minWidth:620)} }
-private struct RetirementReview:View{let impact:RetirementImpact;let onConfirm:(RetirementImpact,String,String,String)->Void;@Environment(\.dismiss) var dismiss;@State private var scope="WHOLE_INSTRUMENT";@State private var reason="INCORRECT_INSTRUMENT_IDENTITY";@State private var note="";@State private var confirmation="";let reasons=["INCORRECT_INSTRUMENT_IDENTITY","INCORRECT_PAIR_ORIENTATION","INCORRECT_PROVIDER_MAPPING","WRONG_SYMBOL","DUPLICATE_REGISTRATION","ERRONEOUS_OPERATOR_REGISTRATION","INVALID_VENUE_OR_LISTING","PROVIDER_EVIDENCE_MISMATCH","OTHER_REVIEWED_REASON"];var body:some View{VStack(alignment:.leading,spacing:14){Text("Retire \(impact.canonicalInstrument) from Active Fragarach").font(.title);Picker("Scope",selection:$scope){Text("Whole instrument").tag("WHOLE_INSTRUMENT");Text("Selected lanes").tag("SELECTED_LANES")}.pickerStyle(.segmented);Picker("Reason",selection:$reason){ForEach(reasons,id:\.self){Text($0.replacingOccurrences(of:"_",with:" ").capitalized).tag($0)}};TextField("Operator note",text:$note);Facts([("Active lanes",impact.activeTimeframeLanes.joined(separator:", ")),("Completed acquisition runs","\(impact.completedAcquisitionRuns)"),("Raw evidence blocks","\(impact.rawEvidenceBlocks) — preserved"),("Canonical bars","\(impact.canonicalBars) — preserved and quarantined"),("Truth Score",impact.currentTruthScore.map(String.init) ?? "Unknown"),("CAODT",impact.currentCAODT ?? "Unknown"),("Future acquisition","Will be disabled"),("Active serving","Will stop")]);if impact.typedConfirmationRequired{Text("Type \(impact.requiredConfirmation ?? "") to confirm").fontWeight(.semibold);TextField(impact.requiredConfirmation ?? "",text:$confirmation).textFieldStyle(.roundedBorder)};HStack{Button("Cancel",role:.cancel){dismiss()};Spacer();Button("Back"){dismiss()};Button("Confirm Retirement",role:.destructive){dismiss();onConfirm(impact,reason,note,confirmation)}.disabled(impact.typedConfirmationRequired && confirmation.trimmingCharacters(in:.whitespaces).uppercased() != impact.requiredConfirmation)}}.padding(24).frame(minWidth:680)} }
-private struct RetirementSuccess:View{let receipt:RetirementReceipt;let onDone:()->Void;@Environment(\.dismiss) var dismiss;var body:some View{VStack(alignment:.leading,spacing:16){Text("\(receipt.canonicalInstrument) Retired").font(.title);Label("Future acquisition disabled",systemImage:"checkmark.circle.fill");Label("Active serving removed",systemImage:"checkmark.circle.fill");Label("Evidence preserved and quarantined",systemImage:"checkmark.circle.fill");Label("Historical audit available",systemImage:"checkmark.circle.fill");Facts([("Retirement ID",receipt.retirementID),("Reason",receipt.reason),("Authority",receipt.newAuthorityState),("Affected bars","\(receipt.affectedCanonicalBars)"),("Affected raw blocks","\(receipt.affectedRawBlocks)"),("Completed",receipt.completedTimestamp)]);Button("Return to Discover Market"){dismiss();onDone()}.buttonStyle(.borderedProminent)}.padding(24).frame(minWidth:620)}}
-private struct PermanentRemovalReview:View{let impact:PermanentRemovalImpact;let onConfirm:(PermanentRemovalImpact,String)->Void;@Environment(\.dismiss) var dismiss;@State private var confirmation="";var body:some View{VStack(alignment:.leading,spacing:16){Text("Permanently Remove \(impact.canonicalInstrument)").font(.title);Label("This is an exceptional operator action. Reactivation is preferred because it preserves useful authority.",systemImage:"exclamationmark.triangle.fill").foregroundStyle(.orange);Facts([("Retired on",impact.retiredAt),("Reason",impact.reason.replacingOccurrences(of:"_",with:" ").capitalized),("Canonical bars","\(impact.canonicalBars)"),("Raw evidence blocks","\(impact.rawEvidenceBlocks)"),("Provenance records","\(impact.provenanceRecords)"),("Audit history","Preserved as an immutable tombstone")]);if let blocker=impact.blockingReason{Label(blocker,systemImage:"lock.fill").foregroundStyle(.red)}else{Text("Type \(impact.requiredConfirmation) to confirm").fontWeight(.semibold);TextField(impact.requiredConfirmation,text:$confirmation).textFieldStyle(.roundedBorder)};HStack{Button("Cancel",role:.cancel){dismiss()};Spacer();Button("Permanently Remove",role:.destructive){dismiss();onConfirm(impact,confirmation)}.disabled(!impact.removable || confirmation.trimmingCharacters(in:.whitespaces).uppercased() != impact.requiredConfirmation)}}.padding(24).frame(minWidth:680)}}
-private struct ReactivationSuccess:View{let receipt:ReactivationReceipt;let onDone:()->Void;@Environment(\.dismiss) var dismiss;var body:some View{VStack(alignment:.leading,spacing:16){Text("\(receipt.canonicalInstrument) Reactivated").font(.title);Label("Canonical identity and provider mappings preserved",systemImage:"checkmark.circle.fill");Label("Evidence, provenance, and Truth history preserved",systemImage:"checkmark.circle.fill");Facts([("Authority",receipt.newAuthorityState),("Lanes",receipt.selectedLanes.joined(separator:", ")),("Completed",receipt.completedTimestamp)]);Button("Continue to Fetch"){dismiss();onDone()}.buttonStyle(.borderedProminent)}.padding(24).frame(minWidth:620)}}
-private struct PermanentRemovalSuccess:View{let receipt:PermanentRemovalReceipt;let onDone:()->Void;@Environment(\.dismiss) var dismiss;var body:some View{VStack(alignment:.leading,spacing:16){Text("\(receipt.canonicalInstrument) Removed").font(.title);Label("Active registration authority removed",systemImage:"checkmark.circle.fill");Label("Immutable audit history preserved",systemImage:"checkmark.circle.fill");Text("Discovery can now offer a reviewed fresh registration without creating duplicate canonical rows.").foregroundStyle(.secondary);Button("Return to Discover Market"){dismiss();onDone()}.buttonStyle(.borderedProminent)}.padding(24).frame(minWidth:620)}}
-private struct Panel<C:View>:View{let title:String;@ViewBuilder let content:C;init(_ title:String,@ViewBuilder content:()->C){self.title=title;self.content=content()};var body:some View{GroupBox(title){content.frame(maxWidth:.infinity,alignment:.leading).padding(.vertical,4)}}}
-private struct TimeframeMatrix:View{let lanes:[MarketTimeframeLane];var body:some View{GroupBox("Timeframe Lanes"){Grid(alignment:.leading,horizontalSpacing:24,verticalSpacing:8){GridRow{ForEach(["Timeframe","Provider Capability","Registration","Acquisition","Reason"],id:\.self){Text($0).font(.caption.bold()).foregroundStyle(.secondary)}};Divider().gridCellColumns(5);ForEach(lanes){lane in GridRow{Text(lane.timeframe).font(.body.monospaced().bold());Text(lane.providerCapability);Text(lane.registrationState);Text(lane.acquisitionReadiness);Text(lane.reason).font(.caption).foregroundStyle(.secondary)}}}.frame(maxWidth:.infinity,alignment:.leading).padding(.vertical,4)}}}
-private struct UnknownMarketView:View{let discovery:MarketDiscoveryResult;var body:some View{GroupBox("No recognised market identity found"){VStack(alignment:.leading,spacing:12){Text(discovery.operatorGuidance);Text("Search attempted").font(.headline);ForEach(["Canonical markets","Tradable representations","Aliases","Company names","Index names","Commodity names","ISO currency pairs"],id:\.self){Label($0,systemImage:"checkmark")};Text("Corrected search guidance").font(.headline);ForEach(discovery.suggestedSearches,id:\.self){Text("• \($0)")}}.frame(maxWidth:.infinity,alignment:.leading).padding(.vertical,6)}}}
+    @State private var query = ""
+    @State private var discovery: MarketDiscoveryResult?
+    @State private var selectedMarketID: String?
+    @State private var selectedRepresentationID: String?
+    @State private var highlightedResult: DiscoveryResultTarget?
+    @State private var assetFilter: MarketAssetFilter = .all
+    @State private var isSearching = false
+    @State private var pendingQuery: String?
+    @State private var lastSubmittedQuery = ""
+    @State private var searchError: String?
+    @State private var debounceTask: Task<Void, Never>?
+    @State private var narrowDetailVisible = false
+
+    @State private var reviewContext: RegistrationReviewContext?
+    @State private var registeredSymbol: String?
+    @State private var registeredStatus: String?
+    @State private var retirementImpact: RetirementImpact?
+    @State private var retirementReceipt: RetirementReceipt?
+    @State private var removalImpact: PermanentRemovalImpact?
+    @State private var reactivationReceipt: ReactivationReceipt?
+    @State private var removalReceipt: PermanentRemovalReceipt?
+
+    private var filteredMarkets: [DiscoveredMarket] {
+        (discovery?.markets ?? []).filter { assetFilter.includes(assetClass: $0.assetClass) }
+    }
+
+    private var selectedMarket: DiscoveredMarket? {
+        filteredMarkets.first { $0.id == selectedMarketID }
+    }
+
+    private var selectedRepresentation: MarketRepresentation? {
+        selectedMarket?.representations.first { $0.id == selectedRepresentationID }
+    }
+
+    private var resultSections: [DiscoveryResultSection] {
+        guard let discovery else { return [] }
+        return DiscoveryResultBuilder.sections(
+            for: discovery,
+            markets: filteredMarkets,
+            query: query
+        )
+    }
+
+    private var recentSearches: [String] {
+        storedRecentSearches
+            .split(separator: "|")
+            .map(String.init)
+            .filter { !$0.isEmpty }
+    }
+
+    private var unresolvedManualRequests: [SchedulerManualRequest] {
+        (store.schedulerSnapshot?.manualRequests ?? [])
+            .filter { $0.status.uppercased() != "DISMISSED" }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Discover Market")
+                    .font(.largeTitle.bold())
+                Text("Find a market, then choose the representation Fragarach will track.")
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 16)
+            .padding(.bottom, 12)
+
+            Divider()
+
+            GeometryReader { proxy in
+                let isNarrow = MarketDiscoveryPresentation.usesNarrowLayout(
+                    availableWidth: proxy.size.width
+                )
+                Group {
+                    if isNarrow, narrowDetailVisible, let selectedMarket {
+                        detailPane(for: selectedMarket, showsBack: true)
+                    } else if isNarrow {
+                        searchPane(isNarrow: true)
+                    } else {
+                        HStack(spacing: 0) {
+                            searchPane(isNarrow: false)
+                                .frame(width: proxy.size.width * 0.39)
+                            Divider()
+                            detailPane(for: selectedMarket, showsBack: false)
+                                .frame(maxWidth: .infinity)
+                        }
+                    }
+                }
+                .onExitCommand { handleEscape(isNarrow: isNarrow) }
+            }
+        }
+        .focusedSceneValue(\.focusMarketSearch, { searchFocused = true })
+        .onAppear { searchFocused = true; consumeProviderSetupRequest() }
+        .onChange(of: store.marketDiscoveryRequest) { _, _ in consumeProviderSetupRequest() }
+        .onDisappear { debounceTask?.cancel() }
+        .onChange(of: query) { _, value in scheduleDebouncedSearch(for: value) }
+        .onChange(of: assetFilter) { reconcileFilteredSelection() }
+        .sheet(item: $reviewContext) { context in
+            MarketRegistrationReview(
+                context: context,
+                onConfirm: { confirmRegistration(context.plan) }
+            )
+        }
+        .sheet(item: $retirementImpact) { impact in
+            MarketRetirementReview(impact: impact, onConfirm: confirmRetirement)
+        }
+        .sheet(item: $retirementReceipt) { receipt in
+            MarketRetirementSuccess(receipt: receipt) {
+                retirementReceipt = nil
+                searchImmediately(receipt.canonicalInstrument)
+            }
+        }
+        .sheet(item: $removalImpact) { impact in
+            MarketPermanentRemovalReview(impact: impact, onConfirm: confirmPermanentRemoval)
+        }
+        .sheet(item: $reactivationReceipt) { receipt in
+            MarketReactivationSuccess(receipt: receipt) {
+                reactivationReceipt = nil
+                continueToAcquire(receipt.canonicalInstrument)
+            }
+        }
+        .sheet(item: $removalReceipt) { receipt in
+            MarketPermanentRemovalSuccess(receipt: receipt) {
+                removalReceipt = nil
+                searchImmediately(receipt.canonicalInstrument)
+            }
+        }
+    }
+
+    private func searchPane(isNarrow: Bool) -> some View {
+        DiscoverySearchPane(
+            query: $query,
+            searchFocused: $searchFocused,
+            assetFilter: $assetFilter,
+            highlightedResult: Binding(
+                get: { highlightedResult },
+                set: { target in
+                    guard let target else { return }
+                    selectResult(target, openNarrowDetail: isNarrow)
+                }
+            ),
+            sections: resultSections,
+            discovery: discovery,
+            isSearching: isSearching,
+            error: searchError,
+            recentSearches: recentSearches,
+            manualRequests: unresolvedManualRequests,
+            onSubmit: submitFromKeyboard,
+            onSearchSuggestion: searchImmediately,
+            onMove: moveHighlight,
+            onOpenControlledWorkflow: openControlledWorkflow
+        )
+    }
+
+    @ViewBuilder
+    private func detailPane(for market: DiscoveredMarket?, showsBack: Bool) -> some View {
+        if let market {
+            DiscoveryMarketDetailPane(
+                market: market,
+                selection: $selectedRepresentationID,
+                registeredSymbol: registeredSymbol,
+                registeredStatus: registeredStatus,
+                showsBack: showsBack,
+                onBack: { narrowDetailVisible = false },
+                onReviewRegistration: { plan, representation in
+                    reviewContext = RegistrationReviewContext(
+                        plan: plan,
+                        representation: representation
+                    )
+                },
+                onOpenEstate: openExisting,
+                onOpenManageData: continueToAcquire,
+                onOpenInverse: searchImmediately,
+                onRetire: planRetirement,
+                onReactivate: reactivate,
+                onRegisterCorrectInstrument: { query="";discovery=nil;selectedMarketID=nil;selectedRepresentationID=nil;searchFocused=true },
+                onPermanentRemove: planPermanentRemoval,
+                onHistory: openHistory
+            )
+        } else {
+            DiscoveryDetailEmptyState()
+        }
+    }
+
+    private func scheduleDebouncedSearch(for value: String) {
+        debounceTask?.cancel()
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            discovery = nil
+            selectedMarketID = nil
+            selectedRepresentationID = nil
+            highlightedResult = nil
+            searchError = nil
+            narrowDetailVisible = false
+            pendingQuery = nil
+            return
+        }
+        debounceTask = Task {
+            try? await Task.sleep(for: .milliseconds(320))
+            guard !Task.isCancelled else { return }
+            await executeSearch(trimmed)
+        }
+    }
+
+    private func submitFromKeyboard() {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        debounceTask?.cancel()
+        if lastSubmittedQuery.caseInsensitiveCompare(trimmed) == .orderedSame,
+           let highlightedResult {
+            selectResult(highlightedResult, openNarrowDetail: true)
+        } else {
+            Task { await executeSearch(trimmed) }
+        }
+    }
+
+    private func searchImmediately(_ value: String) {
+        query = value
+        debounceTask?.cancel()
+        Task { await executeSearch(value.trimmingCharacters(in: .whitespacesAndNewlines)) }
+    }
+
+    private func consumeProviderSetupRequest() {
+        guard let symbol=store.marketDiscoveryRequest else { return }
+        store.marketDiscoveryRequest=nil
+        searchImmediately(symbol)
+    }
+
+    @MainActor
+    private func executeSearch(_ requestedQuery: String) async {
+        guard !requestedQuery.isEmpty else { return }
+        if isSearching {
+            pendingQuery = requestedQuery
+            return
+        }
+
+        isSearching = true
+        searchError = nil
+        lastSubmittedQuery = requestedQuery
+        let response: MarketDiscoveryResult?
+        do {
+            response = try await store.discoverMarket(requestedQuery)
+        } catch {
+            response = nil
+            searchError = readableSearchError(error)
+        }
+
+        if let response,
+           response.query.caseInsensitiveCompare(requestedQuery) == .orderedSame,
+           query.trimmingCharacters(in: .whitespacesAndNewlines)
+            .caseInsensitiveCompare(requestedQuery) == .orderedSame {
+            apply(response)
+            rememberSearch(requestedQuery)
+        }
+
+        isSearching = false
+        let next = pendingQuery
+        pendingQuery = nil
+        if let next,
+           next.caseInsensitiveCompare(requestedQuery) != .orderedSame {
+            await executeSearch(next)
+        }
+    }
+
+    private func apply(_ response: MarketDiscoveryResult) {
+        discovery = response
+        registeredSymbol = nil
+        registeredStatus = nil
+        searchError = nil
+        narrowDetailVisible = false
+
+        if response.markets.count == 1, let market = response.markets.first {
+            selectedMarketID = market.id
+            selectedRepresentationID = MarketDiscoveryPresentation.initialRepresentationID(for: market)
+            highlightedResult = .market(market.id)
+        } else {
+            selectedMarketID = nil
+            selectedRepresentationID = nil
+            highlightedResult = resultSections.first?.items.first?.target
+        }
+        reconcileFilteredSelection()
+    }
+
+    private func selectResult(_ target: DiscoveryResultTarget, openNarrowDetail: Bool) {
+        highlightedResult = target
+        switch target {
+        case .market(let marketID), .alias(let marketID, nil):
+            selectedMarketID = marketID
+            selectedRepresentationID = filteredMarkets
+                .first { $0.id == marketID }
+                .flatMap(MarketDiscoveryPresentation.initialRepresentationID)
+        case .representation(let marketID, let representationID),
+             .existing(let marketID, let representationID),
+             .alias(let marketID, .some(let representationID)):
+            selectedMarketID = marketID
+            selectedRepresentationID = representationID
+        }
+        if openNarrowDetail { narrowDetailVisible = true }
+    }
+
+    private func moveHighlight(_ direction: MoveCommandDirection) {
+        let items = resultSections.flatMap(\.items)
+        guard !items.isEmpty else { return }
+        let current = highlightedResult.flatMap { selected in
+            items.firstIndex { $0.target == selected }
+        }
+        let index: Int
+        switch direction {
+        case .down:
+            index = min((current ?? -1) + 1, items.count - 1)
+        case .up:
+            index = max((current ?? items.count) - 1, 0)
+        default:
+            return
+        }
+        selectResult(items[index].target, openNarrowDetail: false)
+    }
+
+    private func reconcileFilteredSelection() {
+        guard let selectedMarketID,
+              filteredMarkets.contains(where: { $0.id == selectedMarketID }) else {
+            selectedMarketID = filteredMarkets.count == 1 ? filteredMarkets.first?.id : nil
+            selectedRepresentationID = filteredMarkets.first.flatMap(
+                MarketDiscoveryPresentation.initialRepresentationID
+            )
+            highlightedResult = resultSections.first?.items.first?.target
+            narrowDetailVisible = false
+            return
+        }
+    }
+
+    private func handleEscape(isNarrow: Bool) {
+        if isNarrow, narrowDetailVisible {
+            narrowDetailVisible = false
+        } else if !query.isEmpty {
+            query = ""
+            searchFocused = true
+        }
+    }
+
+    private func rememberSearch(_ value: String) {
+        var searches = recentSearches.filter {
+            $0.caseInsensitiveCompare(value) != .orderedSame
+        }
+        searches.insert(value, at: 0)
+        storedRecentSearches = searches.prefix(5).joined(separator: "|")
+    }
+
+    private func readableSearchError(_ error: Error) -> String {
+        let detail = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !detail.isEmpty
+            ? "Search is temporarily unavailable. \(detail)"
+            : "Search is temporarily unavailable. Your query and prior results have been preserved."
+    }
+
+    private func confirmRegistration(_ plan: MarketRegistrationPlan) {
+        reviewContext = nil
+        Task {
+            await store.run(.registerInstrument(candidate: plan.candidate))
+            guard store.lastProcessResult?.exitCode == 0 else {
+                searchError = readableRegistrationError()
+                return
+            }
+            registeredSymbol = plan.canonicalRegistrationSymbol
+            registeredStatus = store.lastProcessResult?.JSON?["provider_setup_status"] as? String
+                ?? store.lastProcessResult?.JSON?["registration_status"] as? String
+            let reconciliation=store.lastProcessResult?.JSON?["scheduler_reconciliation"] as? [String:Any]
+            let timeframes=reconciliation?["queued_timeframes"] as? [String] ?? []
+            if !timeframes.isEmpty {
+                store.beginEstateAdmission(symbol:plan.canonicalRegistrationSymbol,timeframes:timeframes)
+            }
+            continueToAcquire(plan.canonicalRegistrationSymbol)
+            Task { await store.refreshProviderFacts() }
+        }
+    }
+
+    private func readableRegistrationError() -> String {
+        guard let payload = store.lastProcessResult?.JSON else {
+            return "Registration could not be completed. "
+                + (store.operationError ?? "Check the configured authority database and try again.")
+        }
+        let code = (payload["code"] as? String ?? "REGISTRATION_REJECTED")
+            .replacingOccurrences(of: "_", with: " ").lowercased()
+        if payload["code"] as? String == "WRITER_BUSY" {
+            return "The Scheduler was briefly committing authority data. GBPCHF was not changed; please press Add to Estate again in a few seconds."
+        }
+        let detail = (payload["error"] as? String ?? "The registration was rejected.")
+            .replacingOccurrences(of: "_", with: " ").lowercased()
+        return "Registration could not be completed (\(code)): \(detail)."
+    }
+
+    private func openExisting(_ symbol: String) {
+        let id = "\(symbol):D1"
+        store.selectedTruthLaneID = id
+        store.truthNavigationRequestID = id
+        store.section = .estate
+    }
+
+    private func continueToAcquire(_ symbol: String) {
+        store.acquisitionAsset = symbol
+        store.dataOperationsMode = .fetch
+        store.manageDataSection = .operations
+        store.section = .manageData
+    }
+
+    private func openControlledWorkflow() {
+        store.dataOperationsMode = .importFile
+        store.manageDataSection = .operations
+    }
+
+    private func openHistory(_ symbol: String) {
+        store.auditFilter = symbol
+        store.navigate(.authorityLedger)
+    }
+
+    private func planRetirement(_ symbol: String) {
+        Task {
+            await store.run(.retirementPlan(asset: symbol, scope: "WHOLE_INSTRUMENT", lanes: ["D1"]))
+            guard store.lastProcessResult?.exitCode == 0,
+                  let data = store.lastProcessResult?.stdout.data(using: .utf8),
+                  let impact = try? JSONDecoder().decode(RetirementImpact.self, from: data) else {
+                searchError = store.operationError ?? "Retirement impact could not be loaded."
+                return
+            }
+            retirementImpact = impact
+        }
+    }
+
+    private func confirmRetirement(
+        _ impact: RetirementImpact,
+        _ reason: String,
+        _ note: String,
+        _ confirmation: String
+    ) {
+        retirementImpact = nil
+        Task {
+            await store.run(.retireInstrument(
+                asset: impact.canonicalInstrument,
+                scope: impact.scope,
+                lanes: impact.selectedLanes,
+                reason: reason,
+                note: note,
+                confirmation: confirmation
+            ))
+            guard store.lastProcessResult?.exitCode == 0,
+                  let data = store.lastProcessResult?.stdout.data(using: .utf8),
+                  let receipt = try? JSONDecoder().decode(RetirementReceipt.self, from: data) else {
+                searchError = store.operationError ?? "Retirement failed."
+                return
+            }
+            retirementReceipt = receipt
+        }
+    }
+
+    private func reactivate(_ symbol: String) {
+        Task {
+            await store.run(.reactivateInstrument(asset: symbol))
+            guard store.lastProcessResult?.exitCode == 0,
+                  let data = store.lastProcessResult?.stdout.data(using: .utf8),
+                  let receipt = try? JSONDecoder().decode(ReactivationReceipt.self, from: data) else {
+                searchError = store.operationError ?? "Reactivation failed."
+                return
+            }
+            reactivationReceipt = receipt
+        }
+    }
+
+    private func planPermanentRemoval(_ symbol: String) {
+        Task {
+            await store.run(.permanentRemovalPlan(asset: symbol))
+            guard store.lastProcessResult?.exitCode == 0,
+                  let data = store.lastProcessResult?.stdout.data(using: .utf8),
+                  let impact = try? JSONDecoder().decode(PermanentRemovalImpact.self, from: data) else {
+                searchError = store.operationError ?? "Removal impact could not be loaded."
+                return
+            }
+            removalImpact = impact
+        }
+    }
+
+    private func confirmPermanentRemoval(
+        _ impact: PermanentRemovalImpact,
+        _ confirmation: String
+    ) {
+        removalImpact = nil
+        Task {
+            await store.run(.permanentlyRemoveInstrument(
+                asset: impact.canonicalInstrument,
+                confirmation: confirmation
+            ))
+            guard store.lastProcessResult?.exitCode == 0,
+                  let data = store.lastProcessResult?.stdout.data(using: .utf8),
+                  let receipt = try? JSONDecoder().decode(PermanentRemovalReceipt.self, from: data) else {
+                searchError = store.operationError ?? "Permanent removal failed."
+                return
+            }
+            removalReceipt = receipt
+        }
+    }
+}

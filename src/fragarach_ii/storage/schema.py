@@ -17,6 +17,8 @@ APPLICATION_TABLES = frozenset(
         "instrument_registrations",
         "evidence_lanes",
         "authority_events",
+        "scheduler_runtime_state",
+        "scheduler_audit_events",
     }
 )
 
@@ -1028,3 +1030,80 @@ MIGRATION_8_STATEMENTS=(
 )
 def migration_8_checksum() -> str:
     return hashlib.sha256("\n-- statement --\n".join(s.strip() for s in MIGRATION_8_STATEMENTS).encode()).hexdigest()
+
+
+MIGRATION_9_NAME = "SPEC-009D provenance lane freshness index"
+
+# Estate and scheduler projections ask for the newest provenance event for a
+# lane.  The immutable provenance primary key starts with the event id, so it
+# cannot serve that lookup.  On a multi-million row authority the resulting
+# correlated scans can delay monitor and publication recovery for minutes.
+MIGRATION_9_STATEMENTS = (
+    "CREATE INDEX provenance_symbol_timeframe_recorded_at ON provenance(symbol,timeframe,recorded_at DESC)",
+)
+
+
+def migration_9_checksum() -> str:
+    return hashlib.sha256(
+        "\n-- statement --\n".join(s.strip() for s in MIGRATION_9_STATEMENTS).encode()
+    ).hexdigest()
+
+
+MIGRATION_10_NAME = "SPEC-063 scheduler state and audit authority"
+
+# Scheduler dispatch state is deliberately kept separate from canonical market
+# evidence.  The state document preserves the established lane/provider
+# execution contract while SQLite supplies atomic ownership, concurrency, and
+# durable audit history.  The JSON scheduler file is only a small compatibility
+# pointer after this migration.
+MIGRATION_10_STATEMENTS = (
+    """
+    CREATE TABLE scheduler_runtime_state (
+        state_key TEXT PRIMARY KEY CHECK (length(state_key) > 0),
+        state_json TEXT NOT NULL CHECK (json_valid(state_json) AND json_type(state_json) = 'object'),
+        state_revision INTEGER NOT NULL CHECK (state_revision >= 0),
+        updated_at_utc TEXT NOT NULL CHECK (
+            updated_at_utc = trim(updated_at_utc)
+            AND julianday(updated_at_utc) IS NOT NULL
+            AND substr(updated_at_utc, -6) = '+00:00'
+        )
+    ) STRICT
+    """,
+    """
+    CREATE TABLE scheduler_audit_events (
+        event_id TEXT PRIMARY KEY CHECK (
+            length(event_id) = 64 AND event_id NOT GLOB '*[^0-9a-f]*'
+        ),
+        state_key TEXT NOT NULL REFERENCES scheduler_runtime_state(state_key)
+            ON UPDATE RESTRICT ON DELETE RESTRICT,
+        category TEXT NOT NULL CHECK (length(category) > 0),
+        lane_id TEXT,
+        occurred_at_utc TEXT NOT NULL CHECK (
+            occurred_at_utc = trim(occurred_at_utc)
+            AND julianday(occurred_at_utc) IS NOT NULL
+            AND substr(occurred_at_utc, -6) = '+00:00'
+        ),
+        payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+        payload_sha256 TEXT NOT NULL UNIQUE CHECK (
+            length(payload_sha256) = 64 AND payload_sha256 NOT GLOB '*[^0-9a-f]*'
+        )
+    ) STRICT
+    """,
+    "CREATE INDEX scheduler_audit_events_state_lane_time ON scheduler_audit_events(state_key, lane_id, occurred_at_utc DESC)",
+    """
+    CREATE TRIGGER scheduler_audit_events_no_update
+    BEFORE UPDATE ON scheduler_audit_events
+    BEGIN SELECT RAISE(ABORT, 'scheduler audit events are immutable'); END
+    """,
+    """
+    CREATE TRIGGER scheduler_audit_events_no_delete
+    BEFORE DELETE ON scheduler_audit_events
+    BEGIN SELECT RAISE(ABORT, 'scheduler audit events cannot be deleted'); END
+    """,
+)
+
+
+def migration_10_checksum() -> str:
+    return hashlib.sha256(
+        "\n-- statement --\n".join(s.strip() for s in MIGRATION_10_STATEMENTS).encode()
+    ).hexdigest()

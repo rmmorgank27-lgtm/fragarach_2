@@ -52,7 +52,7 @@ class EvidenceFreeRemovalTests(unittest.TestCase):
         self.tmp=tempfile.TemporaryDirectory();self.db=Path(self.tmp.name)/"authority.sqlite3";initialize_database(self.db)
         representation=next(r for r in discover_market(self.db,"XAGUSD")["markets"][0]["representations"] if r["symbol"]=="XAGUSD")
         payload=json.loads(base64.urlsafe_b64decode(representation["registration_plan"]["candidate"]));self.candidate=candidate_from_dict(payload)
-        register_instrument(self.db,self.candidate,registered_at_utc=datetime.now(UTC).isoformat())
+        register_instrument(self.db,self.candidate,registered_at_utc="2026-07-13T00:00:00+00:00")
     def tearDown(self):self.tmp.cleanup()
     def test_explicit_removal_then_fresh_registration_without_duplicates(self):
         retire_instrument(self.db,"XAGUSD",scope="WHOLE_INSTRUMENT",selected_lanes=("D1",),reason="ERRONEOUS_OPERATOR_REGISTRATION",operator_note="test registration",typed_confirmation="")
@@ -68,7 +68,7 @@ class EvidenceFreeRemovalTests(unittest.TestCase):
         transport=NoTransport()
         with self.assertRaises(AcquisitionError) as blocked:acquire_twelve_data(self.db,asset="XAGUSD",timeframe="D1",from_date="2026-07-01",through_date="2026-07-02",credential="secret",transport=transport)
         self.assertEqual(blocked.exception.code,"INSTRUMENT_REMOVED");self.assertEqual(transport.requests,[])
-        result=register_instrument(self.db,self.candidate,registered_at_utc="2026-07-13T05:00:00+00:00")
+        result=register_instrument(self.db,self.candidate,registered_at_utc="2026-07-15T05:00:00+00:00")
         self.assertEqual(result.outcome,"REREGISTERED_AFTER_REMOVAL");self.assertFalse(is_permanently_removed(self.db,"XAGUSD","D1"));self.assertFalse(is_retired(self.db,"XAGUSD","D1"))
         after=open_read_only(self.db)
         try:self.assertEqual(after.execute("SELECT count(*) FROM instrument_registrations WHERE asset='XAGUSD'").fetchone()[0],registration_count)

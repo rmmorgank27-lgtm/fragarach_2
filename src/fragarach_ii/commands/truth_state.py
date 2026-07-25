@@ -7,6 +7,7 @@ import json
 import sqlite3
 import sys
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fragarach_ii.truth_engine import TruthEngineError, truth_state_for_lane
@@ -20,10 +21,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", required=True)
     arguments = parser.parse_args(argv)
     try:
+        authority_generated = datetime.now(UTC)
         state = truth_state_for_lane(
             Path(arguments.database).expanduser().resolve(),
             symbol=arguments.symbol,
             timeframe=arguments.timeframe,
+            as_of=authority_generated,
+            authority_generated=authority_generated.isoformat(),
         )
     except TruthEngineError as error:
         print(json.dumps({"code": error.code, "error": str(error)}, sort_keys=True, separators=(",", ":")))

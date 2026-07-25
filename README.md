@@ -2,7 +2,7 @@
 
 Fragarach II is a candidate authority for trusted historical market-bar evidence. Its only responsibilities are to read, validate, store, and serve evidence.
 
-The current implementation has an exact nine-table SQLite foundation, including canonical instrument-registration and generic evidence-lane authority, plus bounded manual and Twelve Data D1 evidence paths. Passing its tests proves local mechanics; it does not establish operational trust or production readiness.
+The current implementation preserves an exact ten-table SQLite authority while keeping Scheduler service state in user-scoped operational files. Passing its tests proves local mechanics; it does not by itself establish operational trust or production readiness.
 
 ## Development
 
@@ -32,5 +32,11 @@ PYTHONPATH=src python3 -m fragarach_ii.commands.validate_lane \
 
 Bounded Twelve Data acquisition is documented in
 [`TWELVE_DATA_ACQUISITION.md`](docs/operations/TWELVE_DATA_ACQUISITION.md).
+
+Calendar-driven scheduled acquisition and the native Scheduler Monitor are documented in
+[`SCHEDULED_ACQUISITION.md`](docs/operations/SCHEDULED_ACQUISITION.md).
+
+Persistent Scheduler Service installation, lifecycle, and diagnostics are documented in
+[`PERSISTENT_SCHEDULER_SERVICE.md`](docs/operations/PERSISTENT_SCHEDULER_SERVICE.md).
 
 **Operations is King.**

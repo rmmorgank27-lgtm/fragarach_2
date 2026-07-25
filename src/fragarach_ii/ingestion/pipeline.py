@@ -48,7 +48,9 @@ class IngestionResult:
     canonical_count: int
     transaction_state: str
     raw_block_reused: bool
+    sqlite_write: dict[str, object]
     rejections: tuple[dict[str, object], ...] = ()
+    timing_trace: tuple[dict[str, object], ...] = ()
 
     def as_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -79,10 +81,51 @@ def ingest_staged_batch(
     preserve_rejected_evidence: bool,
     before_commit: Callable[[sqlite3.Connection], None] | None = None,
 ) -> IngestionResult:
+    return ingest_staged_batches(
+        database_path,
+        batches=(batch,),
+        evidences=(evidence,),
+        run_kind=run_kind,
+        merge_mode=merge_mode,
+        outcome_facts=outcome_facts,
+        preserve_rejected_evidence=preserve_rejected_evidence,
+        before_commit=before_commit,
+    )
+
+
+def ingest_staged_batches(
+    database_path: str | Path,
+    *,
+    batches: tuple[StagingBatch, ...],
+    evidences: tuple[RawEvidence, ...],
+    run_kind: str,
+    merge_mode: str,
+    outcome_facts: Mapping[str, str | int | bool],
+    preserve_rejected_evidence: bool,
+    before_commit: Callable[[sqlite3.Connection], None] | None = None,
+) -> IngestionResult:
+    """Atomically admit staged chunks while retaining every raw response.
+
+    Provider history APIs commonly impose a row limit.  A history job may
+    therefore download several independently evidenced chunks, but canonical
+    admission must remain a single ordered transaction.  This avoids making a
+    lane's database cost proportional to its request count and preserves the
+    raw block referenced by every staged bar.
+    """
+    if not batches or len(batches) != len(evidences):
+        raise ValueError("staged batches and raw evidence must be non-empty and aligned")
+    batch = _combine_batches(batches)
+    evidence = evidences[0]
     if merge_mode not in {"preserve", "correct"}:
         raise ValueError("merge mode must be 'preserve' or 'correct'")
     ingest_run_id = uuid.uuid4().hex
-    with registered_writer(database_path) as connection:
+    sqlite_write: dict[str, object] = {
+        "transaction_started_at": None, "lock_wait_ms": 0.0,
+        "write_duration_ms": 0.0, "commit_duration_ms": 0.0,
+        "rows_inserted": 0, "rows_unchanged": 0,
+        "sqlite_result_code": "NOT_STARTED", "writer_identity": None,
+    }
+    with registered_writer(database_path, measurement=sqlite_write) as connection:
         apply_migrations(connection)
         if batch.bars:
             _require_registration(connection, batch.bars[0].symbol, batch.bars[0].timeframe)
@@ -92,8 +135,8 @@ def ingest_staged_batch(
         if batch.rejections and not partial_allowed:
             if not preserve_rejected_evidence:
                 raise ValueError("rejected staged provider evidence is not persistable")
-            with transaction(connection):
-                reused = _ensure_raw_block(connection, evidence)
+            with transaction(connection, measurement=sqlite_write):
+                reused = _ensure_raw_blocks(connection, evidences)
                 _record_active_run(
                     connection, ingest_run_id, evidence.raw_block_id, evidence.received_at, run_kind
                 )
@@ -101,12 +144,12 @@ def ingest_staged_batch(
                 _finish_run(connection, ingest_run_id, "failed", evidence.received_at, detail)
             return _result(
                 connection, batch, MergeCounts(), ingest_run_id, evidence,
-                "failed", reused, accepted=0
+                "failed", reused, accepted=0, sqlite_write=sqlite_write,
             )
 
         try:
-            with transaction(connection):
-                reused = _ensure_raw_block(connection, evidence)
+            with transaction(connection, measurement=sqlite_write):
+                reused = _ensure_raw_blocks(connection, evidences)
                 _record_active_run(
                     connection, ingest_run_id, evidence.raw_block_id, evidence.received_at, run_kind
                 )
@@ -117,9 +160,12 @@ def ingest_staged_batch(
                     merge_mode=merge_mode,
                     recorded_at=evidence.received_at,
                 )
+                sqlite_write["rows_inserted"] = counts.inserted + counts.corrected
+                sqlite_write["rows_unchanged"] = counts.unchanged
                 if counts.canonical_mutations:
                     _refresh_lane_state(connection, batch, ingest_run_id, evidence.received_at)
-                _confirm_registration_evidence(connection, batch.bars[0].symbol, batch.bars[0].timeframe, evidence.received_at)
+                if batch.bars:
+                    _confirm_registration_evidence(connection, batch.bars[0].symbol, batch.bars[0].timeframe, evidence.received_at)
                 if before_commit is not None:
                     before_commit(connection)
                 detail = _outcome_json(
@@ -129,8 +175,8 @@ def ingest_staged_batch(
                     connection, ingest_run_id, "committed", evidence.received_at, detail
                 )
         except BaseException as error:
-            with transaction(connection):
-                failure_reused = _ensure_raw_block(connection, evidence)
+            with transaction(connection, measurement=sqlite_write):
+                failure_reused = _ensure_raw_blocks(connection, evidences)
                 _record_active_run(
                     connection, ingest_run_id, evidence.raw_block_id, evidence.received_at, run_kind
                 )
@@ -143,11 +189,40 @@ def ingest_staged_batch(
             raise IngestionFailure(
                 ingest_run_id, evidence.raw_block_id, evidence.checksum, error
             ) from error
-        return _result(
+        result = _result(
             connection, batch, counts, ingest_run_id, evidence,
             "COMPLETED_WITH_WARNINGS" if batch.rejections else "committed",
-            reused, accepted=len(batch.bars)
+            reused, accepted=len(batch.bars), sqlite_write=sqlite_write,
         )
+        synthetic_source = (
+            (batch.bars[0].symbol, batch.bars[0].timeframe)
+            if batch.bars and counts.canonical_mutations else None
+        )
+    if synthetic_source is not None:
+        # Synthetic generation is an independent side effect after canonical
+        # commit. It can neither roll back nor satisfy the real ingestion.
+        from fragarach_ii.synthetic_repository import notify_source_revision_advanced
+        notify_source_revision_advanced(
+            database_path, synthetic_source[0], synthetic_source[1]
+        )
+    return result
+
+
+def _combine_batches(batches: tuple[StagingBatch, ...]) -> StagingBatch:
+    """Combine non-overlapping provider chunks without discarding provenance."""
+    return StagingBatch(
+        bars=tuple(bar for batch in batches for bar in batch.bars),
+        rejections=tuple(rejection for batch in batches for rejection in batch.rejections),
+        source_rows=sum(batch.source_rows for batch in batches),
+        duplicate_identical=sum(batch.duplicate_identical for batch in batches),
+        duplicate_conflicting=sum(batch.duplicate_conflicting for batch in batches),
+    )
+
+
+def _ensure_raw_blocks(connection: sqlite3.Connection, evidences: tuple[RawEvidence, ...]) -> bool:
+    """Persist every source response; return whether all were already known."""
+    reused = [_ensure_raw_block(connection, evidence) for evidence in evidences]
+    return all(reused)
 
 
 def _ensure_raw_block(connection: sqlite3.Connection, evidence: RawEvidence) -> bool:
@@ -300,6 +375,7 @@ def _result(
     reused: bool,
     *,
     accepted: int,
+    sqlite_write: dict[str, object],
 ) -> IngestionResult:
     symbol = batch.bars[0].symbol if batch.bars else ""
     timeframe = batch.bars[0].timeframe if batch.bars else ""
@@ -322,7 +398,7 @@ def _result(
         rejected=len(batch.rejections), duplicate_identical=batch.duplicate_identical,
         duplicate_conflicting=batch.duplicate_conflicting, earliest=earliest,
         latest=latest, canonical_count=canonical_count, transaction_state=state,
-        raw_block_reused=reused,
+        raw_block_reused=reused, sqlite_write=dict(sqlite_write),
         rejections=tuple(
             {"source_row_number": item.source_row_number, "code": item.code, "message": item.message}
             for item in batch.rejections

@@ -11,6 +11,7 @@ from fragarach_ii.calendars import CalendarRegistry, ConfigurationError
 from fragarach_ii.calendars.sessions import expected_session_dates
 from fragarach_ii.storage import open_read_only, registered_writer, transaction
 from fragarach_ii.storage.migrations import apply_migrations
+from fragarach_ii.lane_commissioning import resolved_calendar_id
 
 from .gaps import classify_missing_sessions, coverage_summaries
 from .result import ValidationResult
@@ -48,14 +49,16 @@ def validate_lane(
         registry = CalendarRegistry(config_root, load_symbol_assignments=False)
         authority = open_read_only(database_path)
         try:
-            assignment = authority.execute("SELECT calendar_id,calendar_version,gap_doctrine_id,gap_doctrine_version FROM instrument_registrations WHERE asset=? AND timeframe=?",(normalized_symbol,normalized_timeframe)).fetchone()
+            assignment = authority.execute("SELECT calendar_id,calendar_version,gap_doctrine_id,gap_doctrine_version,asset_class,exchange_name FROM instrument_registrations WHERE asset=? AND timeframe=?",(normalized_symbol,normalized_timeframe)).fetchone()
         finally:
             authority.close()
         if assignment is None:
             raise ValidationError("UNREGISTERED_LANE", f"{normalized_symbol}:{normalized_timeframe}")
-        if assignment[2:] != (registry.gap_doctrine.gap_doctrine_id,registry.gap_doctrine.gap_doctrine_version):
+        if assignment[2:4] != (registry.gap_doctrine.gap_doctrine_id,registry.gap_doctrine.gap_doctrine_version):
             raise ValidationError("GAP_DOCTRINE_MISMATCH", normalized_symbol)
-        calendar = registry.calendar_by_id(assignment[0])
+        effective_calendar=resolved_calendar_id(asset_class=assignment[4],calendar_id=assignment[0],exchange_name=assignment[5],canonical_symbol=normalized_symbol)
+        if effective_calendar is None:raise ValidationError("CALENDAR_NOT_CONFIGURED",normalized_symbol)
+        calendar = registry.calendar_by_id(effective_calendar)
         if calendar.calendar_version != assignment[1]:
             raise ValidationError("CALENDAR_VERSION_MISMATCH", normalized_symbol)
     except ConfigurationError as error:

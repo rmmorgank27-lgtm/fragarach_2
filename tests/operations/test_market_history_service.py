@@ -17,6 +17,7 @@ from fragarach_ii.market_history_service import (
     MarketHistoryWindow,
     construct_bounded_derived_view,
 )
+from fragarach_ii.storage import RegistrationCandidate, register_instrument
 from tests.validation.test_d1_session_validation import _create_lane
 
 
@@ -107,6 +108,52 @@ class MarketHistoryServiceTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(frozenset(payload), MARKET_HISTORY_RESPONSE_KEYS)
         self.assertEqual(len(payload["OHLC"]), 2)
+
+    def test_legacy_stock_calendar_placeholder_is_resolved_at_history_boundary(self) -> None:
+        database = Path(self.temporary.name) / "legacy-stock.sqlite3"
+        register_instrument(
+            database,
+            RegistrationCandidate(
+                asset="GOOGL",
+                timeframe="D1",
+                instrument_family="GOOGL",
+                local_symbol="GOOGL",
+                display_name="Alphabet Class A Common Stock",
+                instrument_type="COMMON_STOCK",
+                asset_class="US_EQUITIES",
+                representation_type="COMMON_STOCK",
+                trading_currency="USD",
+                exchange_name="NASDAQ",
+                provider_id="TWELVE_DATA",
+                provider_contract="TWELVE_DATA_TIME_SERIES_D1_V1",
+                provider_symbol="GOOGL",
+                provider_instrument_type="Common Stock",
+                provider_exchange="NASDAQ",
+                calendar_id="REGISTRY_D1_V1",
+                calendar_version=1,
+                gap_doctrine_id="FRAGARACH_II_D1_GAP_DOCTRINE_V1",
+                gap_doctrine_version=1,
+            ),
+            registered_at_utc="2026-07-10T00:00:00+00:00",
+        )
+        _create_lane(database, "GOOGL", ["2026-07-06", "2026-07-07"])
+
+        response = MarketHistoryService(database).get_market_history(
+            "GOOGL", "D1", MarketHistoryWindow.last_trading_days(2)
+        )
+
+        self.assertIn(response["Status"], {"AVAILABLE", "AVAILABLE_WITH_WARNINGS"})
+        self.assertEqual(len(response["OHLC"]), 2)
+
+    def test_chartability_requires_the_consumer_closed_bar_minimum(self) -> None:
+        result = MarketHistoryService(self.database).assess_sbv2_chartability(
+            "AUDUSD", "D1", required_closed_bars=6
+        )
+
+        self.assertEqual(result["state"], "INSUFFICIENT_HISTORY")
+        self.assertEqual(result["returned_closed_bars"], 5)
+        self.assertEqual(result["required_closed_bars"], 6)
+        self.assertEqual(result["caodt"], "2026-07-10T00:00:00+00:00")
 
     def test_inactive_derived_engine_is_bounded_deterministic_and_read_only(self) -> None:
         before = self.database.read_bytes()

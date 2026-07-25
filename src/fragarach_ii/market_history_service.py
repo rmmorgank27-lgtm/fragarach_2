@@ -13,7 +13,7 @@ from .calendars import CalendarRegistry
 from .calendars.models import CalendarDefinition
 from .calendars.sessions import expected_session_dates, session_classification
 from .external_consumer_service import canonical_database_path
-from .lane_commissioning import market_policy
+from .lane_commissioning import market_policy, resolved_calendar_id
 from .storage import open_read_only
 from .truth_engine import TruthEngineError, truth_state_for_lane
 from .validation.intraday_profiles import (
@@ -26,6 +26,10 @@ from .validation.intraday_profiles import (
 DIRECT_TIMEFRAMES = frozenset({"D1", "H1", "M30", "M5"})
 PENDING_DERIVED_TIMEFRAMES = frozenset({"H4", "M15"})
 MARKET_HISTORY_RESPONSE_KEYS = frozenset({"OHLC", "CAODT", "Status", "Warnings"})
+# SBv2 builds a closed-bar chart only when it has this many governed bars.  This
+# belongs beside the read-only history contract rather than in a UI projection,
+# so every caller can ask the same bounded buildability question.
+SBV2_REQUIRED_CLOSED_BARS = 30
 WindowKind = Literal["LAST_TRADING_DAYS", "BETWEEN"]
 
 
@@ -163,7 +167,13 @@ class MarketHistoryService:
             registration = _registration(connection, requested_symbol)
             if registration is None:
                 return _response("NOT_REGISTERED", ["SYMBOL_NOT_REGISTERED"])
-            canonical_symbol, asset_class, calendar_id, calendar_version = registration
+            (
+                canonical_symbol,
+                asset_class,
+                calendar_id,
+                calendar_version,
+                exchange_name,
+            ) = registration
 
             if requested_timeframe in PENDING_DERIVED_TIMEFRAMES:
                 return _response(
@@ -207,9 +217,22 @@ class MarketHistoryService:
         caodt = str(truth["caodt"])
         caodt_value = _canonical_datetime(caodt)
         try:
+            resolved_calendar = resolved_calendar_id(
+                asset_class=asset_class,
+                calendar_id=calendar_id,
+                exchange_name=exchange_name,
+                canonical_symbol=canonical_symbol,
+            )
+            if resolved_calendar is None:
+                raise MarketHistoryServiceError(
+                    "HISTORY_AUTHORITY_UNAVAILABLE",
+                    "no operational calendar authority is available",
+                )
             calendar = CalendarRegistry(
                 load_symbol_assignments=False
-            ).calendar_by_id(calendar_id)
+            ).calendar_by_id(resolved_calendar)
+        except MarketHistoryServiceError:
+            raise
         except Exception as error:
             raise MarketHistoryServiceError(
                 "HISTORY_AUTHORITY_UNAVAILABLE", str(error)
@@ -301,21 +324,89 @@ class MarketHistoryService:
             ],
         )
 
+    def assess_sbv2_chartability(
+        self,
+        symbol: str,
+        timeframe: str,
+        *,
+        required_closed_bars: int = SBV2_REQUIRED_CLOSED_BARS,
+    ) -> dict[str, object]:
+        """Return the bounded proof required before SBv2 can build a chart.
 
-def _registration(connection, symbol: str) -> tuple[str, str, str, int] | None:
+        This is intentionally a projection over the existing governed-history
+        response.  It does not fetch, mutate, or treat publication/mapping as
+        substitutes for evidence.  Publication and mapping remain the caller's
+        authority, while this service proves calendar resolution, CAODT, and
+        the consumer's closed-bar minimum from one read-only window.
+        """
+
+        if (
+            isinstance(required_closed_bars, bool)
+            or not isinstance(required_closed_bars, int)
+            or required_closed_bars < 1
+        ):
+            raise MarketHistoryServiceError(
+                "INVALID_REQUIRED_BAR_COUNT",
+                "required closed bars must be a positive integer",
+            )
+        try:
+            history = self.get_market_history(
+                symbol,
+                timeframe,
+                MarketHistoryWindow.last_trading_days(required_closed_bars + 5),
+            )
+        except MarketHistoryServiceError as error:
+            return {
+                "state": "CALENDAR_UNAVAILABLE"
+                if error.code == "HISTORY_AUTHORITY_UNAVAILABLE"
+                else "HISTORY_UNAVAILABLE",
+                "required_closed_bars": required_closed_bars,
+                "returned_closed_bars": 0,
+                "caodt": None,
+                "reason": f"{error.code}: {error}",
+            }
+
+        bars = history["OHLC"]
+        assert isinstance(bars, list)
+        caodt = history["CAODT"]
+        status = str(history["Status"])
+        warnings = history["Warnings"]
+        assert isinstance(warnings, list)
+        if not caodt:
+            state, reason = "CAODT_MISSING", "Governed history has no CAODT."
+        elif status not in {"AVAILABLE", "AVAILABLE_WITH_WARNINGS"}:
+            state, reason = "HISTORY_UNAVAILABLE", "; ".join(map(str, warnings)) or status
+        elif len(bars) < required_closed_bars:
+            state = "INSUFFICIENT_HISTORY"
+            reason = (
+                f"Governed history returned {len(bars)}/{required_closed_bars} "
+                "required closed bars."
+            )
+        else:
+            state, reason = "CHARTABLE", None
+        return {
+            "state": state,
+            "required_closed_bars": required_closed_bars,
+            "returned_closed_bars": len(bars),
+            "caodt": caodt,
+            "reason": reason,
+        }
+
+
+def _registration(connection, symbol: str) -> tuple[str, str, str, int, str | None] | None:
     direct = connection.execute(
         """
-        SELECT asset,asset_class,calendar_id,calendar_version
+        SELECT asset,asset_class,calendar_id,calendar_version,exchange_name
         FROM instrument_registrations
         WHERE asset=? AND timeframe='D1'
         """,
         (symbol,),
     ).fetchone()
     if direct is not None:
-        return str(direct[0]), str(direct[1]), str(direct[2]), int(direct[3])
+        return str(direct[0]), str(direct[1]), str(direct[2]), int(direct[3]), direct[4]
     aliases = connection.execute(
         """
-        SELECT DISTINCT r.asset,r.asset_class,r.calendar_id,r.calendar_version
+        SELECT DISTINCT r.asset,r.asset_class,r.calendar_id,r.calendar_version,r.exchange_name
         FROM instrument_registrations AS r,json_each(r.aliases_json) AS alias
         WHERE r.timeframe='D1'
           AND json_extract(alias.value,'$.normalized_alias')=?
@@ -328,7 +419,7 @@ def _registration(connection, symbol: str) -> tuple[str, str, str, int] | None:
     if not aliases:
         return None
     row = aliases[0]
-    return str(row[0]), str(row[1]), str(row[2]), int(row[3])
+    return str(row[0]), str(row[1]), str(row[2]), int(row[3]), row[4]
 
 
 def _resolve_window(

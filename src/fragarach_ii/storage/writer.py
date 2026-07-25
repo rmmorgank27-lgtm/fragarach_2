@@ -7,6 +7,7 @@ import json
 import os
 import socket
 import sys
+import threading
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,6 +15,8 @@ from typing import IO, Any
 
 
 _PROCESS_STARTED_AT_UTC = datetime.now(UTC).isoformat()
+_LOCAL_WRITER_GUARDS: dict[str, threading.Lock] = {}
+_LOCAL_WRITER_GUARDS_LOCK = threading.Lock()
 
 
 class WriterLockError(RuntimeError):
@@ -36,21 +39,40 @@ class WriterLock:
         self.lock_path = Path(f"{self.database_path}.writer.lock")
         self._file: IO[bytes] | None = None
         self._token: str | None = None
+        with _LOCAL_WRITER_GUARDS_LOCK:
+            self._local_guard = _LOCAL_WRITER_GUARDS.setdefault(
+                str(self.lock_path), threading.Lock()
+            )
+        self._local_guard_held = False
 
     @property
     def held(self) -> bool:
         return self._file is not None
 
+    @property
+    def identity(self) -> str:
+        token = self._token or "unheld"
+        return f"pid={os.getpid()};host={socket.gethostname()};token={token}"
+
     def acquire(self) -> "WriterLock":
         if self.held:
             raise RuntimeError("writer lock instance is already held")
-        descriptor = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        self._local_guard.acquire()
+        self._local_guard_held = True
+        try:
+            descriptor = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        except BaseException:
+            self._local_guard.release()
+            self._local_guard_held = False
+            raise
         lock_file = os.fdopen(descriptor, "r+b", buffering=0)
         try:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
             owner = self._read_metadata(lock_file)
             lock_file.close()
+            self._local_guard.release()
+            self._local_guard_held = False
             raise WriterLockError(self.lock_path, owner) from error
 
         self._file = lock_file
@@ -74,6 +96,8 @@ class WriterLock:
             lock_file.close()
             self._file = None
             self._token = None
+            self._local_guard.release()
+            self._local_guard_held = False
             raise
         return self
 
@@ -98,6 +122,9 @@ class WriterLock:
             lock_file.close()
             self._file = None
             self._token = None
+            if self._local_guard_held:
+                self._local_guard.release()
+                self._local_guard_held = False
 
     def __enter__(self) -> "WriterLock":
         return self.acquire()

@@ -6,11 +6,13 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
 from fragarach_ii.commands.get_history import main
 from fragarach_ii.external_consumer_service import CATALOG_CONTRACT, CONTRACT, HistoryService
+from fragarach_ii.history_depth import D1_MORPHIX_MIN_OBSERVATIONS
 from fragarach_ii.storage import open_read_only
 from tests.validation.test_d1_session_validation import _create_lane
 
@@ -93,6 +95,35 @@ class ExternalConsumerServiceTests(unittest.TestCase):
             history = next(row for row in payload["histories"] if row["symbol"] == "AUDUSD")
             self.assertEqual((history["timeframe"], history["bar_count"]), ("D1", 2))
             self.assertEqual(database.read_bytes(), before)
+
+    def test_estate_catalogue_requires_d1_depth_before_morphix_eligibility(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            shallow = Path(directory) / "shallow.sqlite3"
+            _create_lane(shallow, "AUDUSD", ["2026-07-06", "2026-07-07", "2026-07-08", "2026-07-09"])
+
+            payload = HistoryService(shallow).get_catalogue()
+
+            history = next(row for row in payload["symbols"] if row["symbol"] == "AUDUSD")["histories"][0]
+            self.assertEqual(history["bar_count"], 4)
+            self.assertFalse(history["eligible_for_morphix"])
+            self.assertEqual(history["minimum_required_bar_count"], D1_MORPHIX_MIN_OBSERVATIONS)
+            self.assertIn(history["morphix_eligibility_reason"], {"PROVIDER_HISTORY_LIMIT", "SHORT_HISTORY_FETCH_USED"})
+
+        with tempfile.TemporaryDirectory() as directory:
+            deep = Path(directory) / "deep.sqlite3"
+            start = date(2025, 1, 1)
+            dates = [
+                (start + timedelta(days=offset)).isoformat()
+                for offset in range(D1_MORPHIX_MIN_OBSERVATIONS)
+            ]
+            _create_lane(deep, "BTCUSD", dates)
+
+            payload = HistoryService(deep).get_catalogue()
+
+            history = next(row for row in payload["symbols"] if row["symbol"] == "BTCUSD")["histories"][0]
+            self.assertEqual(history["bar_count"], D1_MORPHIX_MIN_OBSERVATIONS)
+            self.assertTrue(history["eligible_for_morphix"])
+            self.assertIsNone(history["morphix_eligibility_reason"])
 
 
 if __name__ == "__main__":

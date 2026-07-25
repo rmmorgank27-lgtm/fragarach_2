@@ -1,0 +1,19 @@
+{
+  "asset_class": "AUSTRALIAN_EQUITIES",
+  "calculated_closures": ["AUSTRALIAN_EQUITIES_HOLIDAYS"],
+  "calendar_id": "AUSTRALIAN_EQUITIES_D1_V1",
+  "calendar_version": 1,
+  "definition_checksum": "d3baea2704de2892be0c22df076eecd958409c9615b88570e321349156004e4d",
+  "effective_from": "1970-01-01",
+  "effective_to": null,
+  "format": "fragarach_ii.calendar_definition.v1",
+  "overrides": [],
+  "session_close_local": "16:00:00",
+  "session_timezone": "Australia/Sydney",
+  "session_close_owner_day_offset": 0,
+  "acquisition_delay_seconds": 0,
+  "recurring_full_day_closures": [],
+  "timeframe": "D1",
+  "timezone_basis": "Australia/Sydney",
+  "weekdays_expected": [1, 2, 3, 4, 5]
+}

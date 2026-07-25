@@ -4,6 +4,7 @@ import SwiftUI
 struct EstateContextDetailView: View {
     let estate: EstateTruthState
     let hierarchy: EstateHierarchy
+    var scheduler: SchedulerSnapshot? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -13,16 +14,21 @@ struct EstateContextDetailView: View {
                 score(hierarchy.estateSummary)
             }
             GroupBox("Estate authority") { Facts([
-                ("CAODT", TruthPresentation.text(estate.estateSummary.overallCAODT)),
+                ("CAODT", TruthPresentation.text(estate.estateSummary.latestCanonicalObservation)),
                 ("Markets", "\(hierarchy.markets.count)"),
                 ("Symbols", "\(hierarchy.estateSummary.symbolCount)"),
+                ("Required lanes", "\(estate.estateSummary.requiredLanes)"),
+                ("Commissioned lanes", "\(estate.estateSummary.commissionedLanes)"),
+                ("Operational lanes", "\(estate.estateSummary.operationalLanes)"),
+                ("Missing commissions", "\(estate.estateSummary.missingCommissions)"),
+                ("Operational coverage", estate.estateSummary.operationalCoveragePercent.map{"\($0)%"} ?? "Not measured"),
                 ("Healthy", "\(hierarchy.estateSummary.healthyCount)"),
                 ("Attention", "\(hierarchy.estateSummary.attentionCount)"),
                 ("Critical", "\(hierarchy.estateSummary.criticalCount)"),
                 ("Coverage", percent(hierarchy.estateSummary.coveragePercent)),
                 ("Freshness", percent(hierarchy.estateSummary.freshnessPercent))
             ]) }
-            GroupBox("Recent operational events") { Facts([("Validation", "Not measured"), ("Provider update", "Not measured"), ("Snapshot", "Placeholder"), ("Backup", "Placeholder")]) }
+            SchedulerRecentEventsView(snapshot:scheduler)
             GroupBox("Aggregation") { Facts([("Truth", estate.estateSummary.aggregation.truthScore), ("Authority", estate.estateSummary.aggregation.authorityState), ("CAODT", estate.estateSummary.aggregation.caodt)]) }
         }.padding()
     }

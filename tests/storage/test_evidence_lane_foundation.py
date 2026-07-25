@@ -10,7 +10,7 @@ class EvidenceLaneFoundationTests(unittest.TestCase):
     def tearDown(self):self.tmp.cleanup()
 
     def test_migration_five_backfills_only_existing_d1_lanes_without_registration_change(self):
-        report=verify_integrity(self.db);self.assertEqual((len(APPLICATION_TABLES),report.application_tables),(10,APPLICATION_TABLES))
+        report=verify_integrity(self.db);self.assertEqual((len(APPLICATION_TABLES),report.application_tables),(12,APPLICATION_TABLES))
         c=open_read_only(self.db)
         try:
             self.assertEqual(c.execute("SELECT checksum_sha256 FROM schema_migrations WHERE version=5").fetchone()[0],migration_5_checksum())

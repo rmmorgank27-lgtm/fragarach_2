@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from datetime import date
+from datetime import date, time
 from pathlib import Path
 from typing import Any
 
@@ -140,8 +140,21 @@ def _parse_calendar(raw: dict[str, Any]) -> CalendarDefinition:
         for value in raw.get("recurring_full_day_closures", [])
     )
     calculated = tuple(raw.get("calculated_closures", []))
-    if any(value not in {"GOOD_FRIDAY"} for value in calculated):
+    if any(value not in {"GOOD_FRIDAY","US_EQUITIES_HOLIDAYS","AUSTRALIAN_EQUITIES_HOLIDAYS","UK_EQUITIES_HOLIDAYS"} for value in calculated):
         raise ConfigurationError("UNKNOWN_CALCULATED_CLOSURE", str(calculated))
+    try:
+        session_close = time.fromisoformat(raw["session_close_local"])
+        session_timezone = str(raw.get("session_timezone", raw["timezone_basis"]))
+        owner_offset = int(raw.get("session_close_owner_day_offset", 0))
+        acquisition_delay = int(raw.get("acquisition_delay_seconds", 0))
+    except (KeyError, TypeError, ValueError) as error:
+        raise ConfigurationError(
+            "INVALID_SESSION_SCHEDULE", str(raw.get("calendar_id"))
+        ) from error
+    if owner_offset not in {0, 1} or acquisition_delay < 0:
+        raise ConfigurationError(
+            "INVALID_SESSION_SCHEDULE", str(raw.get("calendar_id"))
+        )
     return CalendarDefinition(
         calendar_id=raw["calendar_id"],
         calendar_version=raw["calendar_version"],
@@ -155,6 +168,10 @@ def _parse_calendar(raw: dict[str, Any]) -> CalendarDefinition:
         recurring_full_day_closures=recurring,
         calculated_closures=calculated,
         overrides=tuple(sorted(overrides, key=lambda item: item.date)),
+        session_close_local=session_close,
+        session_timezone=session_timezone,
+        session_close_owner_day_offset=owner_offset,
+        acquisition_delay_seconds=acquisition_delay,
     )
 
 
