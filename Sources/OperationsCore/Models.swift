@@ -900,11 +900,12 @@ public struct SchedulerServiceStatus:Codable,Equatable,Sendable {
     public let nextDueCheck:String?
     public let register:SchedulerUpdateRegister?
     public let scheduleDashboard:[SchedulerUpdateRegisterLane]
+    public let blockedScheduleDashboard:[SchedulerUpdateRegisterLane]
     public let schedulerPolicy:String?
     public let schedulerPolicyKey:String?
     enum CodingKeys:String,CodingKey {
         case contract,installed,live,compatibility
-        case serviceState="service_state",serviceBuild="service_build",runningBuild="running_build",serviceInstance="service_instance",serviceGeneration="service_generation",serviceStartTime="service_start_time",heartbeatTime="heartbeat_time",lastSuccessfulMonitorUpdate="last_successful_monitor_update",restartCount="restart_count",lastExitReason="last_exit_reason",serviceLocation="service_location",authorityDatabase="authority_database",operationalJournal="operational_journal",automaticLoginStart="automatic_login_start",credentialSource="credential_source",activeMutation="active_mutation",lastMutation="last_mutation",mutationStatus="mutation_status",mutationStage="mutation_stage",mutationStartedAt="mutation_started_at",mutationLastProgressAt="mutation_last_progress_at",mutationCancellable="mutation_cancellable",mutationFailure="mutation_failure",reconciliationStatus="reconciliation_status",recommendedActions="recommended_actions",acquisitionOwnerActive="acquisition_owner_active",operationalHealth="operational_health",audit,schedulerMode="scheduler_mode",authorityRevision="authority_revision",authorityChangeToken="authority_change_token",nextDueCheck="next_due_check",register,scheduleDashboard="schedule_dashboard",schedulerPolicy="scheduler_policy",schedulerPolicyKey="scheduler_policy_key"
+        case serviceState="service_state",serviceBuild="service_build",runningBuild="running_build",serviceInstance="service_instance",serviceGeneration="service_generation",serviceStartTime="service_start_time",heartbeatTime="heartbeat_time",lastSuccessfulMonitorUpdate="last_successful_monitor_update",restartCount="restart_count",lastExitReason="last_exit_reason",serviceLocation="service_location",authorityDatabase="authority_database",operationalJournal="operational_journal",automaticLoginStart="automatic_login_start",credentialSource="credential_source",activeMutation="active_mutation",lastMutation="last_mutation",mutationStatus="mutation_status",mutationStage="mutation_stage",mutationStartedAt="mutation_started_at",mutationLastProgressAt="mutation_last_progress_at",mutationCancellable="mutation_cancellable",mutationFailure="mutation_failure",reconciliationStatus="reconciliation_status",recommendedActions="recommended_actions",acquisitionOwnerActive="acquisition_owner_active",operationalHealth="operational_health",audit,schedulerMode="scheduler_mode",authorityRevision="authority_revision",authorityChangeToken="authority_change_token",nextDueCheck="next_due_check",register,scheduleDashboard="schedule_dashboard",blockedScheduleDashboard="blocked_schedule_dashboard",schedulerPolicy="scheduler_policy",schedulerPolicyKey="scheduler_policy_key"
     }
     public init(from decoder:Decoder)throws {
         let c=try decoder.container(keyedBy:CodingKeys.self)
@@ -946,6 +947,7 @@ public struct SchedulerServiceStatus:Codable,Equatable,Sendable {
         nextDueCheck=try c.decodeIfPresent(String.self,forKey:.nextDueCheck)
         register=try c.decodeIfPresent(SchedulerUpdateRegister.self,forKey:.register)
         scheduleDashboard=try c.decodeIfPresent([SchedulerUpdateRegisterLane].self,forKey:.scheduleDashboard) ?? []
+        blockedScheduleDashboard=try c.decodeIfPresent([SchedulerUpdateRegisterLane].self,forKey:.blockedScheduleDashboard) ?? []
         schedulerPolicy=try c.decodeIfPresent(String.self,forKey:.schedulerPolicy)
         schedulerPolicyKey=try c.decodeIfPresent(String.self,forKey:.schedulerPolicyKey)
     }

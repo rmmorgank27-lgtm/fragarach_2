@@ -62,6 +62,7 @@ struct EstateAdmissionProgress: Equatable {
     @Published var schedulerDiagnosticsError:String?
     @Published var schedulerError: String?
     @Published var schedulerUsesCompactStatus = false
+    @Published var schedulerRegisterFilter: String?
     @Published var credentialAuthority:CredentialAuthoritySnapshot?
     @Published var schedulerServiceRunning = false
     @Published var providerFacts:ProviderFactsSnapshot?
@@ -132,6 +133,11 @@ struct EstateAdmissionProgress: Equatable {
 
     func startScheduler() {
         Task { await manageSchedulerService("start") }
+    }
+
+    func showBlockedSchedulerLanes() {
+        schedulerRegisterFilter = "BLOCKED"
+        section = .scheduler
     }
 
     func stopScheduler(){Task { await manageSchedulerService("stop") }}

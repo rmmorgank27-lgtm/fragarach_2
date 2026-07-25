@@ -217,6 +217,8 @@ struct SchedulerMonitorView: View {
         let health=status.operationalHealth
         let register=status.register
         let dueNow=register?.dueNowCount ?? 0
+        let showingBlocked=store.schedulerRegisterFilter == "BLOCKED"
+        let displayedRows=showingBlocked ? status.blockedScheduleDashboard : status.scheduleDashboard
         ScrollView {
             VStack(alignment:.leading,spacing:18) {
                 HStack(alignment:.firstTextBaseline) {
@@ -243,16 +245,20 @@ struct SchedulerMonitorView: View {
                     SchedulerMetricCard(title:"Next Due Check",value:SchedulerFormatting.timestamp(status.nextDueCheck),detail:"Next approved boundary",state:nil)
                     SchedulerMetricCard(title:"Ready",value:"\(register?.readyCount ?? 0)",detail:"Scheduled checks",state:"CURRENT")
                     SchedulerMetricCard(title:"Retrying",value:"\(register?.retryingCount ?? 0)",detail:"Retry backoff applies",state:(register?.retryingCount ?? 0) == 0 ? "CURRENT":"WAITING")
-                    SchedulerMetricCard(title:"Blocked",value:"\(register?.blockedCount ?? 0)",detail:"Needs review or repair",state:(register?.blockedCount ?? 0) == 0 ? "CURRENT":"FAILED")
+                    SchedulerMetricCard(title:"Blocked",value:"\(register?.blockedCount ?? 0)",detail:"Needs review or repair",state:(register?.blockedCount ?? 0) == 0 ? "CURRENT":"FAILED",action:{store.schedulerRegisterFilter="BLOCKED"})
                     SchedulerMetricCard(title:"Weekly Audit",value:status.audit?.overallResult?.replacingOccurrences(of:"_",with:" ").capitalized ?? "Not yet run",detail:"Separate from normal updates",state:status.audit?.overallResult)
                 }
-                GroupBox("Upcoming Scheduled Checks") {
+                GroupBox(showingBlocked ? "Blocked Lane Findings" : "Upcoming Scheduled Checks") {
                     VStack(alignment:.leading,spacing:10) {
-                        Text("Showing the next \(status.scheduleDashboard.count) register rows. Normal wakes do not load the full estate.").font(.caption).foregroundStyle(.secondary)
-                        if status.scheduleDashboard.isEmpty {
-                            Text("No scheduled lane checks are currently registered.").foregroundStyle(.secondary).padding(.vertical,18)
+                        HStack {
+                            Text(showingBlocked ? "Showing \(displayedRows.count) blocked register rows. Each outcome identifies the repair required." : "Showing the next \(displayedRows.count) register rows. Normal wakes do not load the full estate.").font(.caption).foregroundStyle(.secondary)
+                            Spacer()
+                            if showingBlocked { Button("Show schedule"){store.schedulerRegisterFilter=nil} }
+                        }
+                        if displayedRows.isEmpty {
+                            Text(showingBlocked ? "No blocked lane findings are currently registered." : "No scheduled lane checks are currently registered.").foregroundStyle(.secondary).padding(.vertical,18)
                         } else {
-                            Table(status.scheduleDashboard) {
+                            Table(displayedRows) {
                                 TableColumn("Symbol",value:\.asset).width(min:90,ideal:120)
                                 TableColumn("TF",value:\.timeframe).width(55)
                                 TableColumn("State") { row in Text(row.state.replacingOccurrences(of:"_",with:" ").capitalized).foregroundStyle(stateColor(row.state)) }.width(min:80,ideal:105)

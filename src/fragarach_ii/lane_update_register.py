@@ -316,6 +316,23 @@ class LaneUpdateRegister:
             ).fetchall()
         return [_row_dict(row) for row in rows]
 
+    def blocked_rows(self, *, limit: int = 100) -> list[dict[str, object]]:
+        """Return bounded, actionable block findings from the runtime index."""
+        if limit <= 0:
+            return []
+        with self._connection() as connection:
+            rows = connection.execute(
+                """SELECT asset,timeframe,state,next_expected_boundary_utc,next_check_at_utc,
+                          last_checked_boundary_utc,last_attempted_at_utc,last_successful_bar_utc,
+                          last_outcome,retry_count,retry_not_before_utc,updated_at_utc,priority
+                   FROM lane_update_register
+                   WHERE state='BLOCKED'
+                   ORDER BY priority,updated_at_utc DESC,asset,timeframe
+                   LIMIT ?""",
+                (int(limit),),
+            ).fetchall()
+        return [_row_dict(row) for row in rows]
+
     def audit_due(self, *, at: datetime | None = None) -> bool:
         """Whether the bounded weekly maintenance audit is due."""
         observed = normalized_utc(at)

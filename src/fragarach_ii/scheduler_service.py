@@ -3326,6 +3326,9 @@ def _time_triggered_runtime_snapshot(
         # A fixed small horizon restores operational schedule visibility
         # without reintroducing the old full-estate monitor projection.
         "schedule_dashboard": dashboard,
+        # A separate bounded indexed read lets operators inspect every
+        # concrete lane behind the Overview's blocked count.
+        "blocked_schedule_dashboard": register.blocked_rows(limit=100),
         "audit": audit_status(register.database_path),
         "execution": dict(cycle),
         "scheduler_progress": progress,

@@ -157,6 +157,18 @@ def test_pause_and_retry_affect_only_the_target_register_row(tmp_path: Path) -> 
     assert register.summary()["retrying_count"] == 1
 
 
+def test_blocked_rows_are_available_as_a_bounded_operator_projection(tmp_path: Path) -> None:
+    database = _m5_lane(tmp_path)
+    register = LaneUpdateRegister(database)
+    register.audit_estate(at=NOW, reason="TEST")
+    register.block(asset="AUDUSD", timeframe="M5", reason="AUTHENTICATION_FAILED", at=NOW)
+
+    rows = register.blocked_rows(limit=10)
+
+    assert [(row["asset"], row["timeframe"]) for row in rows] == [("AUDUSD", "M5")]
+    assert rows[0]["last_outcome"] == "AUTHENTICATION_FAILED"
+
+
 def test_normal_wake_uses_register_not_estate_reconciliation(tmp_path: Path, monkeypatch) -> None:
     database = _m5_lane(tmp_path)
     journal = tmp_path / "scheduler.json"

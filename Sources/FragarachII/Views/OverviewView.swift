@@ -25,7 +25,7 @@ struct OverviewView: View {
                         SchedulerMetricCard(title:"Scheduler Service",value:operationalState,detail:"Process \(store.schedulerServiceRunning ? "running":"unavailable") · Heartbeat: \(SchedulerFormatting.timestamp(status.heartbeatTime))",state:store.schedulerServiceRunning ? "HEALTHY":"CRITICAL")
                         SchedulerMetricCard(title:"Due now",value:"\(dueNow)",detail:dueNow == 0 ? "No overdue checks · \(scheduled) scheduled" : "Overdue checks awaiting dispatch · \(scheduled) scheduled",state:dueNow == 0 ? "CURRENT":"WAITING")
                         SchedulerMetricCard(title:"Retrying",value:"\(status.register?.retryingCount ?? 0)",detail:"Lane-specific retry backoff",state:(status.register?.retryingCount ?? 0) == 0 ? "CURRENT":"WAITING")
-                        SchedulerMetricCard(title:"Blocked",value:"\(status.register?.blockedCount ?? 0)",detail:"Requires a specific repair",state:(status.register?.blockedCount ?? 0) == 0 ? "CURRENT":"FAILED")
+                        SchedulerMetricCard(title:"Blocked",value:"\(status.register?.blockedCount ?? 0)",detail:"Click to inspect affected lanes",state:(status.register?.blockedCount ?? 0) == 0 ? "CURRENT":"FAILED",action:{store.showBlockedSchedulerLanes()})
                     }
                     if store.estateProjectionNeedsRefresh {
                         Label("Refreshing Estate Truth after the latest Scheduler publication.",systemImage:"arrow.triangle.2.circlepath").font(.caption).foregroundStyle(.secondary)
