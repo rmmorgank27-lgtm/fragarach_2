@@ -394,6 +394,7 @@ def _commissioning_matrix(registrations,lane_facts,commissioned_lanes,capabiliti
         ((row[0],row[1]) for row in registrations),set(commissioned_lanes),
         evidence_counts=lane_facts,operational_states=freshness_states,
         operational_lanes=operational,
+        enabled_lanes=set(commissioned_lanes),
     )
 
 
@@ -674,13 +675,18 @@ def _estate_summary(lanes, generated_at, last_persisted_authority_change, commis
         ),
         default=None,
     )
-    required_lanes=len(commissioning) if commissioning is not None else len(lanes)
+    required_rows=[row for row in commissioning if row.get("required")] if commissioning is not None else []
+    not_enabled_lanes=(
+        sum(not bool(row.get("enabled")) for row in commissioning)
+        if commissioning is not None else 0
+    )
+    required_lanes=len(required_rows) if commissioning is not None else len(lanes)
     commissioned_lanes=(
-        sum(bool(row["commissioned"]) for row in commissioning)
+        sum(bool(row["commissioned"]) for row in required_rows)
         if commissioning is not None else len(lanes)
     )
     operational_lanes=(
-        sum(bool(row["operational"]) for row in commissioning)
+        sum(bool(row["operational"]) for row in required_rows)
         if commissioning is not None else len(lanes)
     )
     missing_commissions=required_lanes-commissioned_lanes
@@ -700,6 +706,7 @@ def _estate_summary(lanes, generated_at, last_persisted_authority_change, commis
         "commissioned_lanes":commissioned_lanes,
         "operational_lanes":operational_lanes,
         "missing_commissions":missing_commissions,
+        "not_enabled_lanes":not_enabled_lanes,
         "operational_coverage_percent":operational_coverage,
         "green_count": counts["GREEN"],
         "amber_count": counts["AMBER"],

@@ -56,20 +56,36 @@ def test_missing_commissions_are_first_class_and_no_required_cell_is_omitted() -
     assert [row["timeframe"] for row in rows if row["missing_commission"]] == ["H1","M30","M5"]
 
 
+def test_unenabled_lower_timeframes_are_visible_but_non_blocking() -> None:
+    rows = project_required_lanes(
+        [("SPY", "INDICES")], {("SPY", "D1")},
+        evidence_counts={("SPY", "D1"): 10},
+        operational_states={("SPY", "D1"): "Current"},
+        operational_lanes={("SPY", "D1")},
+        enabled_lanes={("SPY", "D1")},
+    )
+    deferred = [row for row in rows if row["timeframe"] != "D1"]
+    assert all(row["commissioning_state"] == "NOT_ENABLED" for row in deferred)
+    assert all(row["operational_state"] == "Not Enabled" for row in deferred)
+    assert all(row["non_blocking"] and not row["missing_commission"] for row in deferred)
+
+
 def test_estate_coverage_uses_commissioned_over_required_and_new_lane_is_visible() -> None:
     with tempfile.TemporaryDirectory() as directory:
         database=Path(directory)/"authority.sqlite3"
         _create_lane(database,"AUDUSD",["2026-07-14"])
         initial=estate_truth_state(database,clock=lambda:NOW)
         summary=initial["estate_summary"]
-        assert summary["required_lanes"] == 12
+        assert summary["required_lanes"] == 3
         assert summary["commissioned_lanes"] == 3
-        assert summary["missing_commissions"] == 9
-        assert initial["estate_summary"]["operational_coverage_percent"] == 25
+        assert summary["missing_commissions"] == 0
+        assert initial["estate_summary"]["not_enabled_lanes"] == 9
+        assert initial["estate_summary"]["operational_coverage_percent"] == 100
         ensure_commissioned_lane(database,"AUDUSD","H1",observed_at=NOW.isoformat())
         updated=estate_truth_state(database,clock=lambda:NOW)
         assert updated["estate_summary"]["commissioned_lanes"] == summary["commissioned_lanes"] + 1
-        assert updated["estate_summary"]["operational_coverage_percent"] == 33
+        assert updated["estate_summary"]["required_lanes"] == 4
+        assert updated["estate_summary"]["operational_coverage_percent"] == 100
         h1=next(row for row in updated["commissioning_matrix"] if row["id"] == "AUDUSD:H1")
         assert h1["operational_state"] == "Behind"
         assert not h1["missing_commission"]
@@ -94,7 +110,7 @@ def test_operator_and_current_boundary_precede_forex_then_market_order() -> None
         work("HISTORY","FX","HISTORICAL_CATCH_UP"),
     ]
     selected=_fair_bounded_selection(due,None,Journal())
-    assert [row["symbol"] for row in selected] == ["OPERATOR","BOUNDARY","AUDUSD"]
+    assert [row["symbol"] for row in selected] == ["BOUNDARY","OPERATOR","AUDUSD"]
     after_forex=_fair_bounded_selection(
         [row for row in due if row["symbol"] not in {"OPERATOR","BOUNDARY","AUDUSD"}],
         None,Journal(),

@@ -90,19 +90,34 @@ def project_required_lanes(
     evidence_counts: Mapping[tuple[str, str], int] | None = None,
     operational_states: Mapping[tuple[str, str], str] | None = None,
     operational_lanes: set[tuple[str, str]] | None = None,
+    enabled_lanes: set[tuple[str, str]] | None = None,
 ) -> list[dict[str, object]]:
-    """Build the canonical Required → Commissioned → Operational projection."""
+    """Build the enabled Required → Commissioned → Operational projection.
+
+    A registered D1 identity is always required.  Lower timeframes are visible
+    for every symbol, but do not become a required commission merely because a
+    market class *could* support them.  They become required only after their
+    explicit lane commissioning enables them.
+    """
 
     counts=evidence_counts or {}
     states=operational_states or {}
     operational=operational_lanes or set()
+    enabled=enabled_lanes
     result=[]
     for symbol,asset_class in registrations:
-        for timeframe in required_timeframes(asset_class):
+        for timeframe in ALL_TIMEFRAMES:
             key=(symbol,timeframe)
+            lane_enabled=(
+                timeframe in required_timeframes(asset_class)
+                if enabled is None else timeframe == "D1" or key in enabled
+            )
+            required=lane_enabled
             commissioned=key in commissioned_lanes
             evidence_count=int(counts.get(key) or 0)
-            if not commissioned:
+            if not lane_enabled:
+                state="Not Enabled"
+            elif not commissioned:
                 state="Not Commissioned"
             elif evidence_count == 0:
                 state=states.get(key,"Behind")
@@ -117,11 +132,16 @@ def project_required_lanes(
                 "symbol":symbol,
                 "asset_class":asset_class,
                 "timeframe":timeframe,
-                "required":True,
+                "required":required,
+                "enabled":lane_enabled,
+                "non_blocking":not lane_enabled,
                 "commissioned":commissioned,
                 "operational":key in operational,
-                "missing_commission":not commissioned,
-                "commissioning_state":"COMMISSIONED" if commissioned else "MISSING_COMMISSION",
+                "missing_commission":required and not commissioned,
+                "commissioning_state":(
+                    "NOT_ENABLED" if not lane_enabled else
+                    "COMMISSIONED" if commissioned else "MISSING_COMMISSION"
+                ),
                 "operational_state":state,
                 "evidence_count":evidence_count,
             })
