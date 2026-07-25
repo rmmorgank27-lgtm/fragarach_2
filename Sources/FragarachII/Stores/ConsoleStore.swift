@@ -464,6 +464,12 @@ struct EstateAdmissionProgress: Equatable {
         section = .manageData
     }
 
+    func openCalendarSettings() {
+        manageDataSection = .system
+        systemSection = .settings
+        section = .manageData
+    }
+
     func configureProvider(_ provider:ProviderInventoryItem,enabled:Bool,operationalLimit:Int,concurrencyLimit:Int) async -> Bool {
         guard !providerFactsResolving else{return false};providerFactsResolving=true;providerFactsError=nil
         let config=configuration,bridge=providerFactsBridge

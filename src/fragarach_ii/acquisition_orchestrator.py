@@ -741,6 +741,24 @@ def mapping_authority(
         reviewed = resolved_mapping.get("status") in {"RESOLVED_AUTOMATICALLY", "OPERATOR_RESOLVED"}
         direct = bool(reviewed and mapping_class in DIRECT_REAL_MAPPING_CLASSES)
         capability = resolved_mapping.get("timeframe_capabilities", {}).get(timeframe, {}) if isinstance(resolved_mapping.get("timeframe_capabilities"), dict) else {}
+        # A reviewed Twelve Data physical-currency representation is a
+        # provider-level FX authority.  Older operator reviews persisted only
+        # the D1 capability, despite Twelve Data's reviewed FX contract
+        # covering M5/M30/H1/D1.  Treating those missing legacy rows as a
+        # provider rejection stranded already-proven FX lanes.
+        is_twelve_fx = (
+            profile.provider == "TWELVE_DATA"
+            and str(resolved_mapping.get("provider_asset_class") or resolved_mapping.get("market_category") or "").upper()
+                in {"FX", "FOREX", "PHYSICAL CURRENCY"}
+            and str(resolved_mapping.get("provider_instrument_type") or "").upper() == "PHYSICAL CURRENCY"
+        )
+        if direct and is_twelve_fx and not capability:
+            capability = {
+                "timeframe": timeframe,
+                "supported": timeframe in profile.supported_timeframes,
+                "history_availability": "AVAILABLE_BY_REVIEWED_FX_CONTRACT",
+                "verification_method": "TWELVE_DATA_REVIEWED_FX_CONTRACT",
+            }
         return {
             "canonical_symbol": canonical,
             "canonical_base_asset": resolved_mapping.get("canonical_base_asset"),

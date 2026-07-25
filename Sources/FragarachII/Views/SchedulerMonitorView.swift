@@ -319,18 +319,27 @@ struct SchedulerMonitorView: View {
                     if !noEligibleProvider.isEmpty {
                         VStack(alignment:.leading,spacing:7) {
                             Label("No eligible provider route · \(noEligibleProvider.count)",systemImage:"point.3.connected.trianglepath.dotted").foregroundStyle(.orange)
-                            Text("No approved, currently usable provider route exists for these lanes. Review Provider Facts to choose or approve a source; the Scheduler will not invent a substitute.").font(.caption).foregroundStyle(.secondary)
-                            Button("Open Provider Facts") { store.openProviderFacts() }
+                            Text("Re-evaluate the reviewed provider routes first. If a lane is still blocked afterwards, Provider Facts shows the exact mapping and runtime state that needs attention; the Scheduler will not invent a substitute.").font(.caption).foregroundStyle(.secondary)
+                            HStack {
+                                Button("Re-evaluate blocked routes") { Task {
+                                    for lane in noEligibleProvider { await store.retrySchedulerLane(lane.id) }
+                                    await store.runSchedulerQueue()
+                                } }
+                                Button("Open Provider Facts") { store.openProviderFacts() }
+                            }
                         }
                     }
                     if !noEligibleProvider.isEmpty && !calendarBlocks.isEmpty { Divider() }
                     if !calendarBlocks.isEmpty {
                         VStack(alignment:.leading,spacing:7) {
                             Label("Operational calendar unavailable · \(calendarBlocks.count)",systemImage:"calendar.badge.exclamationmark").foregroundStyle(.orange)
-                            Text("The lane has no approved market-session calendar. Review Scheduler Diagnostics before restoring it; a calendar repair changes when Fragarach is allowed to fetch.").font(.caption).foregroundStyle(.secondary)
+                            Text("No declared session calendar exists for this instrument, so Fragarach cannot determine the last closed D1 bar. This is separate from provider availability; review the calendar/session policy before restoring it.").font(.caption).foregroundStyle(.secondary)
+                            HStack {
+                            Button("Calendar & Session Policy") { store.openCalendarSettings() }
                             Button("Open Scheduler Diagnostics") {
                                 showDiagnostics=true
                                 Task { await store.loadSchedulerDiagnostics() }
+                            }
                             }
                         }
                     }
