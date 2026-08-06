@@ -111,6 +111,20 @@ public enum ArgumentBuilder {
         case .readSyntheticProducts: ["-m","fragarach_ii.commands.synthetic","--database",database,"--mode","list","--json"]
         case .regenerateSyntheticProduct(let id): ["-m","fragarach_ii.commands.synthetic","--database",database,"--mode","generate"]+(id.map{["--registration-id",$0]} ?? [])+["--json"]
         case .rebuildSyntheticRepository: ["-m","fragarach_ii.commands.synthetic","--database",database,"--mode","rebuild","--json"]
+        case .readOnlyClientsStatus: ["-m","fragarach_ii.commands.read_only_clients","--database",database,"--mode","status","--json"]
+        case .setReadOnlyPublisherEnabled(let enabled): ["-m","fragarach_ii.commands.read_only_clients","--database",database,"--mode",enabled ? "publisher-enable":"publisher-disable","--json"]
+        case .addReadOnlyClient(let clientID,let displayName,let symbols,let timeframes): ["-m","fragarach_ii.commands.read_only_clients","--database",database,"--mode","add","--client-id",clientID,"--display-name",displayName,"--symbols",symbols,"--timeframes",timeframes,"--json"]
+        case .setReadOnlyClientEnabled(let clientID,let enabled): ["-m","fragarach_ii.commands.read_only_clients","--database",database,"--mode",enabled ? "enable":"disable","--client-id",clientID,"--json"]
+        case .revokeReadOnlyClient(let clientID): ["-m","fragarach_ii.commands.read_only_clients","--database",database,"--mode","revoke","--client-id",clientID,"--json"]
+        case .rotateReadOnlyClientToken(let clientID): ["-m","fragarach_ii.commands.read_only_clients","--database",database,"--mode","rotate-token","--client-id",clientID,"--json"]
+        case .setReplicaSyncPaused(let clientID,let paused): ["-m","fragarach_ii.commands.read_only_clients","--database",database,"--mode",paused ? "pause-sync":"resume-sync","--client-id",clientID,"--json"]
+        case .refreshReplicaClient(let clientID): ["-m","fragarach_ii.commands.read_only_clients","--database",database,"--mode","refresh-client","--client-id",clientID,"--json"]
+        case .setReplicaLanePaused(let clientID,let symbol,let timeframe,let paused): ["-m","fragarach_ii.commands.read_only_clients","--database",database,"--mode",paused ? "pause-lane":"resume-lane","--client-id",clientID,"--symbol",symbol,"--timeframe",timeframe,"--json"]
+        case .publishReadOnlySnapshot(let symbols,let timeframes): ["-m","fragarach_ii.commands.read_only_clients","--database",database,"--mode","publish-snapshot","--symbols",symbols,"--timeframes",timeframes,"--json"]
+        case .installReadOnlyPublisherService(let python,let repository): ["-m","fragarach_ii.commands.read_only_clients","--database",database,"--mode","service-install","--python",python,"--repository",repository,"--json"]
+        case .startReadOnlyPublisherService: ["-m","fragarach_ii.commands.read_only_clients","--database",database,"--mode","service-start","--json"]
+        case .stopReadOnlyPublisherService: ["-m","fragarach_ii.commands.read_only_clients","--database",database,"--mode","service-stop","--json"]
+        case .uninstallReadOnlyPublisherService: ["-m","fragarach_ii.commands.read_only_clients","--database",database,"--mode","service-uninstall","--json"]
         }
     }
 }

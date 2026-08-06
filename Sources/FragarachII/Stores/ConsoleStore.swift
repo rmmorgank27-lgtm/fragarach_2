@@ -70,6 +70,10 @@ struct EstateAdmissionProgress: Equatable {
     @Published var providerFactsResolving=false
     @Published var providerCredentialRepairRequested=false
     @Published var latestProviderProbe:ProviderCapabilityProbe?
+    @Published var readOnlyClientsSnapshot:ReadOnlyClientsSnapshot?
+    @Published var readOnlyClientsError:String?
+    @Published var readOnlyClientsBusy=false
+    @Published var readOnlyIssuedToken:String?
     // SQLite serialises the short canonical admission transaction, so a
     // manual file normally coexists with scheduled acquisition.  A pause is
     // retained as an explicit operator option for exceptional investigations.
@@ -84,6 +88,8 @@ struct EstateAdmissionProgress: Equatable {
     private let schedulerLifecycleBridge=ProcessBridge()
     private let schedulerDiagnosticsBridge=ProcessBridge()
     private let providerFactsBridge=ProcessBridge()
+    private let readOnlyClientsBridge=ProcessBridge()
+    private let readOnlyClientsStatusBridge=ProcessBridge()
     private var schedulerMonitorTask:Task<Void,Never>?
     private var estateRefreshTargetToken:String?
     private var lastEstateProjectionToken:String?
@@ -404,6 +410,84 @@ struct EstateAdmissionProgress: Equatable {
             guard result.exitCode == 0 else { syntheticError=result.stderr.isEmpty ? result.stdout:result.stderr;return }
             await refreshSyntheticProducts()
         } catch { syntheticError=error.localizedDescription }
+    }
+
+    func refreshReadOnlyClients(silently:Bool=false) async {
+        guard !readOnlyClientsBusy else{return}
+        if !silently {readOnlyClientsBusy=true;readOnlyClientsError=nil}
+        defer{if !silently{readOnlyClientsBusy=false}}
+        let config=configuration,bridge=readOnlyClientsStatusBridge
+        do {
+            let result=try await Task.detached { try bridge.run(.readOnlyClientsStatus,config:config) }.value
+            guard result.exitCode==0 else {if !silently{readOnlyClientsError=result.stderr.isEmpty ? result.stdout:result.stderr};return}
+            readOnlyClientsSnapshot=try JSONDecoder().decode(ReadOnlyClientsSnapshot.self,from:Data(result.stdout.utf8))
+        } catch {if !silently{readOnlyClientsError=error.localizedDescription}}
+    }
+
+    func setReadOnlyPublisherEnabled(_ enabled:Bool) async {
+        await performReadOnlyControl(.setReadOnlyPublisherEnabled(enabled))
+    }
+
+    func addReadOnlyClient(clientID:String,displayName:String,symbols:String,timeframes:String) async {
+        await performReadOnlyControl(.addReadOnlyClient(clientID:clientID,displayName:displayName,symbols:symbols,timeframes:timeframes),capturesToken:true)
+    }
+
+    func setReadOnlyClientEnabled(_ clientID:String,enabled:Bool) async {
+        await performReadOnlyControl(.setReadOnlyClientEnabled(clientID:clientID,enabled:enabled))
+    }
+
+    func revokeReadOnlyClient(_ clientID:String) async {
+        await performReadOnlyControl(.revokeReadOnlyClient(clientID:clientID))
+    }
+
+    func rotateReadOnlyClientToken(_ clientID:String) async {
+        await performReadOnlyControl(.rotateReadOnlyClientToken(clientID:clientID),capturesToken:true)
+    }
+
+    func setReplicaSyncPaused(_ clientID:String,paused:Bool) async {await performReadOnlyControl(.setReplicaSyncPaused(clientID:clientID,paused:paused))}
+    func refreshReplicaClient(_ clientID:String) async {
+        await performReadOnlyControl(.refreshReplicaClient(clientID:clientID))
+        for _ in 0..<12 {
+            if replicaRequestCompleted(clientID) { return }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            await refreshReadOnlyClients(silently:true)
+        }
+    }
+    func setReplicaLanePaused(_ clientID:String,symbol:String,timeframe:String,paused:Bool) async {await performReadOnlyControl(.setReplicaLanePaused(clientID:clientID,symbol:symbol,timeframe:timeframe,paused:paused))}
+
+    func publishReadOnlySnapshot(symbols:String="*",timeframes:String="*") async {
+        await performReadOnlyControl(.publishReadOnlySnapshot(symbols:symbols,timeframes:timeframes))
+    }
+
+    func installReadOnlyPublisherService() async {
+        await performReadOnlyControl(.installReadOnlyPublisherService(python:pythonPath,repository:repositoryPath))
+    }
+
+    func startReadOnlyPublisherService() async {await performReadOnlyControl(.startReadOnlyPublisherService)}
+    func stopReadOnlyPublisherService() async {await performReadOnlyControl(.stopReadOnlyPublisherService)}
+    func uninstallReadOnlyPublisherService() async {await performReadOnlyControl(.uninstallReadOnlyPublisherService)}
+
+    func clearReadOnlyIssuedToken(){readOnlyIssuedToken=nil}
+
+    private func performReadOnlyControl(_ intent:OperationIntent,capturesToken:Bool=false) async {
+        guard !readOnlyClientsBusy else{return};readOnlyClientsBusy=true;readOnlyClientsError=nil
+        let config=configuration,bridge=readOnlyClientsBridge
+        do {
+            let result=try await Task.detached { try bridge.run(intent,config:config) }.value
+            guard result.exitCode==0 else { readOnlyClientsError=result.stderr.isEmpty ? result.stdout:result.stderr;readOnlyClientsBusy=false;return }
+            if capturesToken {
+                guard let token=result.JSON?["issued_token"] as? String else {throw BridgeError.malformedResult}
+                readOnlyIssuedToken=token
+            }
+            readOnlyClientsBusy=false
+            await refreshReadOnlyClients()
+        } catch { readOnlyClientsBusy=false;readOnlyClientsError=error.localizedDescription }
+    }
+    private func replicaRequestCompleted(_ clientID:String)->Bool {
+        guard let client=readOnlyClientsSnapshot?.clients.first(where:{$0.clientID==clientID}) else{return false}
+        let requested=client.control?.refreshGeneration ?? 0
+        let completed=client.report?.service.refreshGenerationCompleted ?? 0
+        return requested > 0 && completed >= requested
     }
     func clearCurrentOperationResult(){
         guard !dataOperationState.isActive else{return}

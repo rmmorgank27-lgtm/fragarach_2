@@ -7,7 +7,7 @@ struct ContentView: View {
         NavigationSplitView {
             List(selection:$store.section) { ForEach(ConsoleSection.allCases) { section in Label(section.rawValue,systemImage:section.icon).tag(section) } }.listStyle(.sidebar).navigationSplitViewColumnWidth(min:180,ideal:210,max:240)
         } detail: {
-            Group { switch store.section { case .overview: OverviewView(); case .estate: TruthConsoleView(); case .scheduler: SchedulerMonitorView(); case .history: MarketHistoryView(); case .manageData: ManageDataWorkspaceView() } }
+            Group { switch store.section { case .overview: OverviewView(); case .estate: TruthConsoleView(); case .scheduler: SchedulerMonitorView(); case .history: MarketHistoryView(); case .readOnlyClients: ReadOnlyClientsView(); case .manageData: ManageDataWorkspaceView() } }
                 .toolbar { ToolbarItem { Button { Task{await store.refresh()} } label:{Label("Refresh",systemImage:"arrow.clockwise")}.keyboardShortcut("r",modifiers:.command).disabled(store.isRefreshing || store.activeOperationID != nil) } }
         }
         .navigationSplitViewStyle(.balanced)

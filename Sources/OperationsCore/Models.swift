@@ -966,11 +966,74 @@ public struct ProviderFactsSnapshot:Codable,Equatable,Sendable { public let cont
 public struct ProviderCapabilityProbe:Codable,Equatable,Sendable { public let contract:String;public let canonicalSymbol:String;public let provider:String;public let providerSymbol:String;public let timeframe:String;public let providerInterval:String;public let supported:Bool;public let historyAvailability:String;public let maximumRows:Int;public let fragarachRequestCeiling:Int;public let entitlement:String;public let lastVerified:String;public let verificationMethod:String;public let reason:String;public let probeResult:ProviderFactProbeResult;enum CodingKeys:String,CodingKey{case contract,provider,timeframe,supported,entitlement,reason;case canonicalSymbol="canonical_symbol",providerSymbol="provider_symbol",providerInterval="provider_interval",historyAvailability="history_availability",maximumRows="maximum_rows",fragarachRequestCeiling="fragarach_request_ceiling",lastVerified="last_verified",verificationMethod="verification_method",probeResult="probe_result"} }
 
 public enum ConsoleSection: String, CaseIterable, Identifiable, Sendable {
-    case overview = "Overview", estate = "Estate", scheduler = "Scheduler", history = "History", manageData = "Manage Data"
+    case overview = "Overview", estate = "Estate", scheduler = "Scheduler", history = "History", readOnlyClients = "Replica Estate", manageData = "Manage Data"
     public var id: String { rawValue }
     public var icon: String {
-        switch self { case .overview: "gauge.with.dots.needle.50percent"; case .estate: "checkmark.seal"; case .scheduler: "calendar.badge.clock"; case .history: "clock.arrow.circlepath"; case .manageData: "externaldrive.badge.plus" }
+        switch self { case .overview: "gauge.with.dots.needle.50percent"; case .estate: "checkmark.seal"; case .scheduler: "calendar.badge.clock"; case .history: "clock.arrow.circlepath"; case .readOnlyClients: "laptopcomputer.and.arrow.down"; case .manageData: "externaldrive.badge.plus" }
     }
+}
+
+public struct ReadOnlyClientRecord:Codable,Equatable,Sendable,Identifiable {
+    public var id:String{clientID}
+    public let clientID:String
+    public let displayName:String
+    public let enabled:Bool
+    public let revoked:Bool
+    public let symbols:[String]
+    public let timeframes:[String]
+    public let tokenIssuedAtUTC:String?
+    public let createdAtUTC:String?
+    public let updatedAtUTC:String?
+    public let control:ReplicaClientControl?
+    public let requests:[ReplicaLiteRequestReport]?
+    public let report:ReplicaLiteReport?
+    enum CodingKeys:String,CodingKey {case enabled,revoked,symbols,timeframes,control,requests,report;case clientID="client_id",displayName="display_name",tokenIssuedAtUTC="token_issued_at_utc",createdAtUTC="created_at_utc",updatedAtUTC="updated_at_utc"}
+}
+public struct ReplicaPausedLane:Codable,Equatable,Sendable,Identifiable {public var id:String{"\(symbol):\(timeframe)"};public let symbol:String;public let timeframe:String}
+public struct ReplicaClientControl:Codable,Equatable,Sendable {public let syncPaused:Bool;public let refreshGeneration:Int;public let pausedLanes:[ReplicaPausedLane];public let availableLanes:[ReplicaLiteLaneReport]?;enum CodingKeys:String,CodingKey{case syncPaused="sync_paused",refreshGeneration="refresh_generation",pausedLanes="paused_lanes",availableLanes="available_lanes"}}
+public struct ReplicaLiteLaneReport:Codable,Equatable,Sendable,Identifiable {public var id:String{"\(symbol):\(timeframe)"};public let symbol:String;public let timeframe:String;public let firstBarUTC:String?;public let caodt:String?;public let barCount:Int;public let dataFingerprint:String;public let state:String?;public let assetClass:String?;enum CodingKeys:String,CodingKey{case symbol,timeframe,caodt,state;case firstBarUTC="first_bar_utc",barCount="bar_count",dataFingerprint="data_fingerprint",assetClass="asset_class"}}
+public struct ReplicaLiteReceiptReport:Codable,Equatable,Sendable {public let originAuthorityRevision:String;public let publicationID:String;public let replicaReceivedAtUTC:String;enum CodingKeys:String,CodingKey{case originAuthorityRevision="origin_authority_revision",publicationID="publication_id",replicaReceivedAtUTC="replica_received_at_utc"}}
+public struct ReplicaLiteServiceReport:Codable,Equatable,Sendable {public let state:String?;public let lastSyncAtUTC:String?;public let lastSyncOutcome:String?;public let syncPhase:String?;public let syncStartedAtUTC:String?;public let refreshGenerationReceived:Int?;public let refreshGenerationCompleted:Int?;enum CodingKeys:String,CodingKey{case state;case lastSyncAtUTC="last_sync_at_utc",lastSyncOutcome="last_sync_outcome",syncPhase="sync_phase",syncStartedAtUTC="sync_started_at_utc",refreshGenerationReceived="refresh_generation_received",refreshGenerationCompleted="refresh_generation_completed"}}
+public struct ReplicaLiteRequestReport:Codable,Equatable,Sendable,Identifiable {public var id:String{requestID ?? "\(symbol):\(timeframe)"};public let requestID:String?;public let symbol:String;public let timeframe:String;public let state:String?;public let progress:Double?;public let requestedAtUTC:String?;public let expectedGeneration:Int?;public let expectedBytes:Int?;public let transferredBytes:Int?;public let verifiedBytes:Int?;public let sourceRevision:String?;public let caodt:String?;public var actualProgress:Double{guard let expectedBytes,expectedBytes>0 else{return 0};return min(max(Double(transferredBytes ?? 0)/Double(expectedBytes),0),1)};enum CodingKeys:String,CodingKey{case symbol,timeframe,state,progress,caodt;case requestID="request_id",requestedAtUTC="requested_at_utc",expectedGeneration="expected_generation",expectedBytes="expected_bytes",transferredBytes="transferred_bytes",verifiedBytes="verified_bytes",sourceRevision="source_revision"}}
+public struct ReplicaLiteReport:Codable,Equatable,Sendable {public let state:String;public let receivedAtUTC:String;public let reportedAtUTC:String;public let service:ReplicaLiteServiceReport;public let replica:ReplicaLiteReceiptReport?;public let lanes:[ReplicaLiteLaneReport];public let requests:[ReplicaLiteRequestReport]?;enum CodingKeys:String,CodingKey{case state,service,replica,lanes,requests;case receivedAtUTC="received_at_utc",reportedAtUTC="reported_at_utc"}}
+public struct ReplicaPublisherServiceState:Codable,Equatable,Sendable {
+    public let contract:String?
+    public let state:String?
+    public let host:String?
+    public let port:Int?
+    public let pid:Int?
+    public let installed:Bool?
+    public let running:Bool?
+    public let startedAtUTC:String?
+    public let stoppedAtUTC:String?
+    enum CodingKeys:String,CodingKey {case contract,state,host,port,pid,installed,running;case startedAtUTC="started_at_utc",stoppedAtUTC="stopped_at_utc"}
+}
+public struct ReplicaPublicationPayload:Codable,Equatable,Sendable {public let mediaType:String;public let path:String;public let bytes:Int;public let sha256:String;enum CodingKeys:String,CodingKey{case path,bytes,sha256;case mediaType="media_type"}}
+public struct ReplicaPublicationLane:Codable,Equatable,Sendable,Identifiable {public var id:String{"\(symbol):\(timeframe)"};public let symbol:String;public let timeframe:String;public let firstBarUTC:Int?;public let caodt:Int?;public let barCount:Int;public let dataFingerprint:String;enum CodingKeys:String,CodingKey{case symbol,timeframe,caodt;case firstBarUTC="first_bar_utc",barCount="bar_count",dataFingerprint="data_fingerprint"}}
+public struct ReplicaPublicationSummary:Codable,Equatable,Sendable {
+    public let contract:String
+    public let publicationKind:String
+    public let originAuthority:String
+    public let publicationID:String
+    public let authorityRevision:String
+    public let previousAuthorityRevision:String?
+    public let generatedAtUTC:String
+    public let symbolScope:[String]
+    public let timeframeScope:[String]
+    public let lanes:[ReplicaPublicationLane]
+    public let payload:ReplicaPublicationPayload
+    public let signatureState:String
+    enum CodingKeys:String,CodingKey{case contract,lanes,payload;case publicationKind="publication_kind",originAuthority="origin_authority",publicationID="publication_id",authorityRevision="authority_revision",previousAuthorityRevision="previous_authority_revision",generatedAtUTC="generated_at_utc",symbolScope="symbol_scope",timeframeScope="timeframe_scope",signatureState="signature_state"}
+}
+public struct ReadOnlyClientsSnapshot:Codable,Equatable,Sendable {
+    public let contract:String
+    public let registryRevision:Int
+    public let publisherEnabled:Bool
+    public let supportRoot:String
+    public let service:ReplicaPublisherServiceState
+    public let clients:[ReadOnlyClientRecord]
+    public let latestPublication:ReplicaPublicationSummary?
+    enum CodingKeys:String,CodingKey{case contract,service,clients;case registryRevision="registry_revision",publisherEnabled="publisher_enabled",supportRoot="support_root",latestPublication="latest_publication"}
 }
 
 public enum DataOperationsMode: String, CaseIterable, Identifiable, Hashable, Sendable { case fetch="Fetch / Update",importFile="Import File",retire="Retire",history="History";public var id:String{rawValue} }
@@ -1103,6 +1166,20 @@ public enum OperationIntent: Equatable, Sendable {
     case readSyntheticProducts
     case regenerateSyntheticProduct(id:String?)
     case rebuildSyntheticRepository
+    case readOnlyClientsStatus
+    case setReadOnlyPublisherEnabled(Bool)
+    case addReadOnlyClient(clientID:String,displayName:String,symbols:String,timeframes:String)
+    case setReadOnlyClientEnabled(clientID:String,enabled:Bool)
+    case revokeReadOnlyClient(clientID:String)
+    case rotateReadOnlyClientToken(clientID:String)
+    case setReplicaSyncPaused(clientID:String,paused:Bool)
+    case refreshReplicaClient(clientID:String)
+    case setReplicaLanePaused(clientID:String,symbol:String,timeframe:String,paused:Bool)
+    case publishReadOnlySnapshot(symbols:String,timeframes:String)
+    case installReadOnlyPublisherService(python:String,repository:String)
+    case startReadOnlyPublisherService
+    case stopReadOnlyPublisherService
+    case uninstallReadOnlyPublisherService
 }
 
 public extension OperationIntent {
