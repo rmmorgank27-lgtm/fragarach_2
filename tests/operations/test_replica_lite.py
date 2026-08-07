@@ -15,6 +15,7 @@ from fragarach_ii.replica_lite import (
     LitePaths,
     configure_lite,
     control_lane_request,
+    discover_symbol,
     lane_catalogue,
     lite_status,
     market_history,
@@ -30,6 +31,7 @@ from fragarach_ii.replica_publication import (
     create_full_snapshot,
     set_publisher_enabled,
 )
+from fragarach_ii.storage import registered_writer
 from fragarach_ii.replica_publisher_service import _handler
 from fragarach_ii.replica_lite_daemon import LiteLifecyclePaths, launch_agent_definition
 from fragarach_ii.replica_lite_service import _handler as _lite_handler
@@ -244,6 +246,20 @@ def test_lite_lane_requests_are_timestamped_lifecycle_state(tmp_path: Path) -> N
     assert json.loads(paths.requests.read_text()) == requests
 
 
+def test_lite_symbol_search_returns_studio_canonical_result(tmp_path: Path) -> None:
+    _, _, _, server, thread, lite = _system(tmp_path)
+    try:
+        result = discover_symbol(lite, query="AUDUSD")
+        assert result["discovery_status"] == "KNOWN"
+        assert any(
+            representation["symbol"] == "AUDUSD"
+            for market in result["markets"]
+            for representation in market["representations"]
+        )
+    finally:
+        _stop(server, thread)
+
+
 def test_selective_transfer_admits_two_requested_lanes_and_never_fetches_third(tmp_path: Path) -> None:
     _, publisher, _, server, thread, lite = _system(tmp_path)
     try:
@@ -273,6 +289,100 @@ def test_selective_transfer_admits_two_requested_lanes_and_never_fetches_third(t
             as_of_utc="2026-07-11T00:00:00Z",
         )
         assert missing["status"] == "NO_REPLICA"
+    finally:
+        _stop(server, thread)
+
+
+def test_active_selective_lane_refreshes_when_authority_lane_changes(tmp_path: Path) -> None:
+    database, _, _, server, thread, lite = _system(tmp_path)
+    try:
+        request_lane(lite, symbol="AUDUSD", timeframe="D1")
+        first_sync = sync_selective(lite, allow_unsigned=True, allow_insecure_transport=True)
+        first = selective_active_lanes(lite)[0]
+        assert first_sync["admitted"] == 1
+        assert first["bar_count"] == 2
+
+        with registered_writer(database) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            latest = connection.execute(
+                "SELECT MAX(open_time_utc) FROM bars WHERE asset='AUDUSD' AND timeframe='D1'"
+            ).fetchone()[0]
+            next_bar = int(latest) + 86_400
+            connection.execute(
+                """INSERT INTO bars
+                   (asset,timeframe,open_time_utc,open,high,low,close,
+                    created_by_ingest_run_id,updated_by_ingest_run_id)
+                   VALUES ('AUDUSD','D1',?,'1','2','0','1','run-1','run-1')""",
+                (next_bar,),
+            )
+            connection.execute(
+                """UPDATE lane_state
+                   SET high_watermark_open_time_utc=?,state_version=state_version+1,
+                       updated_at_utc='2026-07-11T00:00:00+00:00'
+                   WHERE asset='AUDUSD' AND timeframe='D1'""",
+                (next_bar,),
+            )
+            connection.commit()
+
+        refreshed = sync_selective(lite, allow_unsigned=True, allow_insecure_transport=True)
+        current = selective_active_lanes(lite)[0]
+        catalogue_lane = lane_catalogue(lite)["lanes"][0]
+        request = refreshed["registry"]["requests"][0]
+
+        assert refreshed["admitted"] == 1
+        assert current["artifact_id"] != first["artifact_id"]
+        assert current["bar_count"] == 3
+        assert current["first_bar_utc"]
+        assert current["database_bytes"] > 0
+        assert current["received_at_utc"]
+        assert catalogue_lane["stored_bytes"] == current["database_bytes"]
+        assert catalogue_lane["last_update_check_at_utc"]
+        assert request["state"] == "ACTIVE"
+        assert request["last_update_outcome"] == "NO_CHANGE"
+    finally:
+        _stop(server, thread)
+
+
+def test_missing_lane_waits_for_studio_then_arrives_automatically(tmp_path: Path) -> None:
+    database, _, _, server, thread, lite = _system(tmp_path)
+    try:
+        request_lane(lite, symbol="AUDUSD", timeframe="H1")
+        waiting = sync_selective(lite, allow_unsigned=True, allow_insecure_transport=True)
+        request = waiting["registry"]["requests"][0]
+        assert waiting["admitted"] == 0
+        assert request["state"] == "WAITING_FOR_STUDIO"
+        assert request["last_update_outcome"] == "WAITING_FOR_STUDIO"
+
+        with registered_writer(database) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            timestamp = 1_786_147_200
+            connection.execute(
+                """INSERT INTO evidence_lanes
+                   (asset,timeframe,registration_timeframe,lane_contract,
+                    lane_contract_version,created_at_utc)
+                   VALUES ('AUDUSD','H1','D1','EVIDENCE_LANE_V1',1,
+                           '2026-08-07T00:00:00+00:00')"""
+            )
+            connection.execute(
+                """INSERT INTO bars
+                   (asset,timeframe,open_time_utc,open,high,low,close,
+                    created_by_ingest_run_id,updated_by_ingest_run_id)
+                   VALUES ('AUDUSD','H1',?,'1','2','0','1','run-1','run-1')""",
+                (timestamp,),
+            )
+            connection.execute(
+                """INSERT INTO lane_state
+                   (asset,timeframe,high_watermark_open_time_utc,state_version,
+                    last_ingest_run_id,updated_at_utc)
+                   VALUES ('AUDUSD','H1',?,1,'run-1','2026-08-07T00:00:00+00:00')""",
+                (timestamp,),
+            )
+            connection.commit()
+
+        arrived = sync_selective(lite, allow_unsigned=True, allow_insecure_transport=True)
+        assert arrived["admitted"] == 1
+        assert arrived["registry"]["requests"][0]["state"] == "ACTIVE"
+        assert selective_active_lanes(lite)[0]["timeframe"] == "H1"
     finally:
         _stop(server, thread)
 
@@ -332,6 +442,7 @@ def test_selective_active_lane_keeps_studio_asset_class(tmp_path: Path) -> None:
         available = next(item for item in catalogue["available_lanes"] if item["symbol"] == "AUDUSD")
         assert lane["asset_class"] == available["asset_class"]
         assert lane["asset_class"] != "UNKNOWN"
+        assert selective_active_lanes(lite)[0]["asset_class"] == available["asset_class"]
     finally:
         _stop(server, thread)
 
@@ -380,6 +491,12 @@ def test_selective_pause_retains_lane_resume_and_remove_are_explicit(tmp_path: P
         assert removed["state"] == "REMOVED"
         assert selective_active_lanes(lite) == []
         assert not database.exists()
+
+        replacement = request_lane(lite, symbol="AUDUSD", timeframe="D1")[-1]
+        assert replacement["request_id"] != removed["request_id"]
+        result = sync_selective(lite, allow_unsigned=True, allow_insecure_transport=True)
+        assert result["admitted"] == 1
+        assert selective_active_lanes(lite)[0]["symbol"] == "AUDUSD"
     finally:
         _stop(server, thread)
 

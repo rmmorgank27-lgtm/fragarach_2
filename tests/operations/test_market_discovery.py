@@ -85,6 +85,20 @@ class MarketDiscoveryTests(unittest.TestCase):
         self.assertEqual(market["acquisition_readiness"],"OPEN_EXISTING");existing=market["existing_registrations"][0];self.assertIsNotNone(existing["truth_score"]);self.assertIsNotNone(existing["caodt"]);self.assertEqual(before,self.db.read_bytes())
     def test_unknown_is_final_and_helpful(self):
         result=discover_market(self.db,"Unobtainium");self.assertEqual(result["discovery_status"],"UNKNOWN");self.assertTrue(result["suggested_searches"]);self.assertTrue(result["operator_guidance"])
+        self.assertTrue(all(not suggestion.startswith("Try ") for suggestion in result["suggested_searches"]))
+    def test_stock_company_names_and_typo_return_selectable_ranked_results(self):
+        cases={
+            "AMD":"AMD","Disney":"DIS","Uber":"UBER","Mcdonalds":"MCD",
+            "Pfizer":"PFE","Eli Lilly":"LLY","shopify":"SHOP","airbnb":"ABNB",
+        }
+        for query,symbol in cases.items():
+            result=discover_market(self.db,query)
+            self.assertTrue(result["markets"],query)
+            self.assertEqual(result["markets"][0]["recommendation"]["symbol"],symbol,query)
+        typo=discover_market(self.db,"Eil Lilly")
+        self.assertEqual(typo["discovery_status"],"PARTIAL")
+        self.assertEqual(typo["markets"][0]["recommendation"]["symbol"],"LLY")
+        self.assertIn("LLY",typo["suggested_searches"])
     def test_repaired_silver_and_alphabet_catalogue(self):
         for query in ("XAGUSD","XAG/USD"):
             result=discover_market(self.db,query);market=result["markets"][0]

@@ -10,7 +10,7 @@ from .storage import open_read_only
 from .truth_engine import TruthEngineError, truth_state_for_lane
 from .fx_orientation import orientation_for
 from .retirement import removal_state,retirement_state
-from .market_registry import load_registry,provider_mapping,search_registry
+from .market_registry import load_registry,provider_mapping,ranked_text_match,search_registry
 from .lane_commissioning import market_policy
 from .acquisition_orchestrator import acquisition_capability_projection, load_provider_profiles
 from .provider_facts import representation_mapping
@@ -97,11 +97,23 @@ def discover_market(
             if resolve_crypto_catalogue else None
         )
         definition=legacy or _registry_market(
-            record,mapping or _configured_crypto_d1_mapping(record) or catalogue_mapping
+            record,mapping or catalogue_mapping or _configured_crypto_d1_mapping(record)
         )
         if definition.canonical_identity not in {d.canonical_identity for d in registry_definitions}:registry_definitions.append(definition)
     dynamic=_currency_market(normalized);legacy_exact=any(_rank(m,normalized)[0]>=90 for m in _MARKETS)
-    definitions=(*_MARKETS,*((dynamic,) if dynamic else ())) if legacy_exact or not registry_definitions else tuple(registry_definitions)
+    # A syntactically valid ordered FX pair is an exact canonical identity. It
+    # must outrank fuzzy registry suggestions such as similarly named crypto
+    # assets and must preserve the requested base/quote orientation. Prefer its
+    # exact registry definition when present so reviewed/runtime provider facts
+    # remain attached to that ordered pair.
+    dynamic_registry=next((
+        definition for definition in registry_definitions
+        if dynamic and any(
+            _compact_symbol(representation.symbol)==_compact_symbol(dynamic.representations[0].symbol)
+            for representation in definition.representations
+        )
+    ),None)
+    definitions=((dynamic_registry or dynamic),) if dynamic else (*_MARKETS,) if legacy_exact or not registry_definitions else tuple(registry_definitions)
     if normalized=="OIL":
         chosen=[(95,"Generic oil-family alias; operator selection required.",None,d) for d in definitions if d.canonical_identity in {"COMMODITY:WTI","COMMODITY:BRENT"}]
         markets=tuple(_market_result(database_path,x[3],x[1],x[2],x[0]) for x in chosen)
@@ -111,18 +123,25 @@ def discover_market(
             market["available_actions"]=()
         return {"contract":MARKET_DISCOVERY_CONTRACT,"query":raw,"discovery_status":"AMBIGUOUS","confidence":95,"markets":markets,"explanation":"Oil is a commodity-family term; select WTI or Brent.","suggested_searches":(),"similar_markets":(),"operator_guidance":"Select the intended oil benchmark.","required_operator_decisions":True}
     ranked=[(*_rank(d,normalized),d) for d in definitions]; ranked=[x for x in ranked if x[0]>0]; ranked.sort(key=lambda x:(-x[0],x[3].canonical_identity))
-    if not ranked and len(normalized)>=5 and _edit_distance(normalized,"SOLANA")==1:
-        definition=next(d for d in definitions if d.canonical_identity=="CRYPTO:SOLANA")
+    if len(normalized)>=5 and _edit_distance(normalized,"SOLANA")==1:
+        definition=next(d for d in _MARKETS if d.canonical_identity=="CRYPTO:SOLANA")
         market=_market_result(database_path,definition,"Restricted same-family spelling correction; operator confirmation required.",None,90)
         for representation in market["representations"]:representation["registration_plan"]=None;representation["acquisition_readiness"]="CORRECTION_CONFIRMATION_REQUIRED"
         market["recommendation"]={"representation_type":"OPERATOR_CONFIRMATION_REQUIRED","symbol":"","display_name":"Confirm Solana","reason":"Spelling correction requires confirmation.","alternatives":tuple(r["symbol"] for r in market["representations"])};market["available_actions"]=();market["required_operator_decisions"]=("Confirm the corrected Solana identity.",)
         return {"contract":MARKET_DISCOVERY_CONTRACT,"query":raw,"discovery_status":"PARTIAL","confidence":90,"markets":(market,),"explanation":"Did you mean Solana?","suggested_searches":("Did you mean Solana?",),"similar_markets":(),"operator_guidance":"Confirm Solana before selecting a representation or registering.","required_operator_decisions":True,"correction_required":True}
     if not ranked:return _unknown(raw)
-    top=ranked[0][0]; chosen=[x for x in ranked if x[0]>=max(90,top-3)]
+    top=ranked[0][0]
+    floor=top-3 if top>=95 else max(80,top-7)
+    chosen=[x for x in ranked if x[0]>=floor][:8]
     markets=tuple(_market_result(database_path,x[3],x[1],x[2],x[0]) for x in chosen)
     requires_selection=len(markets)>1 or any(m["required_operator_decisions"] for m in markets)
     status="AMBIGUOUS" if len(markets)>1 else "PARTIAL" if top<95 else "KNOWN"
-    return {"contract":MARKET_DISCOVERY_CONTRACT,"query":raw,"discovery_status":status,"confidence":top,"markets":markets,"explanation":"Market identity resolved independently from tradable representation and provider mapping.","suggested_searches":(),"similar_markets":(),"operator_guidance":"Select the intended market and representation before registration.","required_operator_decisions":requires_selection}
+    suggestions=tuple(dict.fromkeys(
+        market["recommendation"]["symbol"] or market["representations"][0]["symbol"]
+        for market in markets if market["representations"]
+    )) if top<95 else ()
+    explanation="Showing ranked suggestions; select the intended market." if top<95 else "Market identity resolved independently from tradable representation and provider mapping."
+    return {"contract":MARKET_DISCOVERY_CONTRACT,"query":raw,"discovery_status":status,"confidence":top,"markets":markets,"explanation":explanation,"suggested_searches":suggestions,"similar_markets":tuple(market["underlying_market"] for market in markets) if top<95 else (),"operator_guidance":"Select the intended market and representation before registration.","required_operator_decisions":requires_selection}
 
 def _market_result(db,definition,reason,requested,confidence):
     registrations=_registrations(db); reps=[]; existing=[]
@@ -448,15 +467,15 @@ def _rank(d,q):
         if q in {_normalize(r.symbol),*(_normalize(a) for a in r.aliases)}:return 99,"Exact tradable representation symbol match.",r.symbol
     if q in {_normalize(a) for a in d.aliases}:return 98,"Exact financial alias or trading name match.",None
     if q==_normalize(d.underlying_market):return 97,"Exact market or company name match.",None
-    tokens=set(q.split()); name_tokens=set(_normalize(d.underlying_market).split())|set().union(*[set(_normalize(a).split()) for a in d.aliases])
-    if len(q)>=3 and tokens & name_tokens:return 78,"Token-aware partial market name match.",None
+    score=ranked_text_match(q,d.underlying_market,*d.aliases)
+    if score:return score,"Ranked company, market-name, or spelling suggestion.",None
     return 0,"",None
 def _currency_market(q):
     compact=re.sub(r"[^A-Z]","",q)
     if len(compact)!=6 or compact[:3] not in _CURRENCIES or compact[3:] not in _CURRENCIES or compact[:3]==compact[3:]:return None
     base,quote=compact[:3],compact[3:];orientation=orientation_for(compact);provider_symbol=orientation["requested_provider_symbol"]
     return M(f"{base} / {quote}",f"FX:{compact}","FOREIGN_EXCHANGE","FX",f"Ordered foreign-exchange identity for {base} against {quote}.",(compact,f"{base}/{quote}"),(R("FX_SPOT_PAIR",compact,f"{base} / {quote} Spot",f"{base}/{quote}",exchange="OTC",currency=quote,provider="TWELVE_DATA" if provider_symbol else None,provider_symbol=provider_symbol,provider_type="Physical Currency" if provider_symbol else None),),compact)
-def _unknown(raw):return {"contract":MARKET_DISCOVERY_CONTRACT,"query":raw,"discovery_status":"UNKNOWN","confidence":0,"markets":(),"explanation":"No recognised market identity found.","search_attempted":("canonical markets","tradable representations","aliases","company names","index names","commodity names","ISO currency pairs"),"suggested_searches":("Try a canonical market or company name.","Try a listed symbol or known financial alias."),"similar_markets":(),"operator_guidance":"Check the spelling or enter a canonical market name, listed symbol, or known financial alias.","required_operator_decisions":False}
+def _unknown(raw):return {"contract":MARKET_DISCOVERY_CONTRACT,"query":raw,"discovery_status":"UNKNOWN","confidence":0,"markets":(),"explanation":"No recognised market identity found after ranked local search.","search_attempted":("canonical markets","tradable representations","aliases","company names","index names","commodity names","ISO currency pairs","prefix and spelling suggestions"),"suggested_searches":("AMD","Disney","Uber","Gold","EURUSD","Bitcoin"),"similar_markets":(),"operator_guidance":"Choose a suggested search or enter another company name, listed symbol, market, or alias.","required_operator_decisions":False}
 def _normalize(v):return re.sub(r"[^A-Z0-9^&]+"," ",v.strip().upper()).strip()
 def _compact_symbol(v):return re.sub(r"[^A-Z0-9^&]+","",v.strip().upper())
 def _edit_distance(a,b):

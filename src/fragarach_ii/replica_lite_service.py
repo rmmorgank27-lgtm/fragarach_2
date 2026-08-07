@@ -18,10 +18,12 @@ from .replica_lite import (
     lane_catalogue,
     lite_status,
     control_lane_request,
+    discover_symbol,
     market_history,
     pull_control,
     report_status,
     request_lane,
+    onboard_symbol,
     sync_selective,
     utc_now,
 )
@@ -71,6 +73,15 @@ def _handler(paths: LitePaths, wake_sync: threading.Event | None = None):
             if parsed.path == "/v1/catalogue":
                 self._json(HTTPStatus.OK, lane_catalogue(paths))
                 return
+            if parsed.path == "/v1/discover-symbol":
+                query = (parse_qs(parsed.query).get("q") or [""])[0]
+                try:
+                    result = discover_symbol(paths, query=query)
+                except FragarachLiteError as error:
+                    self._json(HTTPStatus.BAD_REQUEST, {"code": error.code, "error": str(error)})
+                    return
+                self._json(HTTPStatus.OK, result)
+                return
             if parsed.path != "/v1/market-history":
                 self._json(HTTPStatus.NOT_FOUND, {"code": "NOT_FOUND"})
                 return
@@ -99,14 +110,22 @@ def _handler(paths: LitePaths, wake_sync: threading.Event | None = None):
 
         def do_POST(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
-            if parsed.path not in {"/v1/request-lane", "/v1/request-action"}:
+            if parsed.path not in {"/v1/request-lane", "/v1/request-action", "/v1/onboard-symbol"}:
                 self._json(HTTPStatus.NOT_FOUND, {"code": "NOT_FOUND"})
                 return
             try:
                 length = int(self.headers.get("Content-Length", "0"))
                 payload = json.loads(self.rfile.read(length))
                 with request_lock:
-                    if parsed.path == "/v1/request-lane":
+                    if parsed.path == "/v1/onboard-symbol":
+                        result = onboard_symbol(
+                            paths, query=str(payload["query"]),
+                            candidate=str(payload["candidate"]),
+                            timeframes=[str(value) for value in payload["timeframes"]],
+                        )
+                        requests = _read_json(paths.requests, [])
+                        response_state = "ONBOARDED"
+                    elif parsed.path == "/v1/request-lane":
                         requests = request_lane(
                             paths, symbol=str(payload["symbol"]), timeframe=str(payload["timeframe"])
                         )
@@ -128,7 +147,8 @@ def _handler(paths: LitePaths, wake_sync: threading.Event | None = None):
                 wake_sync.set()
             self._json(
                 HTTPStatus.OK,
-                {"state": response_state, "requests": requests, "report_warning": None},
+                {"state": response_state, "requests": requests, "result": locals().get("result"),
+                 "report_warning": None},
             )
 
     return LiteHandler

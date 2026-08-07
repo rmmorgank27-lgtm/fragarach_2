@@ -257,6 +257,46 @@ def request_lane(paths: LitePaths, *, symbol: str, timeframe: str) -> list[dict[
     return requests
 
 
+def discover_symbol(paths: LitePaths, *, query: str, timeout: float = 30.0) -> dict[str, Any]:
+    value = query.strip()
+    if not value:
+        raise FragarachLiteError("INVALID_SYMBOL_QUERY", query)
+    config = _configuration(paths)
+    return _request_json(
+        f"{config['endpoint']}/v2/replication/discovery?{urlencode({'q': value})}",
+        _client_token(paths), timeout=timeout,
+    )
+
+
+def onboard_symbol(paths: LitePaths, *, query: str, candidate: str,
+                   timeframes: list[str], timeout: float = 60.0) -> dict[str, Any]:
+    selected = sorted({str(value).strip().upper() for value in timeframes})
+    if any(value not in {"D1", "H1", "M30", "M15", "M5"} for value in selected):
+        raise FragarachLiteError("INVALID_TIMEFRAME", ",".join(selected))
+    if not selected:
+        raise FragarachLiteError("NO_TIMEFRAMES_SELECTED", "")
+    config = _configuration(paths)
+    result = _post_json(
+        f"{config['endpoint']}/v2/replication/onboarding", _client_token(paths),
+        {"candidate": candidate}, timeout=timeout,
+    )
+    canonical = str(result.get("symbol") or result.get("asset") or "").upper()
+    if not canonical:
+        raise FragarachLiteError("INVALID_ONBOARDING_RESPONSE", "canonical symbol missing")
+    alias = query.strip().upper()
+    local = _read_json(paths.requests, [])
+    for timeframe in selected:
+        prior = next((item for item in local if isinstance(item, dict)
+                      and item.get("symbol") == alias and item.get("timeframe") == timeframe
+                      and item.get("state") not in {"REMOVED", "CANCELLED"}), None)
+        if prior is not None and alias != canonical:
+            control_lane_request(
+                paths, symbol=alias, timeframe=timeframe, action="REMOVE", timeout=timeout
+            )
+        request_lane(paths, symbol=canonical, timeframe=timeframe)
+    return {**result, "canonical_symbol": canonical, "requested_timeframes": selected}
+
+
 def clear_lane_request(paths: LitePaths, *, symbol: str, timeframe: str) -> list[dict[str, Any]]:
     requested_symbol = symbol.strip().upper()
     requested_timeframe = timeframe.strip().upper()
@@ -435,8 +475,30 @@ def selective_active_lanes(paths: LitePaths) -> list[dict[str, Any]]:
     value = _read_json(paths.active_lanes, [])
     if not isinstance(value, list):
         return []
-    return [item for item in value if isinstance(item, dict)
-            and Path(str(item.get("database") or "")).is_file()]
+    lanes = [item for item in value if isinstance(item, dict)
+             and Path(str(item.get("database") or "")).is_file()]
+    changed = False
+    for item in lanes:
+        if item.get("asset_class") not in {None, "", "UNKNOWN"}:
+            continue
+        asset_class = _lane_database_asset_class(Path(str(item["database"])))
+        if asset_class:
+            item["asset_class"] = asset_class
+            changed = True
+    if changed:
+        _atomic_json(paths.active_lanes, lanes)
+    return lanes
+
+
+def _lane_database_asset_class(database: Path) -> str | None:
+    connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+    try:
+        row = connection.execute("SELECT asset_class FROM registrations LIMIT 1").fetchone()
+        return str(row[0]) if row and row[0] else None
+    except sqlite3.Error:
+        return None
+    finally:
+        connection.close()
 
 
 def selective_mode(paths: LitePaths) -> bool:
@@ -527,13 +589,21 @@ def sync_selective(paths: LitePaths, *, allow_unsigned: bool = False,
             else:
                 os.replace(expanded, destination)
                 os.chmod(destination, 0o600)
+            received_at = utc_now()
             receipt = {"request_id": upstream["request_id"], "symbol": manifest["symbol"],
                        "timeframe": manifest["timeframe"], "artifact_id": artifact_id,
                        "database": str(destination), "source_revision": manifest["source_revision"],
+                       "asset_class": manifest.get("asset_class")
+                       or _lane_database_asset_class(destination) or "UNKNOWN",
+                       "first_bar_utc": manifest.get("first_bar_utc"),
                        "caodt": manifest["caodt"], "bar_count": manifest["bar_count"],
                        "lane_fingerprint": manifest["lane_fingerprint"],
+                       "database_bytes": destination.stat().st_size,
                        "expected_bytes": expected, "transferred_bytes": expected,
-                       "verified_bytes": expected, "active_at_utc": utc_now(),
+                       "verified_bytes": expected, "received_at_utc": received_at,
+                       "active_at_utc": received_at,
+                       "artifact_generated_at_utc": manifest.get("generated_at_utc"),
+                       "authority_state_version": upstream.get("authority_state_version"),
                        "signature_state": manifest["signature_state"]}
             active_by_lane[(receipt["symbol"], receipt["timeframe"])] = receipt
             _atomic_json(paths.active_lanes, sorted(active_by_lane.values(),
@@ -767,16 +837,30 @@ def lane_catalogue(paths: LitePaths) -> dict[str, Any]:
             (item.get("symbol"), item.get("timeframe")): item
             for item in available_lanes if isinstance(item, dict)
         }
+        request_by_lane = {
+            (item.get("symbol"), item.get("timeframe")): item
+            for item in requests if isinstance(item, dict)
+        }
         lanes = [{"symbol": item["symbol"], "timeframe": item["timeframe"],
-                  "first_bar_utc": None, "caodt": item.get("caodt"),
+                  "first_bar_utc": item.get("first_bar_utc") or available_by_lane.get(
+                      (item["symbol"], item["timeframe"]), {}
+                  ).get("first_bar_utc"), "caodt": item.get("caodt"),
                   "bar_count": item.get("bar_count", 0),
                   "data_fingerprint": item.get("lane_fingerprint"),
                   "source_revision": item.get("source_revision"),
                   "state": state_by_lane.get((item["symbol"], item["timeframe"]), "ACTIVE"),
+                  "stored_bytes": item.get("database_bytes") or Path(item["database"]).stat().st_size,
                   "expected_bytes": item.get("expected_bytes", 0),
                   "transferred_bytes": item.get("transferred_bytes", 0),
                   "verified_bytes": item.get("verified_bytes", 0),
-                  "asset_class": available_by_lane.get(
+                  "received_at_utc": item.get("received_at_utc") or item.get("active_at_utc"),
+                  "last_update_check_at_utc": request_by_lane.get(
+                      (item["symbol"], item["timeframe"]), {}
+                  ).get("last_update_check_at_utc"),
+                  "last_update_outcome": request_by_lane.get(
+                      (item["symbol"], item["timeframe"]), {}
+                  ).get("last_update_outcome"),
+                  "asset_class": item.get("asset_class") or available_by_lane.get(
                       (item["symbol"], item["timeframe"]), {}
                   ).get("asset_class", "UNKNOWN")} for item in selective]
         return {"contract": "fragarach_lite.catalogue.v2", "state": "READY" if selective else "NO_REPLICA",

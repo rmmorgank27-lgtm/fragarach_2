@@ -4,6 +4,6 @@ import SwiftUI
 struct FragarachLiteApp:App {
     @StateObject private var store=LiteEstateStore()
     var body:some Scene {
-        WindowGroup("Fragarach Lite") {LiteEstateView().environmentObject(store).frame(minWidth:900,minHeight:650)}
+        WindowGroup("Fragarach Lite") {LiteRootView().environmentObject(store).frame(minWidth:1000,minHeight:650)}
     }
 }

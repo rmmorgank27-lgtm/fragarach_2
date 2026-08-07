@@ -29,7 +29,6 @@ struct LiteEstateView:View {
                 HStack {VStack(alignment:.leading){Text("Fragarach Lite Estate").font(.largeTitle.bold());Text("Local read-only market data from the Mac Studio").foregroundStyle(.secondary)};Spacer();Button("Refresh"){Task{await store.refresh()}}.keyboardShortcut("r")}
                 if let error=store.error {Label(error,systemImage:"exclamationmark.triangle.fill").foregroundStyle(.red)}
                 if let notice=store.notice {Label(notice,systemImage:"arrow.down.circle.fill").foregroundStyle(.orange)}
-                IncomingDataRegistryView(catalogue:store.catalogue)
                 Label("SELECTIVE V2 · only requested and verified lane artifacts are stored on this MacBook.",systemImage:"checkmark.shield.fill")
                     .font(.caption).foregroundStyle(.green)
                 Text("Markets").font(.headline)
@@ -38,7 +37,9 @@ struct LiteEstateView:View {
                 LiteLaneLegend()
                 ScrollView(.horizontal) {Grid(alignment:.leading,horizontalSpacing:8,verticalSpacing:8){GridRow{Text("Symbol").font(.caption).foregroundStyle(.secondary).frame(width:110,alignment:.leading);ForEach(timeframes,id:\.self){Text($0).font(.caption).foregroundStyle(.secondary).frame(width:118)}};Divider().gridCellUnsizedAxes(.horizontal);ForEach(visibleSymbols,id:\.self){symbol in GridRow{Text(symbol).font(.headline).frame(width:110,alignment:.leading);ForEach(timeframes,id:\.self){timeframe in if let lane=laneByID["\(symbol):\(timeframe)"]{cell(lane,localIDs:localIDs,incoming:incoming[lane.id],pendingIDs:pendingIDs)}else{Color.clear.frame(width:118,height:58)}}}}}}}
             .padding(24)
-        }.task{await store.start()}
+        }
+        .onAppear{focusRequestedSymbol()}
+        .onChange(of:store.focusedSymbol){_,_ in focusRequestedSymbol()}
     }
 
     private func marketCard(_ name:String,lanes:[LiteLane])->some View {let count=lanes.filter{local.contains($0.id)}.count;let latest=lanes.filter{local.contains($0.id)}.compactMap(\.caodt).max() ?? "—";return Button{market=name}label:{VStack(alignment:.leading,spacing:6){HStack{Text(name).font(.headline);Spacer();Text("\(count)/\(lanes.count)").font(.title3.bold())};Text("Local \(count) · Studio available \(lanes.count-count)").font(.caption);Text("CAODT \(latest)").font(.caption2.monospaced()).foregroundStyle(.secondary)}.padding(12).frame(maxWidth:.infinity,alignment:.leading).background((market==name ? Color.accentColor:.green).opacity(0.12),in:RoundedRectangle(cornerRadius:10)).overlay{RoundedRectangle(cornerRadius:10).stroke(market==name ? Color.accentColor:.green.opacity(0.35))}}.buttonStyle(.plain)}
@@ -71,5 +72,6 @@ struct LiteEstateView:View {
         }
         return .init(state:.studioOnly,progress:0)
     }
-    private func marketName(_ lane:LiteLane)->String {let value=(lane.assetClass ?? "").uppercased();if value.contains("CRYPTO") || value.contains("DIGITAL"){return "Crypto"};if value.contains("FOREX") || value.contains("FX"){return "Forex"};if value.contains("METAL"){return "Metals"};if value.contains("ENERGY"){return "Energy"};if value.contains("INDEX"){return "Indices"};if value.contains("EQUIT") || value.contains("STOCK"){return "Stocks"};return "Other"}
+    private func marketName(_ lane:LiteLane)->String {let value=(lane.assetClass ?? "").uppercased();if value.contains("CRYPTO") || value.contains("DIGITAL"){return "Crypto"};if value.contains("FOREX") || value.contains("FX"){return "Forex"};if value.contains("METAL"){return "Metals"};if value.contains("ENERGY"){return "Energy"};if value.contains("INDEX") || value.contains("INDIC"){return "Indices"};if value.contains("EQUIT") || value.contains("STOCK"){return "Stocks"};return "Other"}
+    private func focusRequestedSymbol(){guard let symbol=store.focusedSymbol else{return};market="All";filter=symbol;store.clearFocusedSymbol()}
 }

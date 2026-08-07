@@ -1,7 +1,7 @@
 # Selective Replication v2 Stable Release
 
-Stable baseline: **Fragarach Lite 2.0 build 6**
-Frozen: **2026-08-06 Australia/Brisbane**
+Stable baseline: **Fragarach Lite 2.0 build 16**
+Frozen: **2026-08-07 Australia/Brisbane**
 
 ## Accepted behaviour
 
@@ -10,27 +10,28 @@ Frozen: **2026-08-06 Australia/Brisbane**
 - Transfer and verification use real byte counts.
 - A verified lane becomes MacBook cache/green.
 - Active lanes retain their Studio asset class and remain in the correct market group.
+- The Replication page reports stored bytes, bar counts and ranges, receipt/check times, and current state for every local lane.
+- Replica lanes can be searched, ordered, grouped, re-requested, or removed without changing Studio authority data.
+- New-symbol discovery and onboarding flow from the MacBook to Studio and back to the requested replica lanes.
+- Index, equity, crypto, FX, metal, energy, and other classifications remain visible as separate market groups.
+- Recent requests, searches, failed searches, and ranked suggestions are display-only local history in a collapsible panel.
 - Studio status polling does not collide with operator controls.
 - The legacy full replica is retained for rollback but is excluded from v2 ownership and reads.
 
 ## Verification record
 
-- Focused Python replication suite: **21 passed**.
-- Swift release products: **FragarachLite built**, **FragarachII built**.
-- Installed Lite service source matches the tested Studio source byte-for-byte.
-- Both installed app bundles pass strict deep code-signature verification.
+- Focused Python replication and discovery suites: **36 passed**.
+- Swift release product: **FragarachLite built** in debug and release configurations.
+- Packaged and installed Build 16 executables and Info.plists match byte-for-byte.
 - Publisher and Lite services are healthy.
-- Live selective state at freeze: **8 active local lanes of 159 Studio-available lanes**.
-- Lite service error log: empty; FragarachLite crash reports: none.
+- Live Lite catalogue at freeze: **READY, 67 local lanes, 72 retained request records**.
 
 ## Stable component fingerprints
 
-- `replica_lite.py`: `sha256:9924bb7d1545141cc010831baf6ec01c0893011cca35ed86b53861a785cca650`
-- `replica_lite_service.py`: `sha256:a78b56b8aebf64245528bfa712620fa9b8ed26512a4efb623f3464a27109654e`
-- Installed Fragarach Lite executable: `sha256:f7ccff95553389601735574e9ea7cdb5530b818b9f7ec92760e11569d5027255`
-- Fragarach Lite Info.plist: `sha256:8a8dd742929b5aa88fffb061cc55bfea1154e69245756974672376b580c57747`
-- Installed Fragarach II executable: `sha256:66994069e02f9cee90eb8de037cf277d8d4f6ac0ee133fb2d8039e0db404ea24`
-- Fragarach II Info.plist: `sha256:bcbe44aa8bdd2084d23dc47f6e5c47a617863fcb17f450ad3026fd7b474cc328`
+- `replica_lite.py`: `sha256:8834874c1f2b3ee2b6658752a0583b936a6c66553ceda8ef7c8005e0af32041e`
+- `replica_lite_service.py`: `sha256:4b986c6172588fa2a417caf4e531ff6014dbe7bcc97d0d3e536bfd401ea7b532`
+- Installed Fragarach Lite executable: `sha256:1a147125faef84f7e70f42c23640839658e0cedf66a3376e3ba3aac1f5540ff2`
+- Fragarach Lite Info.plist: `sha256:017ee2d17b30ada4de608c091495d50468d0891636476c7a97b067b6e1af683b`
 
 ## Change policy
 

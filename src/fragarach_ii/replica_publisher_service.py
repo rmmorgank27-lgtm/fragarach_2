@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import base64
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -32,6 +33,9 @@ from .selective_replication import (
     submit_request,
     update_request,
 )
+from .market_discovery import discover_market
+from .providers.instrument_search import candidate_from_dict
+from .storage import RegistrationError
 
 
 SERVICE_CONTRACT = "fragarach_ii.replica_publisher_service.v1"
@@ -108,6 +112,21 @@ def _handler(paths: ReplicaPaths):
                     result = {"state": "RECORDED", "received_at_utc": utc_now()}
                 elif parsed.path == "/v2/replication/requests":
                     result = submit_request(paths, str(client["client_id"]), payload)
+                elif parsed.path == "/v2/replication/onboarding":
+                    candidate_payload = json.loads(
+                        base64.urlsafe_b64decode(str(payload["candidate"]).encode()).decode()
+                    )
+                    candidate = candidate_from_dict(candidate_payload)
+                    allowed = set(client.get("symbols") or [])
+                    if "*" not in allowed and candidate.asset not in allowed:
+                        raise ReplicaControlError("CLIENT_SCOPE_DENIED", candidate.asset)
+                    from .commands.register_instrument import (
+                        _notify_scheduler, _register_once, _retry_when_writer_busy,
+                    )
+                    result = _retry_when_writer_busy(
+                        lambda: _register_once(str(paths.database), candidate, False)
+                    )
+                    _notify_scheduler(str(paths.database))
                 else:
                     parts = parsed.path.strip("/").split("/")
                     if len(parts) == 5 and parts[:3] == ["v2", "replication", "requests"] and parts[4] == "events":
@@ -115,7 +134,8 @@ def _handler(paths: ReplicaPaths):
                     else:
                         self._json(HTTPStatus.NOT_FOUND, {"code": "NOT_FOUND"})
                         return
-            except (ValueError, TypeError, json.JSONDecodeError, ReplicaControlError) as error:
+            except (ValueError, TypeError, json.JSONDecodeError, ReplicaControlError,
+                    RegistrationError) as error:
                 self._json(
                     HTTPStatus.BAD_REQUEST,
                     {"code": getattr(error, "code", "INVALID_CLIENT_REPORT"), "error": str(error)},
@@ -126,6 +146,16 @@ def _handler(paths: ReplicaPaths):
         def _serve_authorised(self, parsed, client) -> None:
             if parsed.path == "/v2/replication/registry":
                 self._json(HTTPStatus.OK, registry_projection(paths, str(client["client_id"])))
+                return
+            if parsed.path == "/v2/replication/discovery":
+                query = (parse_qs(parsed.query).get("q") or [""])[0]
+                try:
+                    result = discover_market(
+                        paths.database, query, resolve_crypto_catalogue=True
+                    )
+                except (ValueError, RuntimeError, OSError) as error:
+                    raise ReplicaControlError("MARKET_DISCOVERY_FAILED", str(error)) from error
+                self._json(HTTPStatus.OK, result)
                 return
             parts = parsed.path.strip("/").split("/")
             if len(parts) == 5 and parts[:3] == ["v2", "replication", "artifacts"]:
