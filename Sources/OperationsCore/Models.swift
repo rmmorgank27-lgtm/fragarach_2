@@ -103,6 +103,25 @@ public struct AuthoritySnapshot: Equatable, Sendable {
     public let readAt: Date
 }
 
+/// Bounded local metrics used by the desktop Overview. These values come
+/// directly from the authority database and its companion SQLite files; the
+/// read never starts the Python command bridge or asks a provider for data.
+public struct OperationalMetricsSnapshot: Equatable, Sendable {
+    public let storageBytes: Int64
+    public let averageProviderResponseMilliseconds: Double?
+    public let providerResponseSampleCount: Int
+    public let lastFailedPacket: OperationalFailureRecord?
+    public let readAt: Date
+}
+
+public struct OperationalFailureRecord: Equatable, Sendable {
+    public let occurredAt: String
+    public let provider: String
+    public let asset: String
+    public let timeframe: String
+    public let reason: String
+}
+
 public struct GovernedObservationGap: Identifiable, Equatable, Sendable {
     public var id: String { "\(previousObservationTimestamp):\(nextObservationTimestamp)" }
     public let previousObservationTimestamp: Int64
@@ -208,6 +227,15 @@ public struct TruthCoverage: Codable, Equatable, Sendable {
     }
 }
 
+public struct TruthFreshness: Codable, Equatable, Sendable {
+    public let expectedLatest: String?
+    public let expectedEdgeStatus: String?
+    enum CodingKeys: String, CodingKey {
+        case expectedLatest = "expected_latest"
+        case expectedEdgeStatus = "expected_edge_state"
+    }
+}
+
 public struct TruthProviderSummary: Codable, Equatable, Sendable {
     public let provider: String?
     public let providerContract: String?
@@ -241,12 +269,13 @@ public struct TruthState: Codable, Equatable, Sendable {
     public let latestCanonicalObservation: String
     public let gapClassification: String
     public let gapImpact: String
+    public let freshness: TruthFreshness
     public let coverage: TruthCoverage
     public let providerSummary: TruthProviderSummary
     public let epoch: String
     public let explanation: TruthExplanation
     enum CodingKeys: String, CodingKey {
-        case contract, symbol, timeframe, caodt, coverage, epoch, explanation
+        case contract, symbol, timeframe, caodt, freshness, coverage, epoch, explanation
         case latestCanonicalObservation = "latest_canonical_observation"
         case engineVersion = "engine_version", truthScore = "truth_score", authorityScore = "authority_score"
         case integrityScore = "integrity_score", historicalDepthScore = "historical_depth_score"
@@ -704,6 +733,15 @@ public struct SchedulerOperationalHealth:Codable,Equatable,Sendable {
     public let currentStopReason:String?
     enum CodingKeys:String,CodingKey {case contract,process,heartbeat,publication;case overallOperationalHealth="overall_operational_health",monitorTransport="monitor_transport",selectionLoop="selection_loop",workerPool="worker_pool",providerDispatch="provider_dispatch",providerResponse="provider_response",evidenceAdmission="evidence_admission",queueProgress="queue_progress",actionableQueueDepth="actionable_queue_depth",blockedQueueDepth="blocked_queue_depth",totalQueueDepth="total_queue_depth",oldestActionableAgeSeconds="oldest_actionable_age_seconds",lastMeaningfulProgress="last_meaningful_progress",permittedProgressWindowSeconds="permitted_progress_window_seconds",currentTraceID="current_trace_id",currentLane="current_lane",currentStage="current_stage",currentStopReason="current_stop_reason"}
 }
+public struct SchedulerAuditSchedule:Codable,Equatable,Sendable {
+    public let weekday:String
+    public let hour:Int
+    public let minute:Int
+    public let timezone:String
+    public let localTime:String
+    public let nextScheduledAtUTC:String
+    enum CodingKeys:String,CodingKey {case weekday,hour,minute,timezone;case localTime="local_time",nextScheduledAtUTC="next_scheduled_at_utc"}
+}
 public struct SchedulerEstateAudit:Codable,Equatable,Sendable {
     public let contract:String
     public let state:String
@@ -716,7 +754,61 @@ public struct SchedulerEstateAudit:Codable,Equatable,Sendable {
     public let repairPlanID:String?
     public let reportBytes:Int?
     public let nextWeeklyAuditAtUTC:String?
-    enum CodingKeys:String,CodingKey {case contract,state,trigger;case auditRunID="audit_run_id",startedAtUTC="started_at_utc",completedAtUTC="completed_at_utc",overallResult="overall_result",findingCounts="finding_counts",repairPlanID="repair_plan_id",reportBytes="report_bytes",nextWeeklyAuditAtUTC="next_weekly_audit_at_utc"}
+    public let schedule:SchedulerAuditSchedule?
+    enum CodingKeys:String,CodingKey {case contract,state,trigger,schedule;case auditRunID="audit_run_id",startedAtUTC="started_at_utc",completedAtUTC="completed_at_utc",overallResult="overall_result",findingCounts="finding_counts",repairPlanID="repair_plan_id",reportBytes="report_bytes",nextWeeklyAuditAtUTC="next_weekly_audit_at_utc"}
+}
+
+public struct EstateAuditReportSummary:Codable,Equatable,Sendable,Identifiable {
+    public var id:String{auditRunID}
+    public let auditRunID:String
+    public let trigger:String
+    public let startedAtUTC:String
+    public let completedAtUTC:String
+    public let overallResult:String
+    public let findingCounts:[String:Int]
+    public let repairPlanID:String?
+    public let reportBytes:Int
+    enum CodingKeys:String,CodingKey {case trigger;case auditRunID="audit_run_id",startedAtUTC="started_at_utc",completedAtUTC="completed_at_utc",overallResult="overall_result",findingCounts="finding_counts",repairPlanID="repair_plan_id",reportBytes="report_bytes"}
+}
+public struct EstateAuditFinding:Codable,Equatable,Sendable,Identifiable {
+    public var id:String{"\(severity):\(findingClass):\(authorityIdentifier):\(detectedAtUTC)"}
+    public let severity:String
+    public let findingClass:String
+    public let authorityIdentifier:String
+    public let observedFactsJSON:String
+    public let expectedFactsJSON:String
+    public let detectedAtUTC:String
+    public let recommendedAction:String
+    enum CodingKeys:String,CodingKey {case severity;case findingClass="finding_class",authorityIdentifier="authority_identifier",observedFactsJSON="observed_facts_json",expectedFactsJSON="expected_facts_json",detectedAtUTC="detected_at_utc",recommendedAction="recommended_action"}
+}
+public struct EstateAuditRepair:Codable,Equatable,Sendable,Identifiable {
+    public var id:String{"\(repairClass):\(lane ?? ""): \(appliedAtUTC)"}
+    public let repairClass:String
+    public let lane:String?
+    public let appliedAtUTC:String
+    public let detailJSON:String
+    enum CodingKeys:String,CodingKey {case lane;case repairClass="repair_class",appliedAtUTC="applied_at_utc",detailJSON="detail_json"}
+}
+public struct EstateAuditReportDetail:Codable,Equatable,Sendable {
+    public let auditRunID:String
+    public let trigger:String
+    public let startedAtUTC:String
+    public let completedAtUTC:String
+    public let overallResult:String
+    public let findingCounts:[String:Int]
+    public let repairPlanID:String?
+    public let reportJSON:String
+    public let reportBytes:Int
+    public let findings:[EstateAuditFinding]
+    public let repairs:[EstateAuditRepair]
+    enum CodingKeys:String,CodingKey {case trigger,findings,repairs;case auditRunID="audit_run_id",startedAtUTC="started_at_utc",completedAtUTC="completed_at_utc",overallResult="overall_result",findingCounts="finding_counts",repairPlanID="repair_plan_id",reportJSON="report_json",reportBytes="report_bytes"}
+}
+public struct EstateAuditHistory:Codable,Equatable,Sendable {
+    public let contract:String
+    public let schedule:SchedulerAuditSchedule
+    public let reports:[EstateAuditReportSummary]
+    public let selectedReport:EstateAuditReportDetail?
+    enum CodingKeys:String,CodingKey {case contract,schedule,reports;case selectedReport="selected_report"}
 }
 
 public struct SchedulerRequiredSetFailure:Codable,Equatable,Sendable,Identifiable {
@@ -837,7 +929,10 @@ public struct SchedulerUpdateRegisterLane:Codable,Equatable,Sendable,Identifiabl
     public let lastOutcome:String?
     public let retryCount:Int?
     public let retryNotBeforeUTC:String?
-    enum CodingKeys:String,CodingKey {case asset,timeframe,state;case nextExpectedBoundaryUTC="next_expected_boundary_utc",nextCheckAtUTC="next_check_at_utc",lastOutcome="last_outcome",retryCount="retry_count",retryNotBeforeUTC="retry_not_before_utc"}
+    public let blockerReason:String?
+    public let repairAction:String?
+    public let flowImpact:String?
+    enum CodingKeys:String,CodingKey {case asset,timeframe,state;case nextExpectedBoundaryUTC="next_expected_boundary_utc",nextCheckAtUTC="next_check_at_utc",lastOutcome="last_outcome",retryCount="retry_count",retryNotBeforeUTC="retry_not_before_utc",blockerReason="blocker_reason",repairAction="repair_action",flowImpact="flow_impact"}
 }
 
 public struct SchedulerDiagnosticCheck:Codable,Equatable,Sendable,Identifiable {
@@ -1140,7 +1235,7 @@ public enum OperationIntent: Equatable, Sendable {
     case acquireForceHistory(asset:String,timeframe:String,from:String,through:String,mode:ConflictMode)
     case acquireRequiredSet(asset:String)
     case resumeRequiredSet(asset:String)
-    case importCSV(file: String, symbol: String, timeframe: String, sourceTimezone: String?, d1DateFormat: String, mode: ConflictMode)
+    case importCSV(file: String, symbol: String, timeframe: String, provider:String, sourceTimezone: String?, d1DateFormat: String, mode: ConflictMode)
     case validate(symbol: String, timeframe: String, through: String, persist: Bool)
     case verify
     case backup(destination: String)
@@ -1159,6 +1254,8 @@ public enum OperationIntent: Equatable, Sendable {
     case queueLaneUpdate(id:String)
     case runSchedulerQueue
     case runEstateAudit
+    case readEstateAuditHistory(auditRunID:String?)
+    case setEstateAuditSchedule(weekday:String,hour:Int,minute:Int)
     case setSchedulerPolicy(String)
     case setM5Freshness(publicationDelaySeconds:Int,criticalAfterClosedBoundaries:Int)
     case pauseAcquisition(scopeType:String,scopeIdentifier:String?,reason:String,temporary:Bool,ingestionSession:String?)
@@ -1187,6 +1284,13 @@ public extension OperationIntent {
         if case .importCSV = self { return true }
         return false
     }
+    /// Registration only commissions lanes and queues Scheduler-owned work.
+    /// Its bounded writer retry can safely enter between the Scheduler's short
+    /// canonical commits; it does not need to wait for provider I/O to finish.
+    var mayRunDuringSchedulerAcquisition: Bool {
+        if case .registerInstrument = self { return true }
+        return false
+    }
     var isAuthorityMutation: Bool {
         switch self {
         case .registerInstrument,.retireInstrument,.reactivateInstrument,
@@ -1199,7 +1303,7 @@ public extension OperationIntent {
     }
     var dataOperationContext: (instrument:String,timeframe:String,actionLabel:String)? {
         switch self {
-        case .importCSV(_,let symbol,let timeframe,_,_,_): (symbol,timeframe,"Importing…")
+        case .importCSV(_,let symbol,let timeframe,_,_,_,_): (symbol,timeframe,"Importing…")
         case .acquire(let asset,let timeframe,_,_,_): (asset,timeframe,"Updating…")
         case .acquireInitial(let asset,let timeframe,_,_,_): (asset,timeframe,"Acquiring…")
         case .acquireUpdate(let asset,let timeframe,_,_,_): (asset,timeframe,"Updating…")

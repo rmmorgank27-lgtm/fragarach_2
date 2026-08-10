@@ -7,6 +7,12 @@ struct OverviewView: View {
         ScrollView {
             VStack(alignment:.leading,spacing:18) {
                 WorkspaceHeader(title:"Overview",purpose:"Single-glance operational fitness of the Fragarach II authority.")
+                OperationalOverviewView(
+                    snapshot:store.snapshot,
+                    metrics:store.operationalMetrics,
+                    metricsError:store.operationalMetricsError,
+                    schedulerStatus:store.schedulerServiceStatus
+                )
                 if let scheduler=store.schedulerSnapshot {
                     HStack(spacing:12) {
                         SchedulerMetricCard(title:"Authority Integrity",value:scheduler.authorityHealth.state,detail:scheduler.authorityHealth.detail,state:scheduler.authorityHealth.state)
@@ -28,12 +34,12 @@ struct OverviewView: View {
                         SchedulerMetricCard(title:"Blocked",value:"\(status.register?.blockedCount ?? 0)",detail:"Click to inspect affected lanes",state:(status.register?.blockedCount ?? 0) == 0 ? "CURRENT":"FAILED",action:{store.showBlockedSchedulerLanes()})
                     }
                     if store.estateProjectionNeedsRefresh {
-                        Label("Refreshing Estate Truth after the latest Scheduler publication.",systemImage:"arrow.triangle.2.circlepath").font(.caption).foregroundStyle(.secondary)
+                        Label("Estate Truth is catching up after the latest Scheduler publication.",systemImage:"arrow.triangle.2.circlepath").font(.caption).foregroundStyle(.secondary)
                     } else if store.estateTruth == nil {
                         Label("Loading complete Estate Truth in the background.",systemImage:"arrow.triangle.2.circlepath").font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                if let estate=store.estateTruth { TruthEstateSummaryView(summary:estate.estateSummary,scheduler:store.schedulerSnapshot,onSelect:store.showEstateFindings) }
+                if let estate=store.estateTruth { TruthEstateSummaryView(summary:estate.estateSummary,lanes:estate.truthMatrix,scheduler:store.schedulerSnapshot,onSelect:store.showEstateFindings) }
                 else if let error=store.estateTruthError { ContentUnavailableView("Authority unavailable",systemImage:"exclamationmark.triangle",description:Text(error)) }
                 HStack {
                     Button("Open Estate"){store.section = .estate}.buttonStyle(.borderedProminent)

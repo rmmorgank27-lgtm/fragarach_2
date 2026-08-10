@@ -121,8 +121,12 @@ enum DiscoveryResultBuilder {
             }
         }
 
+        let identitySectionTitle = discovery.discoveryStatus.uppercased() == "PARTIAL"
+            ? "Suggested Matches"
+            : "Market Identities"
+
         return [
-            DiscoveryResultSection(id: "identities", title: "Market Identities", items: identities),
+            DiscoveryResultSection(id: "identities", title: identitySectionTitle, items: identities),
             DiscoveryResultSection(id: "representations", title: "Tradable Representations", items: representations),
             DiscoveryResultSection(id: "existing", title: "Existing Estate Markets", items: existing),
             DiscoveryResultSection(id: "aliases", title: "Aliases", items: aliases),
@@ -189,6 +193,15 @@ struct DiscoverySearchPane: View {
                             .foregroundStyle(.secondary)
                     }
                     .accessibilityLabel("Searching for markets")
+                }
+
+                if let discovery,
+                   discovery.discoveryStatus.uppercased() == "PARTIAL",
+                   !discovery.markets.isEmpty {
+                    Label("Suggested matches — select the intended market", systemImage: "sparkle.magnifyingglass")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("Suggested market matches are available")
                 }
 
                 if let error {
@@ -361,7 +374,7 @@ private struct DiscoveryNoMatchState: View {
 
                 if !discovery.suggestedSearches.isEmpty {
                     CompactSearchLinks(
-                        title: "Search Suggestions",
+                        title: "Try One of These",
                         values: discovery.suggestedSearches,
                         action: onSearchSuggestion
                     )

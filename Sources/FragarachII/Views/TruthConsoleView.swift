@@ -30,6 +30,9 @@ struct TruthConsoleView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     Text("Estate Truth").font(.largeTitle).fontWeight(.semibold)
+                    if !store.estateAdmissionProgresses.isEmpty {
+                        EstateOnboardingProgressView(progresses:store.estateAdmissionProgresses)
+                    }
                     TruthBreadcrumbView(segments: breadcrumbSegments(hierarchy: hierarchy), selection: selection, onSelect: navigate)
                     if let condition=store.estateConditionFilter {
                         EstateFindingsView(condition:condition,lanes:estate.truthMatrix,commissioning:estate.commissioningMatrix,onSelect:{ id in store.selectedTruthLaneID = id; selection = .symbol(id) },onClose:{store.estateConditionFilter = nil})
@@ -52,14 +55,25 @@ struct TruthConsoleView: View {
         } else if let error = store.estateTruthError {
             ContentUnavailableView("Estate truth unavailable", systemImage: "exclamationmark.triangle", description: Text(error))
         } else {
-            VStack(spacing: 12) { ProgressView();Text("Loading EstateTruthState…").foregroundStyle(.secondary) }
+            VStack(alignment:.leading,spacing:12) {
+                Text("Estate Truth").font(.largeTitle).fontWeight(.semibold)
+                if !store.estateAdmissionProgresses.isEmpty {
+                    EstateOnboardingProgressView(progresses:store.estateAdmissionProgresses)
+                }
+                HStack(spacing:10) { ProgressView();Text("Loading EstateTruthState…").foregroundStyle(.secondary) }
+            }.padding().frame(maxWidth:.infinity,alignment:.leading)
         }
     }
 
     @ViewBuilder private func browseContent(estate: EstateTruthState, hierarchy: EstateHierarchy) -> some View {
         switch selection {
         case .estate:
-            TruthEstateSummaryView(summary: estate.estateSummary,onSelect:store.showEstateFindings)
+            TruthEstateSummaryView(
+                summary: estate.estateSummary,
+                lanes: estate.truthMatrix,
+                onSelect: store.showEstateFindings,
+                onSelectLane: { lane in store.selectedTruthLaneID = lane.id; selection = .symbol(lane.id) }
+            )
             Text("Markets").font(.title2.bold())
             EstateMarketCardsView(markets: hierarchy.markets) { navigate(.market($0.name)) }
         case .market(let name):
@@ -85,11 +99,13 @@ struct TruthConsoleView: View {
         VStack(alignment: .leading, spacing: 14) {
             HStack { Label(market.name, systemImage: market.systemImage).font(.title2.bold());Spacer();Text("\(market.summary.symbolCount) symbols").foregroundStyle(.secondary) }
             EstateScorecard(title: market.name, systemImage: market.systemImage, summary: market.summary)
-            if market.subgroups.isEmpty {
-                TruthMatrixView(lanes: market.lanes, commissioning: commissioning(for:market.lanes), scheduler:store.schedulerSnapshot, selection: symbolSelection,queueUpdate:{id in Task{await store.queueLaneUpdate(id)}})
-            } else {
-                Text("Subgroups").font(.headline)
-                EstateSubgroupCardsView(subgroups: market.subgroups) { navigate(.subgroup(market: market.name, subgroup: $0.name)) }
+            TruthMatrixView(lanes: market.lanes, commissioning: commissioning(for:market.lanes), scheduler:store.schedulerSnapshot, selection: symbolSelection,queueUpdate:{id in Task{await store.queueLaneUpdate(id)}})
+            if !market.subgroups.isEmpty {
+                DisclosureGroup("Subgroups") {
+                    EstateSubgroupCardsView(subgroups: market.subgroups) { navigate(.subgroup(market: market.name, subgroup: $0.name)) }
+                        .padding(.top, 8)
+                }
+                .font(.headline)
             }
         }
     }
@@ -168,6 +184,27 @@ struct TruthConsoleView: View {
     private func subgroup(for lane: EstateTruthLane, market: EstateMarketGroup) -> EstateSubgroup? {
         guard let name = EstateHierarchyClassifier.subgroupName(market: market.name, symbol: lane.symbol, assetClass: lane.searchMetadata.assetClass, exchange: lane.searchMetadata.exchange) else { return nil }
         return market.subgroups.first { $0.name == name }
+    }
+}
+
+private struct EstateOnboardingProgressView:View {
+    let progresses:[EstateAdmissionProgress]
+    var body:some View {
+        GroupBox("Onboarding in progress") {
+            VStack(alignment:.leading,spacing:8) {
+                ForEach(progresses,id:\.symbol) { progress in
+                    HStack(spacing:10) {
+                        ProgressView().controlSize(.small)
+                        Text(progress.symbol).fontWeight(.semibold).frame(minWidth:80,alignment:.leading)
+                        Text(progress.timeframes.joined(separator:", ")).font(.caption.monospaced()).foregroundStyle(.secondary)
+                        Text(progress.stage).foregroundStyle(.secondary)
+                        Spacer()
+                        Text("Pending Estate projection").font(.caption).foregroundStyle(.secondary)
+                    }
+                    if progress.symbol != progresses.last?.symbol { Divider() }
+                }
+            }.padding(.vertical,4)
+        }
     }
 }
 

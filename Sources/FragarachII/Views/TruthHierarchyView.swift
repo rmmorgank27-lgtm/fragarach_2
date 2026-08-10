@@ -36,10 +36,7 @@ struct EstateMarketCardsView: View {
     var body: some View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 245), spacing: 12)], spacing: 12) {
             ForEach(markets) { market in
-                Button { onSelect(market) } label: {
-                    EstateScorecard(title: market.name, systemImage: market.systemImage, summary: market.summary)
-                }
-                .buttonStyle(.plain)
+                EstateScorecard(title: market.name, systemImage: market.systemImage, summary: market.summary, onSelect: { onSelect(market) })
                 .accessibilityLabel("\(market.name), \(market.summary.symbolCount) symbols, Truth \(market.summary.truthScore.map(String.init) ?? "not measured")")
             }
         }
@@ -53,10 +50,7 @@ struct EstateSubgroupCardsView: View {
     var body: some View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 225), spacing: 12)], spacing: 12) {
             ForEach(subgroups) { subgroup in
-                Button { onSelect(subgroup) } label: {
-                    EstateScorecard(title: subgroup.name, systemImage: "square.stack.3d.up", summary: subgroup.summary)
-                }
-                .buttonStyle(.plain)
+                EstateScorecard(title: subgroup.name, systemImage: "square.stack.3d.up", summary: subgroup.summary, onSelect: { onSelect(subgroup) })
                 .accessibilityLabel("\(subgroup.name), \(subgroup.summary.symbolCount) symbols, Truth \(subgroup.summary.truthScore.map(String.init) ?? "not measured")")
             }
         }
@@ -67,6 +61,7 @@ struct EstateScorecard: View {
     let title: String
     let systemImage: String
     let summary: EstateGroupSummary
+    var onSelect: (() -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -76,7 +71,10 @@ struct EstateScorecard: View {
                 Text(summary.truthScore.map(String.init) ?? "—").font(.system(size: 28, weight: .semibold, design: .rounded)).monospacedDigit()
             }
             Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 7) {
-                GridRow { metric("Healthy", summary.healthyCount, state: "GREEN"); metric("Attention", summary.attentionCount, state: "AMBER") }
+                GridRow {
+                    metric("Healthy", summary.healthyCount, state: "GREEN")
+                    AttentionCountButton(lanes: summary.attentionLanes)
+                }
                 GridRow { metric("Critical", summary.criticalCount, state: "RED"); metric("Symbols", summary.symbolCount) }
                 GridRow { metric("Coverage", summary.coveragePercent); metric("Freshness", summary.freshnessPercent) }
             }
@@ -87,6 +85,10 @@ struct EstateScorecard: View {
         .background(TruthPresentation.color(summary.authorityState).opacity(summary.truthScore == nil ? 0.04 : 0.11), in: RoundedRectangle(cornerRadius: 12))
         .overlay { RoundedRectangle(cornerRadius: 12).stroke(TruthPresentation.color(summary.authorityState).opacity(0.28)) }
         .contentShape(RoundedRectangle(cornerRadius: 12))
+        // The card remains the market navigation target.  Restricting this
+        // gesture to the card itself leaves the Attention button interactive.
+        .gesture(TapGesture().onEnded { onSelect?() }, including: .gesture)
+        .help(onSelect == nil ? "" : "Open \(title)")
     }
 
     private func metric(_ title: String, _ value: Int, state: String? = nil) -> some View {
@@ -104,5 +106,82 @@ struct EstateScorecard: View {
             Spacer(minLength: 8)
             Text(value.map { "\($0)%" } ?? "—").fontWeight(.semibold).monospacedDigit()
         }.font(.caption)
+    }
+}
+
+struct AttentionCountButton: View {
+    let lanes: [EstateTruthLane]
+    var onSelect: ((EstateTruthLane) -> Void)? = nil
+    @State private var isPresented = false
+
+    var body: some View {
+        Button { isPresented = true } label: {
+            HStack(spacing: 5) {
+                Circle().fill(TruthPresentation.color("AMBER")).frame(width: 7, height: 7)
+                Text("Attention").foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                Text("\(lanes.count)").fontWeight(.semibold).monospacedDigit()
+            }
+            .font(.caption)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(lanes.isEmpty)
+        .help(lanes.isEmpty ? "No lanes require attention" : "Show what requires attention")
+        .popover(isPresented: $isPresented, arrowEdge: .bottom) {
+            AttentionFindingsPopover(lanes: lanes, onSelect: { lane in
+                isPresented = false
+                onSelect?(lane)
+            })
+        }
+    }
+}
+
+private struct AttentionFindingsPopover: View {
+    let lanes: [EstateTruthLane]
+    let onSelect: (EstateTruthLane) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Attention details").font(.headline)
+            Text("A lane is shown here when its completed market boundary is behind, but it is not yet critical.")
+                .font(.caption).foregroundStyle(.secondary)
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(lanes) { lane in
+                        Button { onSelect(lane) } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Text("\(lane.symbol) · \(lane.timeframe)").fontWeight(.semibold)
+                                    Spacer()
+                                    Text("\(lane.truthState.truthScore)%").monospacedDigit()
+                                }
+                                Text(reason(for: lane)).font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.leading)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(9)
+                            .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }.frame(maxHeight: 360)
+        }
+        .padding()
+        .frame(width: 390)
+    }
+
+    private func reason(for lane: EstateTruthLane) -> String {
+        let causes = lane.truthState.explanation.components
+            .compactMap { name, component -> (String, Int, String)? in
+                guard let score = component.score, score < 90 else { return nil }
+                return (name.replacingOccurrences(of: "_", with: " ").capitalized, score, component.basis.replacingOccurrences(of: "_", with: " "))
+            }
+            .sorted { $0.1 < $1.1 }
+            .prefix(2)
+            .map { "\($0.0) \($0.1)% — \($0.2)" }
+        if !causes.isEmpty { return causes.joined(separator: "; ") }
+        return lane.gapSummary.operationalImpact.replacingOccurrences(of: "_", with: " ").capitalized
     }
 }

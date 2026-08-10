@@ -3,8 +3,10 @@ import SwiftUI
 
 struct TruthEstateSummaryView:View {
     let summary:EstateSummary
+    let lanes:[EstateTruthLane]
     var scheduler:SchedulerSnapshot?=nil
     var onSelect:((String)->Void)?=nil
+    var onSelectLane:((EstateTruthLane)->Void)?=nil
     var body:some View {
         VStack(alignment:.leading,spacing:12) {
             HStack(spacing:10) {
@@ -23,7 +25,7 @@ struct TruthEstateSummaryView:View {
             }
             HStack(spacing:10) {
                 SummaryMetric(title:"Healthy",value:"\(summary.greenCount)",state:"GREEN",action:{onSelect?("Healthy")})
-                SummaryMetric(title:"Attention",value:"\(summary.amberCount)",state:"AMBER",action:{onSelect?("Attention")})
+                AttentionCountButton(lanes:lanes.filter{$0.truthState.authorityState == "AMBER"},onSelect:onSelectLane)
                 SummaryMetric(title:"Critical",value:"\(summary.redCount)",state:"RED",action:{onSelect?("Critical")})
                 SummaryMetric(title:"Generated",value:TruthPresentation.text(summary.generatedAt))
             }

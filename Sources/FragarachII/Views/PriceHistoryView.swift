@@ -124,7 +124,7 @@ struct PriceHistoryView: View {
                     }
                 }
                 if !overview.continuity.expectedMarketClosures.isEmpty {
-                    Text("\(overview.continuity.expectedMarketClosures.count) expected FX weekend closure\(overview.continuity.expectedMarketClosures.count == 1 ? "" : "s") shown as grey breaks in the profile.")
+                    Text("\(overview.continuity.expectedMarketClosures.count) expected market closure\(overview.continuity.expectedMarketClosures.count == 1 ? "" : "s") shown as grey breaks in the profile.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

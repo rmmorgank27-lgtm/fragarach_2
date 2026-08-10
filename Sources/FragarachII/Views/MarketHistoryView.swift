@@ -3,6 +3,7 @@ import SwiftUI
 
 struct MarketHistoryView: View {
     @EnvironmentObject var store: ConsoleStore
+    @State private var coverageNoteSelection: CoverageNoteSelection?
     private let cadenceOrder = ["D1", "H1", "M30", "M5"]
 
     private var availableSymbols: [String] {
@@ -61,14 +62,20 @@ struct MarketHistoryView: View {
                         let response=store.marketHistoryResponses[timeframe]
                         GridRow {
                             Text(timeframe).font(.body.monospaced().bold())
-                            Text(presentedStatus(response?.status)).foregroundStyle(color(response?.status))
+                            coverageStatusButton(timeframe:timeframe,response:response)
                             Text("\(response?.ohlc.count ?? 0)").monospacedDigit()
                             Text(response?.caodt ?? "—").font(.caption.monospaced())
-                            Text(coverageNotes(response?.warnings ?? [])).font(.caption).foregroundStyle(.secondary)
+                            coverageSummaryButton(timeframe:timeframe,response:response)
                         }.padding(.vertical,9)
                         Divider().gridCellColumns(5)
                     }
-                }.padding(14).background(.quaternary.opacity(0.18),in:RoundedRectangle(cornerRadius:10))
+                }
+                .padding(14).background(.quaternary.opacity(0.18),in:RoundedRectangle(cornerRadius:10))
+                .popover(item:$coverageNoteSelection,arrowEdge:.trailing) { selection in
+                    CoverageNotesPopover(selection:selection)
+                }
+                Divider()
+                EstateAuditHistoryView()
                 DisclosureGroup("Synthetic product maintenance") { syntheticProducts }
             }.padding().frame(maxWidth:1100,alignment:.leading)
         }
@@ -107,6 +114,29 @@ struct MarketHistoryView: View {
         }
         return presented.joined(separator:", ")
     }
+    @ViewBuilder private func coverageStatusButton(timeframe:String,response:MarketHistoryResponse?)->some View {
+        let warnings=response?.warnings ?? []
+        if warnings.isEmpty {
+            Text(presentedStatus(response?.status)).foregroundStyle(color(response?.status))
+        } else {
+            Button { coverageNoteSelection = .init(timeframe:timeframe,response:response) } label: {
+                Label(presentedStatus(response?.status),systemImage:"info.circle")
+                    .foregroundStyle(color(response?.status))
+            }
+            .buttonStyle(.plain)
+            .help("Show \(timeframe) coverage notes")
+        }
+    }
+    @ViewBuilder private func coverageSummaryButton(timeframe:String,response:MarketHistoryResponse?)->some View {
+        let warnings=response?.warnings ?? []
+        if warnings.isEmpty {
+            Text(coverageNotes(warnings)).font(.caption).foregroundStyle(.secondary)
+        } else {
+            Button(coverageNotes(warnings)) { coverageNoteSelection = .init(timeframe:timeframe,response:response) }
+                .buttonStyle(.plain).font(.caption).foregroundStyle(.secondary)
+                .help("Show \(timeframe) coverage notes")
+        }
+    }
     private func compactTimestamp(_ value:String?)->String { value?.replacingOccurrences(of:"T",with:" ").replacingOccurrences(of:"+00:00",with:" UTC") ?? "—" }
 
     @ViewBuilder private var syntheticProducts:some View {
@@ -133,6 +163,50 @@ struct MarketHistoryView: View {
     }
     private func syntheticColor(_ status:String)->Color {switch status{case "Available":.green;case "Stale","Incomplete":.orange;default:.red}}
     private func epoch(_ value:Int64?)->String {guard let value else{return "—"};return ISO8601DateFormatter().string(from:Date(timeIntervalSince1970:TimeInterval(value)))}
+}
+
+private struct CoverageNoteSelection: Identifiable {
+    let timeframe:String
+    let response:MarketHistoryResponse?
+    var id:String { timeframe }
+}
+
+private struct CoverageNotesPopover:View {
+    let selection:CoverageNoteSelection
+    @Environment(\.dismiss) private var dismiss
+    private var response:MarketHistoryResponse? { selection.response }
+    private var warnings:[String] { response?.warnings ?? [] }
+    var body:some View {
+        VStack(alignment:.leading,spacing:12) {
+            HStack { Label("\(selection.timeframe) coverage notes",systemImage:"text.magnifyingglass").font(.headline);Spacer();Button("Done"){dismiss()} }
+            Grid(alignment:.leading,horizontalSpacing:12,verticalSpacing:6) {
+                GridRow { Text("Availability").foregroundStyle(.secondary);Text(presentedStatus(response?.status)) }
+                GridRow { Text("Governed bars").foregroundStyle(.secondary);Text("\(response?.ohlc.count ?? 0)") }
+                GridRow { Text("Latest time").foregroundStyle(.secondary);Text(response?.caodt ?? "—").font(.caption.monospaced()) }
+            }
+            Divider()
+            ForEach(warnings,id:\.self) { warning in
+                VStack(alignment:.leading,spacing:3) {
+                    Text(noteTitle(warning)).font(.subheadline.bold())
+                    Text(noteDetail(warning)).font(.caption).foregroundStyle(.secondary)
+                    Text(warning).font(.caption2.monospaced()).foregroundStyle(.tertiary)
+                }
+            }
+        }.padding().frame(width:420,alignment:.leading)
+    }
+    private func presentedStatus(_ status:String?)->String { status?.replacingOccurrences(of:"_",with:" ").capitalized ?? "Loading" }
+    private func noteTitle(_ warning:String)->String { switch warning {
+    case "HISTORICAL_GAPS_PRESENT": "Observed historical gaps"
+    case "REQUESTED_WINDOW_HAS_MISSING_HISTORY": "Selected window is incomplete"
+    case "HISTORICAL_AUTHORITY_AMBER": "History requires review"
+    default: warning.replacingOccurrences(of:"_",with:" ").capitalized
+    } }
+    private func noteDetail(_ warning:String)->String { switch warning {
+    case "HISTORICAL_GAPS_PRESENT": "The governed record contains one or more gaps in the selected timeframe."
+    case "REQUESTED_WINDOW_HAS_MISSING_HISTORY": "Some expected observations in the selected window are not present in the governed record."
+    case "HISTORICAL_AUTHORITY_AMBER": "The evidence is available, but its history authority has an amber review condition."
+    default: "This coverage condition was returned by the governed history service."
+    } }
 }
 
 private struct HistoryMetric: View {

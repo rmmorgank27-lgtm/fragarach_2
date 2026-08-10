@@ -20,6 +20,7 @@ struct ReadOnlyClientsView:View {
                     onRefresh: { clientID in Task { await store.refreshReplicaClient(clientID) } },
                     onSetPaused: { clientID, paused in Task { await store.setReplicaSyncPaused(clientID, paused: paused) } }
                 )
+                studioLaneRequests
                 clientsCard
                 transportCard
                 publicationCard
@@ -40,6 +41,32 @@ struct ReadOnlyClientsView:View {
             }
             Button("Cancel",role:.cancel){revokeTarget=nil}
         } message:{Text("Revocation disables access and destroys the stored token hash. A revoked client cannot be re-enabled.")}
+    }
+
+    private var waitingForStudio:[ReplicaLiteRequestReport] {
+        (store.readOnlyClientsSnapshot?.clients ?? []).flatMap{$0.requests ?? $0.report?.requests ?? []}
+            .filter{$0.state == "WAITING_FOR_STUDIO"}
+    }
+
+    @ViewBuilder private var studioLaneRequests:some View {
+        if !waitingForStudio.isEmpty {
+            GroupBox("Requested from MacBook · Studio action needed") {
+                VStack(alignment:.leading,spacing:8) {
+                    Text("These symbols are not yet available as authoritative Studio lanes. Review and onboard each market; replication resumes automatically after its lane is created.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    ForEach(waitingForStudio) { request in
+                        HStack {
+                            Label("\(request.symbol) · \(request.timeframe)",systemImage:"laptopcomputer.and.arrow.down")
+                                .font(.headline)
+                            Spacer()
+                            Text("WAITING FOR STUDIO").font(.caption.bold()).foregroundStyle(.orange)
+                            Button("Open Onboarding"){store.openProviderSetup(for:request.symbol)}
+                        }
+                        .padding(.vertical,4)
+                    }
+                }.padding(8)
+            }
+        }
     }
 
     private var header:some View {

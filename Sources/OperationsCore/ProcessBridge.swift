@@ -82,8 +82,8 @@ public enum ArgumentBuilder {
         case .acquireForceHistory(let asset,let timeframe,let from,let through,let mode): ["-m","fragarach_ii.commands.acquire","--database",database,"--provider","AUTO","--asset",asset,"--timeframe",timeframe,"--from-date",from,"--through-date",through,"--intent","force","--operator-reason","FORCE_HISTORY_REFRESH","--reviewed-historical-range","--conflict-mode",mode.rawValue,"--json"]
         case .acquireRequiredSet(let asset): ["-m","fragarach_ii.commands.acquire","--database",database,"--provider","AUTO","--asset",asset,"--required-set","--operator-reason","REQUIRED_TIMEFRAME_SET","--conflict-mode","preserve","--json"]
         case .resumeRequiredSet(let asset): ["-m","fragarach_ii.commands.acquire","--database",database,"--provider","AUTO","--asset",asset,"--resume-required-set","--conflict-mode","preserve","--json"]
-        case .importCSV(let file,let symbol,let timeframe,let sourceTimezone,let d1DateFormat,let mode):
-            ["-m","fragarach_ii.commands.ingest_file","--database",database,"--file",file,"--symbol",symbol,"--timeframe",timeframe,"--merge-mode",mode.rawValue,"--d1-date-format",d1DateFormat]+(sourceTimezone.map{["--source-timezone",$0]} ?? [])+["--json"]
+        case .importCSV(let file,let symbol,let timeframe,let provider,let sourceTimezone,let d1DateFormat,let mode):
+            ["-m","fragarach_ii.commands.ingest_file","--database",database,"--file",file,"--symbol",symbol,"--timeframe",timeframe,"--provider",provider,"--merge-mode",mode.rawValue,"--d1-date-format",d1DateFormat]+(sourceTimezone.map{["--source-timezone",$0]} ?? [])+["--json"]
         case .validate(let symbol,let timeframe,let through,let persist): ["-m","fragarach_ii.commands.validate_lane","--database",database,"--symbol",symbol,"--timeframe",timeframe,"--through-date",through,persist ? "--persist":"--no-persist","--json"]
         case .verify: ["-m","fragarach_ii.commands.operations","verify","--database",database,"--json"]
         case .backup(let destination): ["-m","fragarach_ii.commands.operations","backup","--database",database,"--destination",destination,"--json"]
@@ -102,6 +102,8 @@ public enum ArgumentBuilder {
         case .queueLaneUpdate(let id): ["-m","fragarach_ii.commands.scheduler","--database",database,"--mode","fetch","--lane-id",id,"--json"]
         case .runSchedulerQueue: ["-m","fragarach_ii.commands.scheduler","--database",database,"--mode","run-queue","--json"]
         case .runEstateAudit: ["-m","fragarach_ii.commands.scheduler","--database",database,"--mode","audit-estate","--json"]
+        case .readEstateAuditHistory(let auditRunID): ["-m","fragarach_ii.commands.scheduler","--database",database,"--mode","audit-history"]+(auditRunID.map{["--audit-run-id",$0]} ?? [])+["--json"]
+        case .setEstateAuditSchedule(let weekday,let hour,let minute): ["-m","fragarach_ii.commands.scheduler","--database",database,"--mode","audit-schedule","--weekday",weekday,"--hour","\(hour)","--minute","\(minute)","--json"]
         case .setSchedulerPolicy(let policy): ["-m","fragarach_ii.commands.scheduler","--database",database,"--mode","scheduler-policy","--policy",policy,"--json"]
         case .setM5Freshness(let delay,let critical): ["-m","fragarach_ii.commands.scheduler","--database",database,"--mode","m5-freshness","--publication-delay-seconds","\(delay)","--critical-after-closed-boundaries","\(critical)","--json"]
         case .pauseAcquisition(let scopeType,let scopeIdentifier,let reason,let temporary,let ingestionSession):

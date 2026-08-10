@@ -30,18 +30,26 @@ struct DataOperationsView: View {
     @State private var showRejectedRows=false
     @State private var selectedTimeframe="D1"
     @State private var sourceTimezone=""
+    @State private var fileInspection:ManualCSVInspection?
+    @AppStorage("mt4BrokerTimezone") private var mt4BrokerTimezone="Europe/Athens"
     @State private var d1DateFormat="auto"
     @State private var manualMissingStart:String?
     @State private var manualMissingEnd:String?
 
     private var allRegistrations: [InstrumentRegistrationRecord] { store.snapshot?.registrations ?? [] }
     private var registrations: [InstrumentRegistrationRecord] {
-        allRegistrations.filter { r in
-            (showRetired || !r.retired) && (search.isEmpty || r.asset.localizedCaseInsensitiveContains(search) || r.displayName.localizedCaseInsensitiveContains(search) || r.assetClass.localizedCaseInsensitiveContains(search) || r.providerID.localizedCaseInsensitiveContains(search))
+        let query=search.trimmingCharacters(in:.whitespacesAndNewlines)
+        return allRegistrations.filter { r in
+            guard showRetired || !r.retired else{return false}
+            guard !query.isEmpty else{return true}
+            return r.asset.localizedCaseInsensitiveContains(query) || r.displayName.localizedCaseInsensitiveContains(query) || r.assetClass.localizedCaseInsensitiveContains(query) || r.providerID.localizedCaseInsensitiveContains(query)
         }
     }
     private var selectedRegistrationID: Binding<String?> { Binding(get:{selection.selectedRegistrationID},set:{selection.select($0)}) }
-    private var registration: InstrumentRegistrationRecord? { registrations.first { $0.id == selection.selectedRegistrationID } }
+    // Selection is reconciled whenever the visible registration set changes.
+    // Resolve the selected record directly from authority instead of rebuilding
+    // the filtered list from every nested lane-presentation helper.
+    private var registration: InstrumentRegistrationRecord? { allRegistrations.first { $0.id == selection.selectedRegistrationID } }
     private var selectedRegistrations: [InstrumentRegistrationRecord] { guard let asset=registration?.asset else{return []};return allRegistrations.filter { $0.asset == asset } }
     private var lane: LaneRecord? { store.snapshot?.lanes.first { $0.asset == registration?.asset && $0.timeframe == selectedTimeframe } }
     private var truth: EstateTruthLane? { store.estateTruth?.truthMatrix.first { $0.symbol == registration?.asset && $0.timeframe == selectedTimeframe } }
@@ -49,7 +57,7 @@ struct DataOperationsView: View {
     private var selectedCapability:TimeframeCapability?{capability?.timeframes.first{$0.timeframe==selectedTimeframe}}
     private var commissioningState:CommissionedLaneState?{store.estateTruth?.commissioningMatrix.first{$0.symbol==registration?.asset && $0.timeframe==selectedTimeframe}}
     private var isCommissioned:Bool{commissioningState?.commissioned == true}
-    private func isCommissioned(_ timeframe:String)->Bool{store.estateTruth?.commissioningMatrix.first{$0.symbol==registration?.asset && $0.timeframe==timeframe}?.commissioned == true}
+    private func isCommissioned(_ timeframe:String,asset:String?=nil)->Bool{let symbol=asset ?? registration?.asset;return store.estateTruth?.commissioningMatrix.first{$0.symbol==symbol && $0.timeframe==timeframe}?.commissioned == true}
     private var schedulerLane:SchedulerLane?{store.schedulerSnapshot?.lanes.first{$0.symbol==registration?.asset && $0.timeframe==selectedTimeframe}}
     private var mappingDiscoveryPending:Bool { selectedCapability?.reasonCodes.contains("MAPPING_DISCOVERY_PENDING") == true }
     private var providerCapabilities:[AcquisitionCapabilityRow]{
@@ -90,7 +98,7 @@ struct DataOperationsView: View {
     }
     private var selectableTimeframes:[String]{capability?.timeframes.filter{$0.initialFetchEligible && $0.authorityState != "BLOCKED"}.map(\.timeframe) ?? ["D1"]}
     private var requiredSetTimeframes:[String]{let required=capability?.timeframes.filter{$0.policyState=="REQUIRED"}.map(\.timeframe) ?? [];return required.isEmpty ? (capability?.authorisedTimeframes ?? ["D1"]):required}
-    private var automaticAdmission:EstateAdmissionProgress? { guard let progress=store.estateAdmissionProgress,progress.symbol==registration?.asset else{return nil};return progress }
+    private var automaticAdmission:EstateAdmissionProgress? { store.estateAdmissionProgress(for:registration?.asset) }
     private var automaticAdmissionOwnsSelectedLane:Bool { automaticAdmission?.timeframes.contains(selectedTimeframe) == true }
     private var schedulerLaneIsActive:Bool { store.schedulerAcquisitionIsActive(symbol:registration?.asset,timeframe:selectedTimeframe) }
     private var requiredSetIsRunning:Bool{if automaticAdmission != nil{return true};guard let operation=store.activeDataOperation else{return false};return operation.instrument==registration?.asset && operation.timeframe=="Required Set" && store.dataOperationState.isActive}
@@ -126,7 +134,12 @@ struct DataOperationsView: View {
     private var unifiedAcquisitionPlan:UnifiedAcquisitionPlan? {
         guard store.dataOperationsMode == .fetch else{return nil}
         let providers=unifiedProviderCandidates
-        return .build(instrument:registration?.asset,timeframe:selectedTimeframe,assetClass:registration?.assetClass,intent:acquisitionIntent,canonicalEdge:schedulerLane?.latestCanonicalObservation ?? truth?.truthState.caodt,expectedEdge:schedulerLane?.expectedLatest,providers:providers,reviewedRange:intent == .update ? nil:dateRange,registrationActive:registration?.retired == false,operationActive:store.activeOperationID != nil || store.dataOperationState.isActive,acquisitionPaused:schedulerLaneIsActive,expectedEdgeStatus:schedulerLane?.expectedEdgeStatus,publicationPending:publicationPending)
+        // The compact scheduler monitor intentionally shows only a bounded
+        // set of lanes.  When the selected lane is outside that set, its
+        // published Truth freshness is the same governed calendar authority
+        // and supplies the exact completed edge for this plan.
+        let freshness=truth?.truthState.freshness
+        return .build(instrument:registration?.asset,timeframe:selectedTimeframe,assetClass:registration?.assetClass,intent:acquisitionIntent,canonicalEdge:schedulerLane?.latestCanonicalObservation ?? truth?.truthState.caodt,expectedEdge:schedulerLane?.expectedLatest ?? freshness?.expectedLatest,providers:providers,reviewedRange:intent == .update ? nil:dateRange,registrationActive:registration?.retired == false,operationActive:store.activeOperationID != nil || store.dataOperationState.isActive,acquisitionPaused:schedulerLaneIsActive,expectedEdgeStatus:schedulerLane?.expectedEdgeStatus ?? freshness?.expectedEdgeStatus,publicationPending:publicationPending)
     }
 
     var body: some View {
@@ -170,7 +183,7 @@ struct DataOperationsView: View {
         .onChange(of:throughDate){store.clearCurrentOperationResult()}
         .onChange(of:intent){store.clearCurrentOperationResult()}
         .onChange(of:conflict){store.clearCurrentOperationResult()}
-        .onChange(of:file){fileSelectionID=UUID();isolateOperationState()}
+        .onChange(of:file){fileSelectionID=UUID();inspectSelectedFile();isolateOperationState()}
         .sheet(isPresented:$reviewing){reviewSheet}
         .sheet(item:$retirementImpact){impact in RetirementOperationReview(impact:impact,onConfirm:confirmRetirement)}
         .sheet(item:$retirementReceipt){receipt in RetirementOperationSuccess(receipt:receipt){retirementReceipt=nil}}
@@ -254,16 +267,17 @@ struct DataOperationsView: View {
             if let message=store.manualIngestionHoldMessage { Label(message,systemImage:message.hasPrefix("Waiting") ? "clock":"checkmark.shield").foregroundStyle(message.hasPrefix("Waiting") ? .orange:.green) }
         }.frame(maxWidth:.infinity,alignment:.leading) }
         laneMatrix(r);Picker("Timeframe",selection:$selectedTimeframe){ForEach(capability?.timeframes.filter{$0.policyState=="REQUIRED" && $0.authorityState != "BLOCKED"} ?? [],id:\.timeframe){item in Text(item.timeframe).tag(item.timeframe)}}.pickerStyle(.segmented);Button("Choose CSV…"){file=PanelService.chooseCSV()}
-        if let file { GroupBox("Import Preview") { Facts([("File Name",file.lastPathComponent),("Byte Size","\((try? file.resourceValues(forKeys:[.fileSizeKey]).fileSize) ?? 0)"),("Checksum",checksum),("Detected Format","CSV"),("Selected Instrument",r.asset),("Selected Timeframe",selectedTimeframe),("Detected Row Count",rowCount(file)),("Timestamp Range","Validated by existing ingestion authority")]) } }
+        if let file { GroupBox("Import Preview") { Facts([("File Name",file.lastPathComponent),("Byte Size","\((try? file.resourceValues(forKeys:[.fileSizeKey]).fileSize) ?? 0)"),("Checksum",checksum),("Detected Format",fileInspection?.sourceFormat.rawValue ?? "Could not inspect file"),("Source provider",fileInspection?.sourceFormat.providerID ?? "Unknown"),("Selected Instrument",r.asset),("Selected Timeframe",selectedTimeframe),("Detected Row Count",fileInspection.map{String($0.dataRowCount)} ?? "Unknown"),("Timestamp authority",selectedTimeframe == "D1" ? "Daily calendar dates":fileInspection?.timestampAuthorityDescription ?? "Unknown")]) } }
         if selectedTimeframe == "D1" { Picker("Daily date format",selection:$d1DateFormat){Text("Automatic from file").tag("auto");Text("Day / Month / Year (23/07/2026)").tag("day-first");Text("Month / Day / Year (07/23/2026)").tag("month-first")};Text("Daily dates are calendar dates at UTC midnight; no source timezone is used. Automatic uses an unambiguous date elsewhere in the file, otherwise choose the file's order. Any still-open daily candle is retained as raw evidence and excluded from canonical history; closed rows are admitted and the lane is revalidated immediately.").font(.caption).foregroundStyle(.secondary) }
-        if selectedTimeframe != "D1" { TextField("Reviewed source timezone (only for timestamps without an offset)",text:$sourceTimezone);Text("Leave blank when every timestamp declares an explicit offset. Naive timestamps require a reviewed IANA timezone; the app never infers one.").font(.caption).foregroundStyle(.secondary) }
+        if selectedTimeframe != "D1",fileInspection?.sourceTimezoneRequired == true { TextField(fileInspection?.sourceFormat == .mt4History ? "Reviewed MT4 broker timezone":"Reviewed source timezone",text:$sourceTimezone);Text(fileInspection?.sourceFormat == .mt4History ? "MT4 timestamps are broker-local and contain no offset. This broker profile uses Europe/Athens; change it here before review if the file came from a different MT4 broker.":"This file has timestamps without offsets. Enter the reviewed IANA timezone before import.").font(.caption).foregroundStyle(.secondary) }
+        else if selectedTimeframe != "D1",let inspection=fileInspection { LabeledContent("Source timezone",value:inspection.timestampAuthorityDescription) }
         Picker("Conflict policy",selection:$conflict){ForEach(ConflictMode.allCases,id:\.self){Text($0.rawValue.capitalized).tag($0)}}
         Button(operationMatchesLane && store.dataOperationState.isActive ? "Importing…" : "Review Import"){prepareReview(r)}.buttonStyle(.borderedProminent).disabled(!canMutate || file==nil)
     } }
 
     private func retireView(_ r:InstrumentRegistrationRecord)->some View { VStack(alignment:.leading,spacing:12) { if r.retired { Label("Retired authority is audit-only. Provider acquisition and import are disabled.",systemImage:"archivebox").foregroundStyle(.orange);Facts([("Lifecycle","RETIRED"),("Serving","HISTORICAL_ONLY · NOT_SERVED"),("Acquisition","ACQUISITION_DISABLED"),("Evidence","Preserved for audit")]) } else { Text("Uses the reviewed SPEC-013 impact, supersession, quarantine, acquisition shutdown, and receipt service.");Button("Review Retirement Impact",role:.destructive){planRetirement(r)}.disabled(store.activeOperationID != nil) } } }
 
-    private func laneMatrix(_ r:InstrumentRegistrationRecord)->some View { GroupBox("Timeframe Lane Matrix") { Grid(alignment:.leading,horizontalSpacing:14,verticalSpacing:8) { GridRow{ForEach(["Timeframe","Status","Publication","Evidence availability","Automation eligibility","Required operator action","Selectable"],id:\.self){Text($0).font(.caption.bold())}};Divider().gridCellColumns(7);ForEach(capability?.timeframes ?? []){item in let state=operatorLanePresentation(item,r:r);let importing=(store.dataOperationState.isActive && store.activeDataOperation?.instrument==r.asset && store.activeDataOperation?.timeframe==item.timeframe) || automaticAdmission?.activeTimeframe==item.timeframe;GridRow{HStack(spacing:6){if importing{ProgressView().controlSize(.small)};Text(item.timeframe).monospaced()};Text(state.state);Text(publicationLabel(state.publication));Text(state.evidence);Text(state.automation);Text(state.action);Text(state.selectable ? "Yes":"No")}} }.frame(maxWidth:.infinity,alignment:.leading) } }
+    private func laneMatrix(_ r:InstrumentRegistrationRecord)->some View { GroupBox("Timeframe Lane Matrix") { Grid(alignment:.leading,horizontalSpacing:14,verticalSpacing:8) { GridRow{ForEach(["Timeframe","Status","Publication","Evidence availability","Automation eligibility","Required operator action","Selectable"],id:\.self){Text($0).font(.caption.bold())}};Divider().gridCellColumns(7);ForEach(capability?.timeframes ?? []){item in let state=operatorLanePresentation(item,r:r);let importing=(store.dataOperationState.isActive && store.activeDataOperation?.instrument==r.asset && store.activeDataOperation?.timeframe==item.timeframe) || automaticAdmission?.activeTimeframe==item.timeframe;GridRow{HStack(spacing:6){if importing{DataOperationActivityIndicator()};Text(item.timeframe).monospaced()};Text(state.state);Text(publicationLabel(state.publication));Text(state.evidence);Text(state.automation);Text(state.action);Text(state.selectable ? "Yes":"No")}} }.frame(maxWidth:.infinity,alignment:.leading) } }
 
     private func requiredSetView(_ r:InstrumentRegistrationRecord)->some View {
         GroupBox("Required Timeframe Set") {
@@ -277,7 +291,7 @@ struct DataOperationsView: View {
                         let status=requiredSetLaneStatus(timeframe)
                         GridRow {
                             HStack(spacing:6) {
-                                if requiredSetIsRunning,store.schedulerSnapshot?.activeActivity?.timeframe==timeframe { ProgressView().controlSize(.small) }
+                                if requiredSetIsRunning,store.schedulerSnapshot?.activeActivity?.timeframe==timeframe { DataOperationActivityIndicator() }
                                 Text(timeframe).monospaced()
                             }
                             Text(status.state).foregroundStyle(status.state=="Blocked" ? Color.orange:status.state=="Current" ? Color.green:Color.primary)
@@ -345,7 +359,7 @@ struct DataOperationsView: View {
         if automaticAdmission?.activeTimeframe==item.timeframe {
             return .init(state:"Importing",publication:publication,provider:provider,edge:edge,detail:"Automatic initial history running",evidence:evidence,automation:"Running",action:"Wait",selectable:false,retryable:false)
         }
-        if !isCommissioned(item.timeframe){return .init(state:"Not Commissioned",publication:publication,provider:provider,edge:edge,detail:"Commission after evidence",evidence:evidence,automation:"Unavailable",action:"Fetch Required Set",selectable:selectable,retryable:false)}
+        if !isCommissioned(item.timeframe,asset:r.asset){return .init(state:"Not Commissioned",publication:publication,provider:provider,edge:edge,detail:"Commission after evidence",evidence:evidence,automation:"Unavailable",action:"Fetch Required Set",selectable:selectable,retryable:false)}
         if mappingDiscoveryPending {return .init(state:"Mapping Discovery",publication:publication,provider:provider,edge:edge,detail:"No exact provider representation has been verified yet",evidence:"No Evidence",automation:"Waiting",action:"Resolve Provider Mapping",selectable:false,retryable:false)}
         if publication=="FAILED_RETRYABLE" {return .init(state:"Failed Retryable",publication:publication,provider:provider,edge:edge,detail:"Publication failed — resume to retry",evidence:evidence,automation:"Retryable",action:"Resume Required Set",selectable:selectable,retryable:true)}
         if publication=="PUBLISHING" {return .init(state:"Committed",publication:publication,provider:provider,edge:edge,detail:"Awaiting publication; not consumer-visible",evidence:evidence,automation:"Publishing",action:"Wait",selectable:false,retryable:false)}
@@ -365,7 +379,7 @@ struct DataOperationsView: View {
         if operationMatchesLane,let operation=store.activeDataOperation,store.dataOperationState.isActive {
             GroupBox("Operation Activity") {
                 VStack(alignment:.leading,spacing:8) {
-                    HStack(spacing:8){ProgressView();Text("\(operation.instrument) · \(operation.timeframe)").fontWeight(.semibold);Text(operation.actionLabel).foregroundStyle(.secondary)}
+                    HStack(spacing:8){DataOperationActivityIndicator();Text("\(operation.instrument) · \(operation.timeframe)").fontWeight(.semibold);Text(operation.actionLabel).foregroundStyle(.secondary)}
                     Text(store.dataOperationState.stageLabel).foregroundStyle(.secondary)
                     if operation.timeframe=="Required Set" { Text("Current lane: \(activeRequiredSetJob?.currentLane ?? store.schedulerSnapshot?.activeActivity?.timeframe ?? "—")").font(.caption).foregroundStyle(.secondary) }
                     if let provider=store.activeOperationProvider { Text("Provider: \(provider)" + (store.activeOperationFallbackPosition.map{" · fallback \($0)"} ?? "")).font(.caption.monospaced()) }
@@ -375,7 +389,7 @@ struct DataOperationsView: View {
         } else if let progress=automaticAdmission {
             GroupBox("Automatic Onboarding") {
                 VStack(alignment:.leading,spacing:8) {
-                    HStack(spacing:8){ProgressView();Text("\(progress.symbol) · Initial History").fontWeight(.semibold);Text(progress.stage).foregroundStyle(.secondary)}
+                    HStack(spacing:8){DataOperationActivityIndicator();Text("\(progress.symbol) · Initial History").fontWeight(.semibold);Text(progress.stage).foregroundStyle(.secondary)}
                     Text("The scheduler owns this transaction. Other symbols and lanes remain available.").font(.caption).foregroundStyle(.secondary)
                 }.frame(maxWidth:.infinity,alignment:.leading)
             }
@@ -435,7 +449,7 @@ struct DataOperationsView: View {
 
     private func reviewFacts(_ plan:ReviewedDataOperationPlan)->[(String,String)] {
         let calendar=[selectedCapability?.calendarAuthority,selectedCapability?.sessionAuthority].compactMap{$0}.joined(separator:" · ")
-        return [("Instrument",plan.instrument),("Providers","Manual file import"),("Lane",plan.timeframe),("Acquisition intent","IMPORT_FILE"),("Start",URL(fileURLWithPath:plan.filePath ?? "").lastPathComponent),("Through","—"),("Representation authority","Not applicable"),("Calendar/session authority",calendar),("Source timezone",plan.timeframe == "D1" ? "Not applicable for daily calendar dates" : plan.sourceTimezone ?? "Explicit offsets in source"),("Daily date format",plan.timeframe == "D1" ? plan.d1DateFormat : "Not applicable"),("File checksum",plan.fileChecksum ?? "—"),("Conflict Policy",plan.conflict.rawValue.capitalized)]
+        return [("Instrument",plan.instrument),("Providers",plan.sourceFormat.providerDisplayName),("Source format",plan.sourceFormat.rawValue),("Lane",plan.timeframe),("Acquisition intent","IMPORT_FILE"),("Start",URL(fileURLWithPath:plan.filePath ?? "").lastPathComponent),("Through","—"),("Representation authority","Not applicable"),("Calendar/session authority",calendar),("Source timezone",plan.timeframe == "D1" ? "Not applicable for daily calendar dates" : plan.sourceTimezone ?? (plan.timestampsDeclareOffsets ? "Explicit offsets in source":"Not supplied")),("Daily date format",plan.timeframe == "D1" ? plan.d1DateFormat : "Not applicable"),("File checksum",plan.fileChecksum ?? "—"),("Conflict Policy",plan.conflict.rawValue.capitalized)]
     }
 
     private var latestText:String { lane?.latestBar.map{Date(timeIntervalSince1970:TimeInterval($0)).formatted(date:.numeric,time:.shortened)} ?? "—" }
@@ -446,11 +460,11 @@ struct DataOperationsView: View {
     private func blockerText(_ code:String?)->String{switch code{case "PROVIDER_SYMBOL_MAPPING_REQUIRED":return "Provider symbol mapping required";case "EXCHANGE_IDENTITY_REQUIRED":return "Exchange identity required";case "TRADING_CALENDAR_REQUIRED":return registration?.assetClass=="US_EQUITIES" ? "NASDAQ trading calendar required":"Trading calendar required";case let value? where value.hasSuffix("ACQUISITION_CONTRACT_UNAVAILABLE"):return "\(selectedTimeframe) acquisition contract unavailable";case "INSTRUMENT_REGISTRATION_INACTIVE":return "Instrument registration inactive";case "POLICY_INTENTIONALLY_DEFERRED":return "Intentionally deferred";case let value?:return value.replacingOccurrences(of:"_",with:" ").capitalized;case nil:return "Not eligible"}}
     private func applyPreset(days:Int){throughDate=latestCompletedBoundary;fromDate=Calendar.current.date(byAdding:.day,value:-(days-1),to:throughDate)!}
     private func pasteDate(toFrom:Bool){guard let text=NSPasteboard.general.string(forType:.string),let parsed=ControlledDateParser.parse(text)else{dateInterpretation="The pasted date could not be understood. Choose a date from the calendar.";return};if toFrom{fromDate=parsed.date}else{throughDate=parsed.date};dateInterpretation=parsed.interpretation ?? "Normalised to \(parsed.canonicalISO)."}
-    private func rowCount(_ url:URL)->String{guard let text=try? String(contentsOf:url,encoding:.utf8)else{return "Unknown"};return String(max(0,text.split(whereSeparator:\.isNewline).count-1))}
+    private func inspectSelectedFile(){guard let file else{fileInspection=nil;sourceTimezone="";return};do{let inspection=try ManualCSVInspection.inspect(fileURL:file,timeframe:selectedTimeframe,reviewedMT4Timezone:mt4BrokerTimezone);fileInspection=inspection;sourceTimezone=inspection.suggestedSourceTimezone ?? "";localError=nil}catch{fileInspection=nil;sourceTimezone="";localError="The selected CSV could not be inspected: \(error.localizedDescription)"}}
     private func reconcileSelection(){selection.reconcile(visibleRegistrationIDs:Set(registrations.map(\.id)))}
     private func applyNavigationContext(){guard let asset=store.acquisitionAsset else{return};let requestedTimeframe=store.acquisitionTimeframe,requestedFrom=store.acquisitionFrom,requestedThrough=store.acquisitionThrough;let id=registrations.first(where:{$0.asset==asset})?.id;selection.applyNavigationContext(id,visibleRegistrationIDs:Set(registrations.map(\.id)));DispatchQueue.main.async{if let requestedTimeframe{selectedTimeframe=requestedTimeframe};manualMissingStart=requestedFrom;manualMissingEnd=requestedThrough;store.acquisitionAsset=nil;store.acquisitionTimeframe=nil;store.acquisitionFrom=nil;store.acquisitionThrough=nil}}
-    private func resetInstrumentContext(){if !selectableTimeframes.contains(selectedTimeframe){selectedTimeframe="D1"};throughDate=latestCompletedBoundary;if (lane?.barCount ?? 0)==0{intent = .initial;fromDate=Calendar.current.date(byAdding:.day,value:-(min(maximumDays,30)-1),to:throughDate)!}else if lane?.latestBar != nil{intent = .update}else{intent = .custom;fromDate=Calendar.current.date(byAdding:.day,value:-29,to:throughDate)!};file=nil;sourceTimezone="";d1DateFormat="auto";reviewing=false;retirementImpact=nil;localError=nil;dateInterpretation=nil;conflict = .preserve;isolateOperationState()}
-    private func prepareReview(_ r:InstrumentRegistrationRecord){guard store.dataOperationsMode == .importFile else{localError="Only the displayed unified acquisition plan can start a fetch.";return};store.beginPlanReview();let reviewedTimezone=sourceTimezone.trimmingCharacters(in:.whitespacesAndNewlines);let plan=ReviewedDataOperationPlan(id:store.currentPlanRevision,mode:.importFile,instrument:r.asset,timeframe:selectedTimeframe,filePath:file?.path,fileChecksum:file == nil ? nil:checksum,fileSelectionID:fileSelectionID,sourceTimezone:reviewedTimezone.isEmpty ? nil:reviewedTimezone,d1DateFormat:d1DateFormat,conflict:conflict);reviewedPlan=plan;reviewing=true}
+    private func resetInstrumentContext(){if !selectableTimeframes.contains(selectedTimeframe){selectedTimeframe="D1"};throughDate=latestCompletedBoundary;if (lane?.barCount ?? 0)==0{intent = .initial;fromDate=Calendar.current.date(byAdding:.day,value:-(min(maximumDays,30)-1),to:throughDate)!}else if lane?.latestBar != nil{intent = .update}else{intent = .custom;fromDate=Calendar.current.date(byAdding:.day,value:-29,to:throughDate)!};file=nil;fileInspection=nil;sourceTimezone="";d1DateFormat="auto";reviewing=false;retirementImpact=nil;localError=nil;dateInterpretation=nil;conflict = .preserve;isolateOperationState()}
+    private func prepareReview(_ r:InstrumentRegistrationRecord){guard store.dataOperationsMode == .importFile else{localError="Only the displayed unified acquisition plan can start a fetch.";return};guard let inspection=fileInspection else{localError="The selected CSV could not be inspected. Choose the file again.";return};let enteredTimezone=sourceTimezone.trimmingCharacters(in:.whitespacesAndNewlines);if inspection.sourceTimezoneRequired && enteredTimezone.isEmpty{localError="A reviewed source timezone is required for this intraday file.";return};if !enteredTimezone.isEmpty && TimeZone(identifier:enteredTimezone)==nil{localError="The reviewed source timezone is not a valid IANA timezone.";return};let reviewedTimezone=selectedTimeframe == "D1" ? nil:(enteredTimezone.isEmpty ? nil:enteredTimezone);if inspection.sourceFormat == .mt4History,let reviewedTimezone{mt4BrokerTimezone=reviewedTimezone};store.beginPlanReview();let plan=ReviewedDataOperationPlan(id:store.currentPlanRevision,mode:.importFile,instrument:r.asset,timeframe:selectedTimeframe,filePath:file?.path,fileChecksum:file == nil ? nil:checksum,fileSelectionID:fileSelectionID,sourceFormat:inspection.sourceFormat,timestampsDeclareOffsets:inspection.timestampsDeclareOffsets,sourceTimezone:reviewedTimezone,d1DateFormat:d1DateFormat,conflict:conflict);reviewedPlan=plan;reviewing=true}
     private func runUnifiedAcquisition(_ plan:UnifiedAcquisitionPlan){guard plan == unifiedAcquisitionPlan else{localError="The acquisition plan changed; review the rebuilt plan and try again.";return};guard let operation=plan.operationIntent else{localError=plan.failure ?? "The acquisition plan has no executable action.";return};store.beginPlanReview();let revision=store.currentPlanRevision;completedPlan=nil;localError=nil;Task{await store.run(operation);completedAcquisition = .init(revision:revision,instrument:plan.instrument,timeframe:plan.timeframe)}}
     private func runRequiredSet(_ r:InstrumentRegistrationRecord){store.beginPlanReview();let revision=store.currentPlanRevision;completedPlan=nil;localError=nil;Task{await store.run(.acquireRequiredSet(asset:r.asset));completedAcquisition = .init(revision:revision,instrument:r.asset,timeframe:"Required Set")}}
     private func resumeRequiredSet(_ r:InstrumentRegistrationRecord){store.beginPlanReview();let revision=store.currentPlanRevision;completedPlan=nil;localError=nil;Task{await store.run(.resumeRequiredSet(asset:r.asset));completedAcquisition = .init(revision:revision,instrument:r.asset,timeframe:"Required Set")}}
@@ -461,6 +475,13 @@ struct DataOperationsView: View {
     private func exportRejections(_ json:[String:Any]){guard let rows=json["rejections"],let data=try? JSONSerialization.data(withJSONObject:["instrument":registration?.asset ?? "","timeframe":selectedTimeframe,"raw_block_id":json["raw_block_id"] ?? "","rejections":rows],options:[.prettyPrinted,.sortedKeys]),PanelService.exportRejections(data)else{localError="The rejection report could not be exported.";return}}
     private func planRetirement(_ r:InstrumentRegistrationRecord){localError=nil;Task{await store.run(.retirementPlan(asset:r.asset,scope:"WHOLE_INSTRUMENT",lanes:selectedRegistrations.map(\.timeframe)));guard store.lastProcessResult?.exitCode==0,let text=store.lastProcessResult?.stdout,let impact=try? JSONDecoder().decode(RetirementImpact.self,from:Data(text.utf8))else{localError=store.operationError ?? "Retirement impact could not be loaded";return};retirementImpact=impact}}
     private func confirmRetirement(_ impact:RetirementImpact,_ reason:String,_ note:String,_ confirmation:String){retirementImpact=nil;Task{await store.run(.retireInstrument(asset:impact.canonicalInstrument,scope:impact.scope,lanes:impact.selectedLanes,reason:reason,note:note,confirmation:confirmation));guard store.lastProcessResult?.exitCode==0,let text=store.lastProcessResult?.stdout,let receipt=try? JSONDecoder().decode(RetirementReceipt.self,from:Data(text.utf8))else{localError=store.operationError ?? "Retirement failed";return};retirementReceipt=receipt}}
+}
+
+/// Keep the indeterminate animation in its own view graph node. Otherwise an
+/// active fetch can invalidate the whole, data-heavy Data Operations body on
+/// every animation tick.
+private struct DataOperationActivityIndicator:View {
+    var body:some View { ProgressView().controlSize(.small) }
 }
 
 private struct RetirementOperationReview:View { let impact:RetirementImpact;let onConfirm:(RetirementImpact,String,String,String)->Void;@Environment(\.dismiss) var dismiss;@State private var reason="INCORRECT_INSTRUMENT_IDENTITY";@State private var note="";@State private var confirmation="";let reasons=["INCORRECT_INSTRUMENT_IDENTITY","INCORRECT_PAIR_ORIENTATION","INCORRECT_PROVIDER_MAPPING","WRONG_SYMBOL","DUPLICATE_REGISTRATION","ERRONEOUS_OPERATOR_REGISTRATION","INVALID_VENUE_OR_LISTING","PROVIDER_EVIDENCE_MISMATCH","OTHER_REVIEWED_REASON"];var body:some View{VStack(alignment:.leading,spacing:14){Text("Retire \(impact.canonicalInstrument)").font(.title);Text("SPEC-013 Impact Review").font(.headline);Picker("Controlled reason",selection:$reason){ForEach(reasons,id:\.self){Text($0.replacingOccurrences(of:"_",with:" ").capitalized).tag($0)}};TextField("Operator note",text:$note);Facts([("Active lanes",impact.activeTimeframeLanes.joined(separator:", ")),("Evidence counts","\(impact.canonicalBars) bars · \(impact.rawEvidenceBlocks) raw blocks"),("Acquisition history","\(impact.completedAcquisitionRuns) completed runs"),("Truth state",impact.currentServingState),("Operational effects","Acquisition disabled; active serving excluded"),("Preservation guarantees","Raw evidence and audit history preserved")]);if impact.typedConfirmationRequired{Text("Type \(impact.requiredConfirmation ?? "") to confirm").fontWeight(.semibold);TextField(impact.requiredConfirmation ?? "",text:$confirmation)};HStack{Button("Cancel",role:.cancel){dismiss()};Spacer();Button("Confirm Retirement",role:.destructive){dismiss();onConfirm(impact,reason,note,confirmation)}.disabled(impact.typedConfirmationRequired && confirmation.trimmingCharacters(in:.whitespaces).uppercased() != impact.requiredConfirmation)}}.padding(24).frame(minWidth:680)}}

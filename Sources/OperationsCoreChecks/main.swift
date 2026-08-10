@@ -29,7 +29,7 @@ var passed = 0
 func checkImportDispatch() throws {
     let id=UUID(),fileID=UUID()
     let plan=ReviewedDataOperationPlan(id:id,mode:.importFile,instrument:"USDJPY",timeframe:"D1",filePath:"/tmp/FX_USDJPY.csv",fileChecksum:"abc123",fileSelectionID:fileID,conflict:.preserve)
-    try check(plan.intent == .importCSV(file:"/tmp/FX_USDJPY.csv",symbol:"USDJPY",timeframe:"D1",sourceTimezone:nil,d1DateFormat:"auto",mode:.preserve),"import dispatched outside ingest_file")
+    try check(plan.intent == .importCSV(file:"/tmp/FX_USDJPY.csv",symbol:"USDJPY",timeframe:"D1",provider:"MANUAL",sourceTimezone:nil,d1DateFormat:"auto",mode:.preserve),"import dispatched outside ingest_file")
     try check(plan.matches(mode:.importFile,instrument:"USDJPY",timeframe:"D1",fileChecksum:"abc123"),"matching import plan rejected")
     try check(!plan.matches(mode:.fetch,instrument:"USDJPY",timeframe:"D1",fileChecksum:"abc123"),"fetch result leaked into import")
     try check(!plan.matches(mode:.importFile,instrument:"USDJPY",timeframe:"D1",fileChecksum:"changed"),"stale file checksum accepted")
@@ -39,12 +39,34 @@ func checkImportDispatch() throws {
     let d1Arguments=ArgumentBuilder.arguments(for:try plan.intent ?? {throw CheckFailure.failed("missing D1 import intent")}(),database:"/authority.sqlite3")
     try check(d1Arguments.contains("--d1-date-format") && d1Arguments.contains("auto"),"D1 date format not dispatched")
 }
+func checkManualCSVInspection() throws {
+    let mt4="""
+    2025.09.11,05:50,1.97003,1.97037,1.96986,1.97029,91
+    2025.09.11,05:55,1.97028,1.97054,1.96997,1.97045,212
+    """
+    let mt4M5=ManualCSVInspection.inspect(text:mt4,timeframe:"M5")
+    try check(mt4M5.sourceFormat == .mt4History && mt4M5.dataRowCount == 2,"MT4 history export was not detected")
+    try check(mt4M5.sourceTimezoneRequired && mt4M5.suggestedSourceTimezone == "Europe/Athens","MT4 broker timezone profile was not applied")
+    let plan=ReviewedDataOperationPlan(id:UUID(),mode:.importFile,instrument:"EURNZD",timeframe:"M5",filePath:"/tmp/EURNZD5.csv",fileChecksum:"mt4",sourceFormat:mt4M5.sourceFormat,timestampsDeclareOffsets:mt4M5.timestampsDeclareOffsets,sourceTimezone:mt4M5.suggestedSourceTimezone,conflict:.preserve)
+    let arguments=ArgumentBuilder.arguments(for:try plan.intent ?? {throw CheckFailure.failed("missing MT4 import intent")}(),database:"/authority.sqlite3")
+    try check(arguments.contains("--provider") && arguments.contains("MT4"),"MT4 provenance was not dispatched")
+    try check(arguments.contains("--source-timezone") && arguments.contains("Europe/Athens"),"MT4 reviewed timezone was not dispatched")
+    let mt4D1=ManualCSVInspection.inspect(text:"2025.09.11,00:00,1,2,0.5,1.5,91",timeframe:"D1")
+    try check(mt4D1.sourceFormat == .mt4History && !mt4D1.sourceTimezoneRequired && mt4D1.suggestedSourceTimezone == nil,"MT4 D1 incorrectly acquired an intraday timezone")
+    let tradingView="""
+    time,open,high,low,close
+    2026-03-01T23:00:00-01:00,31.55,31.65,31.55,31.65
+    """
+    let tv=ManualCSVInspection.inspect(text:tradingView,timeframe:"M5")
+    try check(tv.sourceFormat == .tradingView && tv.dataRowCount == 1,"TradingView CSV export was not detected")
+    try check(tv.timestampsDeclareOffsets && !tv.sourceTimezoneRequired && tv.suggestedSourceTimezone == nil,"TradingView explicit offset was not preserved")
+}
 func checkOperationState() throws {
     try check(DataOperationState.idle.stageLabel == "Ready" && !DataOperationState.idle.isActive,"idle lifecycle")
     try check([DataOperationState.preparing,.reading,.validating,.ingesting,.refreshingAuthority].allSatisfy(\.isActive),"working lifecycle")
     try check(DataOperationState.completed.stageLabel == "Operation complete" && !DataOperationState.completed.isActive,"completed lifecycle")
     try check(DataOperationState.failed.stageLabel == "Operation failed" && !DataOperationState.failed.isActive,"failed lifecycle")
-    let intent=OperationIntent.importCSV(file:"/tmp/evidence.csv",symbol:"GBPJPY",timeframe:"M5",sourceTimezone:nil,d1DateFormat:"auto",mode:.preserve)
+    let intent=OperationIntent.importCSV(file:"/tmp/evidence.csv",symbol:"GBPJPY",timeframe:"M5",provider:"MANUAL",sourceTimezone:nil,d1DateFormat:"auto",mode:.preserve)
     try check(intent.dataOperationContext?.instrument == "GBPJPY" && intent.dataOperationContext?.timeframe == "M5" && intent.dataOperationContext?.actionLabel == "Importing…","import activity context")
     let directory=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString);try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true);defer{try? FileManager.default.removeItem(at:directory)}
     let fake=directory.appendingPathComponent("python3");try "#!/bin/sh\necho '{\"fragarach_operation_stage\":\"reading\"}' >&2\necho '{\"fragarach_operation_stage\":\"validating\"}' >&2\necho '{\"fragarach_operation_stage\":\"ingesting\"}' >&2\necho '{\"transaction_state\":\"committed\"}'\n".write(to:fake,atomically:true,encoding:.utf8);try FileManager.default.setAttributes([.posixPermissions:0o700],ofItemAtPath:fake.path)
@@ -477,6 +499,7 @@ if ProcessInfo.processInfo.environment["FOCUSED_SPEC056B_LIVE"] == "1" {
 }
 if ProcessInfo.processInfo.environment["FOCUSED_IMPORT_DISPATCH"] == "1" {
     try run("import plans dispatch only immutable CSV ingestion and isolate results",checkImportDispatch)
+    try run("manual CSV source format and timezone inspection",checkManualCSVInspection)
     print("OperationsCoreChecks: \(passed) focused checks passed")
     exit(EXIT_SUCCESS)
 }
@@ -563,8 +586,9 @@ try run("native market discovery and onboarding model") {
     let discovery=try JSONDecoder().decode(MarketDiscoveryResult.self,from:Data(result.stdout.utf8));let market=try discovery.markets.first ?? {throw CheckFailure.failed("missing market")}()
     try check(market.recommendation.symbol=="US30" && market.representations.count==5 && !market.providerDiscovery.isEmpty,"market discovery decode")
 }
-try run("explicit secret-free arguments") { let db="/authority.sqlite3",secret="never-in-arguments";let intents:[OperationIntent]=[.readEstateTruth,.readTruth(symbol:"AUDUSD",timeframe:"D1"),.resolveInstrument(query:"Gold"),.discoverMarket(query:"US30"),.acquire(asset:"AUDUSD",timeframe:"H1",from:"2026-07-01",through:"2026-07-10",mode:.preserve),.importCSV(file:"/evidence.csv",symbol:"AUDUSD",timeframe:"H1",sourceTimezone:"Europe/Athens",d1DateFormat:"auto",mode:.preserve),.validate(symbol:"AUDUSD",timeframe:"D1",through:"2026-07-10",persist:true),.verify,.backup(destination:"/backup.sqlite3")];for intent in intents{let args=ArgumentBuilder.arguments(for:intent,database:db);try check(args.contains(db) && !args.contains(secret),"arguments")}}
+try run("explicit secret-free arguments") { let db="/authority.sqlite3",secret="never-in-arguments";let intents:[OperationIntent]=[.readEstateTruth,.readTruth(symbol:"AUDUSD",timeframe:"D1"),.resolveInstrument(query:"Gold"),.discoverMarket(query:"US30"),.acquire(asset:"AUDUSD",timeframe:"H1",from:"2026-07-01",through:"2026-07-10",mode:.preserve),.importCSV(file:"/evidence.csv",symbol:"AUDUSD",timeframe:"H1",provider:"MT4",sourceTimezone:"Europe/Athens",d1DateFormat:"auto",mode:.preserve),.validate(symbol:"AUDUSD",timeframe:"D1",through:"2026-07-10",persist:true),.verify,.backup(destination:"/backup.sqlite3")];for intent in intents{let args=ArgumentBuilder.arguments(for:intent,database:db);try check(args.contains(db) && !args.contains(secret),"arguments")}}
 try run("review confirmation gate") { let intent=OperationIntent.acquire(asset:"AUDUSD",timeframe:"H1",from:"2026-07-01",through:"2026-07-10",mode:.preserve);var gate=ReviewGate();try check(!gate.confirm(intent),"unreviewed");gate.review(intent);try check(gate.confirm(intent),"reviewed");try check(!gate.confirm(intent),"repeat") }
+try run("onboarding registration can overlap Scheduler provider work") { try check(OperationIntent.registerInstrument(candidate:"fixture").mayRunDuringSchedulerAcquisition,"registration overlap");try check(!OperationIntent.retireInstrument(asset:"AUDUSD",scope:"WHOLE_INSTRUMENT",lanes:["D1"],reason:"fixture",note:"fixture",confirmation:"fixture").mayRunDuringSchedulerAcquisition,"retirement quiescence") }
 try run("secret filter") { try check(SecretFilter.filter("before SECRET middle SECRET",secrets:["SECRET"])=="before [REDACTED] middle [REDACTED]","filter") }
 try run("credential authority projection decodes without secret material") { let json="{\"contract\":\"fragarach_ii.credential_authority.v1\",\"generated_at\":\"2026-07-15T05:00:00+00:00\",\"authority_revision\":\"revision\",\"providers\":[{\"provider\":\"TWELVE_DATA\",\"credential_state\":\"Available\",\"authority_revision\":\"provider-revision\",\"last_validation\":\"2026-07-15T05:00:00+00:00\",\"validation_source\":\"Twelve Data HTTP response\"}]}";let snapshot=try JSONDecoder().decode(CredentialAuthoritySnapshot.self,from:Data(json.utf8));try check(snapshot.providers.first?.credentialState=="Available" && !json.contains("fixture-only-secret"),"redacted authority projection") }
 try run("known CLI identity") { let config=CLIConfiguration(python:"/Library/Frameworks/Python.framework/Versions/3.13/bin/python3",repository:root.path,database:authority);try ProcessBridge().validateCLI(config) }
@@ -668,6 +692,9 @@ try run("operation results are owned by one plan revision") {
 }
 try run("import plans dispatch only immutable CSV ingestion and isolate results") {
     try checkImportDispatch()
+}
+try run("manual CSV source format and timezone inspection") {
+    try checkManualCSVInspection()
 }
 try run("native data-operation lifecycle and labels") {
     try checkOperationState()

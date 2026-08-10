@@ -20,6 +20,8 @@ struct EstateAdmissionProgress: Equatable {
     @Published var manageDataSection: ManageDataSection = .operations
     @Published var auditFilter = ""
     @Published var snapshot: AuthoritySnapshot?
+    @Published var operationalMetrics:OperationalMetricsSnapshot?
+    @Published var operationalMetricsError:String?
     @Published var estateTruth: EstateTruthState?
     @Published var estateHierarchy: EstateHierarchy?
     @Published var selectedTruthLaneID: String?
@@ -40,7 +42,7 @@ struct EstateAdmissionProgress: Equatable {
     @Published var activeOperationNextProvider:String?
     @Published var activeOperationFallbackPosition:Int?
     @Published var activeOperationFallbackCount:Int?
-    @Published var estateAdmissionProgress: EstateAdmissionProgress?
+    @Published var estateAdmissionProgressBySymbol: [String:EstateAdmissionProgress] = [:]
     @Published var lastProcessResult: ProcessResult?
     @Published var currentPlanRevision=UUID()
     @Published var currentOperationResult: OwnedOperationResult?
@@ -54,6 +56,9 @@ struct EstateAdmissionProgress: Equatable {
     @Published var marketHistoryTradingDays = 5
     @Published var marketHistoryResponses: [String:MarketHistoryResponse] = [:]
     @Published var marketHistoryError: String?
+    @Published var estateAuditHistory:EstateAuditHistory?
+    @Published var estateAuditHistoryError:String?
+    @Published var estateAuditHistoryLoading=false
     @Published var syntheticSnapshot:SyntheticSnapshot?
     @Published var syntheticError:String?
     @Published var schedulerSnapshot: SchedulerSnapshot?
@@ -61,6 +66,9 @@ struct EstateAdmissionProgress: Equatable {
     @Published var schedulerServiceDiagnostics:SchedulerServiceDiagnostics?
     @Published var schedulerDiagnosticsError:String?
     @Published var schedulerError: String?
+    @Published var schedulerActionInProgress: String?
+    @Published var schedulerActionMessage: String?
+    @Published var schedulerActionFailed = false
     @Published var schedulerUsesCompactStatus = false
     @Published var schedulerRegisterFilter: String?
     @Published var credentialAuthority:CredentialAuthoritySnapshot?
@@ -84,13 +92,15 @@ struct EstateAdmissionProgress: Equatable {
     private let reader=SQLiteReadService(); let bridge=ProcessBridge(); private let authorityReadBridge=ProcessBridge()
     private let marketDiscoveryBridge=ProcessBridge()
     private let marketHistoryBridge=ProcessBridge()
-    private let schedulerServiceBridge=ProcessBridge()
+    private let auditHistoryBridge=ProcessBridge()
+    private let schedulerServiceClient=SchedulerServiceClient()
     private let schedulerLifecycleBridge=ProcessBridge()
     private let schedulerDiagnosticsBridge=ProcessBridge()
     private let providerFactsBridge=ProcessBridge()
     private let readOnlyClientsBridge=ProcessBridge()
     private let readOnlyClientsStatusBridge=ProcessBridge()
     private var schedulerMonitorTask:Task<Void,Never>?
+    private var estateRefreshTask:Task<Void,Never>?
     private var estateRefreshTargetToken:String?
     private var lastEstateProjectionToken:String?
     private let staleOperationInterval:TimeInterval = 10 * 60
@@ -98,6 +108,12 @@ struct EstateAdmissionProgress: Equatable {
     var credentialAvailable: Bool { credentialAuthority?.providers.first(where:{$0.provider=="TWELVE_DATA"})?.credentialState == "Available" }
     var dataOperationIsActive: Bool { dataOperationState.isActive }
     var schedulerAcquisitionIsActive: Bool { schedulerSnapshot?.activeActivity != nil }
+    var estateAdmissionProgresses: [EstateAdmissionProgress] {
+        estateAdmissionProgressBySymbol.values.sorted {
+            if $0.startedAt == $1.startedAt { return $0.symbol < $1.symbol }
+            return $0.startedAt < $1.startedAt
+        }
+    }
     var estateProjectionNeedsRefresh: Bool {
         guard let token=schedulerServiceStatus?.authorityChangeToken else { return estateTruth == nil }
         return lastEstateProjectionToken != token
@@ -107,12 +123,22 @@ struct EstateAdmissionProgress: Equatable {
               activity.symbol==symbol else { return false }
         return timeframe == nil || activity.timeframe == timeframe
     }
-    func beginEstateAdmission(symbol:String,timeframes:[String]) {
+    func beginEstateAdmission(
+        symbol:String,timeframes:[String],stage:String="Initial history queued"
+    ) {
         let lanes=timeframes.isEmpty ? ["D1"]:timeframes
-        estateAdmissionProgress = .init(
-            symbol:symbol, timeframes:lanes, startedAt:Date(),
-            stage:"Initial history queued", activeTimeframe:nil
+        let canonicalSymbol=symbol.uppercased()
+        estateAdmissionProgressBySymbol[canonicalSymbol] = .init(
+            symbol:canonicalSymbol, timeframes:lanes, startedAt:Date(),
+            stage:stage, activeTimeframe:nil
         )
+    }
+    func endEstateAdmission(symbol:String) {
+        estateAdmissionProgressBySymbol.removeValue(forKey:symbol.uppercased())
+    }
+    func estateAdmissionProgress(for symbol:String?) -> EstateAdmissionProgress? {
+        guard let symbol else{return nil}
+        return estateAdmissionProgressBySymbol[symbol.uppercased()]
     }
     var activeOperationAgeSeconds:Double? {
         activeOperationStartedAt.map { Date().timeIntervalSince($0) }
@@ -134,11 +160,25 @@ struct EstateAdmissionProgress: Equatable {
         // The scheduler monitor is an indexed, bounded operational projection.
         // Publish it first so the console is useful while the complete Estate
         // Truth projection is building in the background.
-        async let authorityRefresh: Void = refresh()
-        await refreshSchedulerStatus()
+        // Startup itself owns the initial Estate read. Suppressing the token
+        // callback here prevents a second identical 26-second projection from
+        // being queued before the first one has even started.
+        await refreshSchedulerStatus(scheduleEstateRefresh:false)
         startSchedulerMonitor()
-        await refreshProviderFacts(resolve:true)
-        await authorityRefresh
+        // Startup is observational. Provider resolution and queue dispatch are
+        // explicit workflows, while the resident Scheduler already owns due
+        // work. Re-running both here caused competing Python jobs on every app
+        // launch and delayed the first usable screen.
+        if let status=schedulerServiceStatus,!schedulerPermitsEstateProjection(status) {
+            // The compact Scheduler status is already useful. Delay the full
+            // authority projection until catch-up has no running or due work.
+            refreshEstateProjectionIfNeeded(for:status)
+            await refreshProviderFacts()
+        } else {
+            async let authorityRefresh: Void = refresh()
+            await refreshProviderFacts()
+            await authorityRefresh
+        }
     }
 
     func startScheduler() {
@@ -165,17 +205,51 @@ struct EstateAdmissionProgress: Equatable {
         schedulerMonitorTask=Task { [weak self] in
             while !Task.isCancelled {
                 await self?.refreshSchedulerStatus()
-                try? await Task.sleep(for:.seconds(2))
+                guard let self else{return}
+                let busy=self.activeOperationID != nil
+                    || self.schedulerSnapshot?.activeActivity != nil
+                    || (self.schedulerServiceStatus?.operationalHealth?.workerPool.activeWorkers ?? 0) > 0
+                    || self.schedulerServiceStatus?.activeMutation != nil
+                    || !self.estateAdmissionProgressBySymbol.isEmpty
+                try? await Task.sleep(for:.seconds(busy ? 2:15))
             }
         }
     }
 
     func refresh() async {
         guard !isRefreshing else{return}; isRefreshing=true; defer{isRefreshing=false}
+        // Mark exactly the authority revision this read was intended to
+        // project. If D1 publication advances while the read is running, the
+        // monitor will retain the newer token and schedule one trailing read.
+        let projectionToken=schedulerServiceStatus?.authorityChangeToken
+        await refreshOperationalMetrics()
         do {
             let loaded=try await loadAuthorityState()
             commitAuthorityState(loaded)
+            if let projectionToken { lastEstateProjectionToken=projectionToken }
         } catch { estateTruthError=error.localizedDescription;readError=error.localizedDescription }
+    }
+
+    private func refreshOperationalMetrics() async {
+        let reader=self.reader,path=databasePath
+        for attempt in 0..<2 {
+            do {
+                operationalMetrics=try await Task.detached { try reader.loadOperationalMetrics(path:path) }.value
+                operationalMetricsError=nil
+                return
+            } catch {
+                let message=error.localizedDescription.lowercased()
+                let transientContention=message.contains("database is locked")
+                    || message.contains("database is busy")
+                    || message.contains("unable to open database file")
+                if attempt == 0 && transientContention && !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds:750_000_000)
+                    continue
+                }
+                operationalMetricsError=error.localizedDescription
+                return
+            }
+        }
     }
 
     /// Price History is a local, read-only operational projection. Keeping it
@@ -189,6 +263,7 @@ struct EstateAdmissionProgress: Equatable {
     func run(_ intent:OperationIntent) async {
         releaseStaleOperationLockIfSafe()
         guard activeOperationID==nil else{
+            lastProcessResult=nil
             operationError=activeOperationStatusMessage()
             return
         }
@@ -198,7 +273,7 @@ struct EstateAdmissionProgress: Equatable {
             await performSchedulerControl(.resumeAcquisition(pauseIdentifier:nil,scopeType:nil,scopeIdentifier:nil,ingestionSession:session))
             manualIngestionHoldMessage=nil
         }
-        if case .importCSV(_,let symbol,_,_,_,_) = intent, pauseScheduledAcquisitionWhileImporting {
+        if case .importCSV(_,let symbol,_,_,_,_,_) = intent, pauseScheduledAcquisitionWhileImporting {
             let session=UUID().uuidString;ingestionSession=session
             let group=estateHierarchy?.markets.first(where:{$0.lanes.contains(where:{$0.symbol==symbol})})?.name
             let scopeIdentifier=manualIngestionPauseScope=="ALL" ? nil:manualIngestionPauseScope=="MARKET_OR_GROUP" ? group:symbol
@@ -216,7 +291,8 @@ struct EstateAdmissionProgress: Equatable {
                 return
             }
         }
-        guard !(intent.isAuthorityMutation && !intent.isManualImport) || !schedulerAcquisitionIsActive else {
+        guard !(intent.isAuthorityMutation && !intent.isManualImport && !intent.mayRunDuringSchedulerAcquisition)
+                || !schedulerAcquisitionIsActive else {
             operationError="A scheduled acquisition is publishing authority. Try again when the active lane completes."
             await releaseManualIngestionPauseIfNeeded()
             return
@@ -268,29 +344,11 @@ struct EstateAdmissionProgress: Equatable {
                 operationError=result.stderr.isEmpty ? result.stdout:result.stderr
                 if activeDataOperation != nil { dataOperationState = .failed;activeOperationState=dataOperationState.stageLabel }
             }
-            if case .registerInstrument = intent {
-                // Estate admission has already committed its provider mapping,
-                // registration, commissioning decision, and durable initial
-                // work requests before the CLI returns.  A complete estate
-                // read can be slow while the Scheduler is admitting history;
-                // never keep the registration modal in "Preparing" merely
-                // because that non-mutating refresh is still running.
-                Task { [weak self] in
-                    await self?.refresh()
-                    await self?.refreshSchedulerStatus()
-                }
-            } else {
-                // A provider operation is complete as soon as the Scheduler
-                // returns its durable result.  Estate Truth is a complete
-                // authority projection and can be expensive for a large
-                // historical store; never present that read as an ongoing
-                // import or retain the operator lock after evidence has
-                // already been published.  Refresh it independently.
-                Task { [weak self] in
-                    await self?.refresh()
-                    await self?.refreshSchedulerStatus()
-                }
-            }
+            // The operation is complete when its durable result returns. The
+            // lightweight Scheduler status notices the authority token change
+            // and owns the one coalesced Estate projection refresh; starting a
+            // second full read here needlessly competes with onboarding work.
+            Task { [weak self] in await self?.refreshSchedulerStatus() }
         } catch {
             operationError=error.localizedDescription
             if activeDataOperation != nil { dataOperationState = .failed;activeOperationState=dataOperationState.stageLabel }
@@ -298,8 +356,9 @@ struct EstateAdmissionProgress: Equatable {
         await releaseManualIngestionPauseIfNeeded()
     }
     func discoverMarket(_ query:String) async throws -> MarketDiscoveryResult {
-        releaseStaleOperationLockIfSafe()
-        guard activeOperationID == nil else { throw LocalOperationLockError.active(activeOperationStatusMessage()) }
+        // Discovery is a read-only command on its own bridge. SQLite WAL reads
+        // safely coexist with the short registration writer, so searching for
+        // the next symbol must not inherit the global mutation lock.
         let config=configuration,bridge=marketDiscoveryBridge
         return try await Task.detached {
             try bridge.validateCLI(config)
@@ -503,8 +562,40 @@ struct EstateAdmissionProgress: Equatable {
     func retrySchedulerLane(_ id:String) async {await performSchedulerControl(.retrySchedulerLane(id:id))}
     func retryManualRequest(_ id:String) async {await performSchedulerControl(.retryManualRequest(id:id))}
     func queueLaneUpdate(_ id:String) async {await performSchedulerControl(.queueLaneUpdate(id:id))}
-    func runSchedulerQueue() async {await performSchedulerControl(.runSchedulerQueue)}
-    func runEstateAudit() async {await performSchedulerControl(.runEstateAudit)}
+    func runSchedulerQueue() async {
+        guard schedulerActionInProgress == nil else{return}
+        schedulerActionInProgress="RUN_QUEUE"
+        schedulerActionMessage=nil
+        schedulerActionFailed=false
+        schedulerError=nil
+        await performSchedulerControl(.runSchedulerQueue)
+        if let schedulerError {
+            schedulerActionMessage=schedulerError
+            schedulerActionFailed=true
+        } else {
+            schedulerActionMessage="Queue wake accepted · dispatch status refreshed"
+        }
+        schedulerActionInProgress=nil
+    }
+    func runEstateAudit() async {await performSchedulerControl(.runEstateAudit);await loadEstateAuditHistory(selectedRunID:nil)}
+    func loadEstateAuditHistory(selectedRunID:String?=nil) async {
+        guard !estateAuditHistoryLoading else{return};estateAuditHistoryLoading=true;estateAuditHistoryError=nil;defer{estateAuditHistoryLoading=false}
+        let config=configuration,bridge=auditHistoryBridge
+        do {
+            let result=try await Task.detached { try bridge.run(.readEstateAuditHistory(auditRunID:selectedRunID),config:config) }.value
+            guard result.exitCode == 0 else { estateAuditHistoryError=result.stderr.isEmpty ? result.stdout:result.stderr;return }
+            estateAuditHistory=try JSONDecoder().decode(EstateAuditHistory.self,from:Data(result.stdout.utf8))
+        } catch { estateAuditHistoryError=error.localizedDescription }
+    }
+    func setEstateAuditSchedule(weekday:String,hour:Int,minute:Int) async {
+        let config=configuration,bridge=auditHistoryBridge
+        do {
+            let result=try await Task.detached { try bridge.run(.setEstateAuditSchedule(weekday:weekday,hour:hour,minute:minute),config:config) }.value
+            guard result.exitCode == 0 else { estateAuditHistoryError=result.stderr.isEmpty ? result.stdout:result.stderr;return }
+            await loadEstateAuditHistory()
+            await refreshSchedulerStatus()
+        } catch { estateAuditHistoryError=error.localizedDescription }
+    }
     func setSchedulerPolicy(_ policy:String) async {await performSchedulerControl(.setSchedulerPolicy(policy))}
     func setM5Freshness(publicationDelaySeconds:Int,criticalAfterClosedBoundaries:Int) async {await performSchedulerControl(.setM5Freshness(publicationDelaySeconds:publicationDelaySeconds,criticalAfterClosedBoundaries:criticalAfterClosedBoundaries));await refresh()}
     func showEstateFindings(_ condition:String) { estateConditionFilter = condition; section = .estate }
@@ -518,7 +609,7 @@ struct EstateAdmissionProgress: Equatable {
             let result=try await Task.detached{try bridge.run(intent,config:config)}.value
             guard result.exitCode==0 else{providerFactsError=result.stderr.isEmpty ? result.stdout:result.stderr;return}
             providerFacts=try JSONDecoder().decode(ProviderFactsSnapshot.self,from:Data(result.stdout.utf8));providerFactsError=nil
-            if resolve { await runSchedulerQueue();await refresh();await refreshSchedulerStatus() }
+            if resolve { await runSchedulerQueue() }
         } catch { providerFactsError=error.localizedDescription }
     }
 
@@ -534,7 +625,6 @@ struct EstateAdmissionProgress: Equatable {
             }
             await refreshCredentialAuthority()
             await refreshProviderFacts(resolve:true)
-            await runSchedulerQueue()
         } catch { providerFactsError=error.localizedDescription }
     }
 
@@ -619,16 +709,14 @@ struct EstateAdmissionProgress: Equatable {
         } catch { schedulerError=error.localizedDescription }
     }
 
-    func refreshSchedulerStatus() async {
+    func refreshSchedulerStatus(scheduleEstateRefresh:Bool=true) async {
         do {
-            let config=configuration,bridge=self.schedulerServiceBridge,appBuild=Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "Development"
-            let result=try await Task.detached{try bridge.run(.readSchedulerService(appBuild:appBuild),config:config)}.value
-            guard result.exitCode==0 else { schedulerError=result.stderr.isEmpty ? result.stdout:result.stderr;schedulerServiceRunning=false;return }
-            let data=Data(result.stdout.utf8)
+            let database=databasePath,client=schedulerServiceClient,appBuild=Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "Development"
+            let data=try await Task.detached{try client.readStatus(database:database,appBuild:appBuild)}.value
             let status=try JSONDecoder().decode(SchedulerServiceStatus.self,from:data)
             schedulerServiceStatus=status
             schedulerServiceRunning=status.operationalHealth?.process.state == "ALIVE" || status.acquisitionOwnerActive
-            refreshEstateProjectionIfNeeded(for:status)
+            if scheduleEstateRefresh { refreshEstateProjectionIfNeeded(for:status) }
             if status.live,let snapshot=try? JSONDecoder().decode(SchedulerSnapshot.self,from:data) {
                 schedulerUsesCompactStatus=false
                 acceptSchedulerSnapshot(snapshot)
@@ -657,37 +745,102 @@ struct EstateAdmissionProgress: Equatable {
         } catch { schedulerServiceRunning=false;schedulerError=error.localizedDescription }
     }
 
-    private func acceptSchedulerSnapshot(_ value:SchedulerSnapshot) {
-        let prior=schedulerSnapshot?.authorityRevision
-        schedulerSnapshot=value;schedulerServiceRunning=true;schedulerError=nil
-        reconcileEstateAdmissionProgress(value)
-        if let prior,prior != value.authorityRevision { Task{await refresh()} }
+    func refreshSchedulerStatusFromUI() async {
+        guard schedulerActionInProgress == nil else{return}
+        schedulerActionInProgress="REFRESH"
+        schedulerActionMessage=nil
+        schedulerActionFailed=false
+        await refreshSchedulerStatus()
+        if let schedulerError {
+            schedulerActionMessage=schedulerError
+            schedulerActionFailed=true
+        } else {
+            schedulerActionMessage="Status refreshed · (SchedulerFormatting.timestamp(schedulerServiceStatus?.heartbeatTime))"
+        }
+        schedulerActionInProgress=nil
     }
 
-    /// Normal scheduler wakes publish a compact, indexed status.  Its cheap
-    /// authority change token drives the complete Estate Truth refresh without
-    /// asking the service for a full monitor projection every two seconds.
+    private func acceptSchedulerSnapshot(_ value:SchedulerSnapshot) {
+        schedulerSnapshot=value;schedulerServiceRunning=true;schedulerError=nil
+        reconcileEstateAdmissionProgress(value)
+    }
+
+    /// Normal scheduler wakes publish a compact, indexed status. Its cheap
+    /// authority token eventually drives one complete Estate Truth refresh.
+    /// D1 lanes publish in a burst, so require a quiet interval and an idle
+    /// worker pool before starting the expensive immutable-authority read.
+    private func schedulerPermitsEstateProjection(_ status:SchedulerServiceStatus) -> Bool {
+        status.live
+            && (status.operationalHealth?.workerPool.activeWorkers ?? 0) == 0
+            && status.register?.runningCount == 0
+            && status.register?.dueNowCount == 0
+    }
+
     private func refreshEstateProjectionIfNeeded(for status:SchedulerServiceStatus) {
         guard status.live,
               let token=status.authorityChangeToken,
-              lastEstateProjectionToken != token,
-              estateRefreshTargetToken != token,
-              !isRefreshing else { return }
+              lastEstateProjectionToken != token else { return }
+        if isRefreshing {
+            // Preserve the newest revision. The completing refresh schedules
+            // this trailing projection instead of overlapping Python readers.
+            estateRefreshTargetToken=token
+            return
+        }
+        guard estateRefreshTargetToken != token else { return }
+        estateRefreshTask?.cancel()
         estateRefreshTargetToken=token
-        Task { [weak self] in
+        estateRefreshTask=Task { [weak self] in
+            // A short debounce coalesces the rapid token changes emitted by a
+            // publication burst. The fresh 20-second proof below is the
+            // actual idle gate and still prevents work from overlapping.
+            do { try await Task.sleep(for:.seconds(5)) }
+            catch { return }
             guard let self else { return }
-            await self.refresh()
-            if self.estateTruthError == nil {
-                self.lastEstateProjectionToken=token
+            // The monitor may have been sleeping on an earlier idle status
+            // while a boundary became due. Re-read the daemon now, then
+            // require that fresh settled state to remain true for the whole
+            // quiet interval before launching the authority process.
+            await self.refreshSchedulerStatus(scheduleEstateRefresh:false)
+            guard !Task.isCancelled,
+                  self.schedulerServiceStatus?.authorityChangeToken == token,
+                  self.schedulerServiceStatus.map(self.schedulerPermitsEstateProjection) == true,
+                  !self.isRefreshing else {
+                if self.estateRefreshTargetToken == token { self.estateRefreshTargetToken=nil }
+                self.estateRefreshTask=nil
+                return
             }
-            if self.estateRefreshTargetToken == token {
-                self.estateRefreshTargetToken=nil
+            do { try await Task.sleep(for:.seconds(20)) }
+            catch { return }
+            await self.refreshSchedulerStatus(scheduleEstateRefresh:false)
+            guard !Task.isCancelled,
+                  self.schedulerServiceStatus?.authorityChangeToken == token,
+                  self.schedulerServiceStatus.map(self.schedulerPermitsEstateProjection) == true,
+                  !self.isRefreshing else {
+                if self.estateRefreshTargetToken == token { self.estateRefreshTargetToken=nil }
+                self.estateRefreshTask=nil
+                return
+            }
+            await self.refresh()
+            self.estateRefreshTargetToken=nil
+            self.estateRefreshTask=nil
+            if let latest=self.schedulerServiceStatus {
+                self.refreshEstateProjectionIfNeeded(for:latest)
             }
         }
     }
 
     private func reconcileEstateAdmissionProgress(_ value:SchedulerSnapshot) {
-        guard var progress=estateAdmissionProgress else { return }
+        for symbol in Array(estateAdmissionProgressBySymbol.keys) {
+            guard let progress=estateAdmissionProgressBySymbol[symbol] else{continue}
+            estateAdmissionProgressBySymbol[symbol]=reconciledEstateAdmissionProgress(progress,with:value)
+        }
+    }
+
+    private func reconciledEstateAdmissionProgress(
+        _ current:EstateAdmissionProgress,
+        with value:SchedulerSnapshot
+    ) -> EstateAdmissionProgress? {
+        var progress=current
         let lanes=value.lanes.filter { $0.symbol==progress.symbol && progress.timeframes.contains($0.timeframe) }
         let queued=value.acquisitionQueue.filter { $0.symbol==progress.symbol && progress.timeframes.contains($0.timeframe) }
         if let activity=value.activeActivity,
@@ -695,31 +848,35 @@ struct EstateAdmissionProgress: Equatable {
            progress.timeframes.contains(activity.timeframe) {
             progress.activeTimeframe=activity.timeframe
             progress.stage="Acquiring \(activity.timeframe) · \(activity.stage.replacingOccurrences(of:"_",with:" ").capitalized)"
-            estateAdmissionProgress=progress
-            return
+            return progress
         }
         if !queued.isEmpty {
             progress.activeTimeframe=nil
             progress.stage="Initial history queued · \(queued.count) lane\(queued.count == 1 ? "" : "s") ready"
-            estateAdmissionProgress=progress
-            return
+            return progress
         }
         if lanes.contains(where: { ["FAILED","MANUAL_REQUIRED"].contains($0.result ?? "") || $0.publicationState == "FAILED_RETRYABLE" }) {
             progress.activeTimeframe=nil
             progress.stage="Initial history needs attention"
-            estateAdmissionProgress=progress
-            return
+            return progress
         }
-        guard lanes.count == progress.timeframes.count else { return }
+        guard lanes.count == progress.timeframes.count else { return progress }
         if lanes.allSatisfy({ $0.latestCanonicalObservation != nil && ($0.publicationState ?? "PUBLISHED") == "PUBLISHED" }) {
-            estateAdmissionProgress=nil
-            return
+            let projected=progress.timeframes.allSatisfy { timeframe in
+                estateTruth?.truthMatrix.contains {
+                    $0.symbol==progress.symbol && $0.timeframe==timeframe
+                } == true
+            }
+            if projected{return nil}
+            progress.activeTimeframe=nil
+            progress.stage="Published · refreshing Estate"
+            return progress
         }
         if lanes.contains(where: { $0.publicationState == "PUBLISHING" || $0.latestCanonicalObservation != nil }) {
             progress.activeTimeframe=nil
             progress.stage="Publishing initial evidence"
-            estateAdmissionProgress=progress
         }
+        return progress
     }
 
     private func manageSchedulerService(_ action:String) async {
@@ -772,7 +929,7 @@ struct EstateAdmissionProgress: Equatable {
             let process=try bridge.run(.readEstateTruth,config:config)
             guard process.exitCode==0 else { throw BridgeError.malformedResult }
             let state=try JSONDecoder().decode(EstateTruthState.self,from:Data(process.stdout.utf8))
-            return (state,EstateHierarchy(lanes:state.truthMatrix),try reader.load(path:path))
+            return (state,EstateHierarchy(lanes:state.truthMatrix),try reader.load(path:path,estateTruth:state))
         }.value
     }
 
@@ -788,6 +945,11 @@ struct EstateAdmissionProgress: Equatable {
     private func commitAuthorityState(_ loaded:(EstateTruthState,EstateHierarchy,AuthoritySnapshot)) {
         estateTruth=loaded.0;estateHierarchy=loaded.1;snapshot=loaded.2
         estateTruthError=nil;readError=nil
+        for progress in estateAdmissionProgresses where progress.timeframes.allSatisfy({ timeframe in
+            loaded.0.truthMatrix.contains{$0.symbol==progress.symbol && $0.timeframe==timeframe}
+        }) {
+            estateAdmissionProgressBySymbol.removeValue(forKey:progress.symbol)
+        }
         if selectedTruthLaneID==nil || !loaded.0.truthMatrix.contains(where:{$0.id==selectedTruthLaneID}) { selectedTruthLaneID=loaded.0.truthMatrix.first?.id }
         if selectedLaneID==nil || !loaded.2.lanes.contains(where:{$0.id==selectedLaneID}) { selectedLaneID=loaded.2.lanes.first?.id }
     }
@@ -799,15 +961,6 @@ private enum MarketDiscoveryReadError:Error,LocalizedError,Sendable {
         switch self {
         case .serviceFailure(let detail):
             return detail.isEmpty ? "Market discovery service failed.":detail
-        }
-    }
-}
-
-private enum LocalOperationLockError:Error,LocalizedError,Sendable {
-    case active(String)
-    var errorDescription:String? {
-        switch self {
-        case .active(let message): return message
         }
     }
 }

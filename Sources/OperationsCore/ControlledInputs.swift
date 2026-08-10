@@ -295,11 +295,127 @@ public struct UnifiedAcquisitionPlan:Equatable,Sendable {
     private static func display(_ value:String)->String { value.replacingOccurrences(of:"_",with:" ").lowercased().capitalized }
 }
 
+public enum ManualCSVSourceFormat:String,Equatable,Sendable {
+    case mt4History = "MT4 history export"
+    case tradingView = "TradingView CSV export"
+    case standardOHLC = "Standard OHLC CSV"
+    case unknown = "Unrecognised CSV"
+
+    public var providerID:String {
+        switch self {
+        case .mt4History:return "MT4"
+        case .tradingView:return "TRADINGVIEW"
+        case .standardOHLC,.unknown:return "MANUAL"
+        }
+    }
+    public var providerDisplayName:String {
+        switch self {
+        case .mt4History:return "MT4 manual file import"
+        case .tradingView:return "TradingView manual file import"
+        case .standardOHLC,.unknown:return "Manual file import"
+        }
+    }
+}
+
+public struct ManualCSVInspection:Equatable,Sendable {
+    public let sourceFormat:ManualCSVSourceFormat
+    public let dataRowCount:Int
+    public let timestampsDeclareOffsets:Bool
+    public let sourceTimezoneRequired:Bool
+    public let suggestedSourceTimezone:String?
+
+    public var timestampAuthorityDescription:String {
+        if sourceTimezoneRequired {
+            return suggestedSourceTimezone.map{"Reviewed broker timezone · \($0)"} ?? "Reviewed source timezone required"
+        }
+        return timestampsDeclareOffsets ? "Explicit offsets in source":"Calendar dates or UTC timestamps in source"
+    }
+
+    public static func inspect(
+        fileURL:URL,
+        timeframe:String,
+        reviewedMT4Timezone:String="Europe/Athens"
+    ) throws ->ManualCSVInspection {
+        try inspect(
+            text:String(contentsOf:fileURL,encoding:.utf8),
+            timeframe:timeframe,
+            reviewedMT4Timezone:reviewedMT4Timezone
+        )
+    }
+
+    public static func inspect(
+        text:String,
+        timeframe:String,
+        reviewedMT4Timezone:String="Europe/Athens"
+    )->ManualCSVInspection {
+        let lines=text.split(whereSeparator:\.isNewline).map{
+            String($0).trimmingCharacters(in:.whitespacesAndNewlines)
+        }.filter{!$0.isEmpty}
+        guard let first=lines.first else {
+            return .init(sourceFormat:.unknown,dataRowCount:0,timestampsDeclareOffsets:false,sourceTimezoneRequired:false,suggestedSourceTimezone:nil)
+        }
+        let firstFields=csvFields(first)
+        let lane=timeframe.trimmingCharacters(in:.whitespacesAndNewlines).uppercased()
+        let isDaily=lane=="D1"
+        if isMT4HistoryRow(firstFields) {
+            let reviewed=reviewedMT4Timezone.trimmingCharacters(in:.whitespacesAndNewlines)
+            return .init(
+                sourceFormat:.mt4History,
+                dataRowCount:lines.count,
+                timestampsDeclareOffsets:false,
+                sourceTimezoneRequired:!isDaily,
+                suggestedSourceTimezone:isDaily || reviewed.isEmpty ? nil:reviewed
+            )
+        }
+        let headers=firstFields.map{$0.trimmingCharacters(in:.whitespacesAndNewlines).lowercased()}
+        let hasOHLC=["open","high","low","close"].allSatisfy(headers.contains)
+        let format:ManualCSVSourceFormat
+        if hasOHLC && headers.contains("time") { format = .tradingView }
+        else if hasOHLC && (headers.contains("timestamp") || headers.contains("timestamp_utc")) { format = .standardOHLC }
+        else { format = .unknown }
+        let timestampIndex=headers.firstIndex(where:{["time","timestamp","timestamp_utc"].contains($0)})
+        let firstDataFields:[String]?=lines.dropFirst().first.map{csvFields($0)}
+        let timestamp:String?=timestampIndex.flatMap{index in
+            guard let fields=firstDataFields,index<fields.count else{return nil}
+            return fields[index].trimmingCharacters(in:.whitespacesAndNewlines)
+        }
+        let declaresOffset=timestamp.map(timestampDeclaresOffset) ?? false
+        return .init(
+            sourceFormat:format,
+            dataRowCount:max(0,lines.count-1),
+            timestampsDeclareOffsets:declaresOffset,
+            sourceTimezoneRequired:!isDaily && timestamp != nil && !declaresOffset,
+            suggestedSourceTimezone:nil
+        )
+    }
+
+    private static func csvFields(_ line:String)->[String] {
+        line.replacingOccurrences(of:"\u{feff}",with:"").split(separator:",",omittingEmptySubsequences:false).map(String.init)
+    }
+    private static func isMT4HistoryRow(_ fields:[String])->Bool {
+        guard fields.count==7 else{return false}
+        let dateParts=fields[0].split(separator:".",omittingEmptySubsequences:false)
+        let timeParts=fields[1].split(separator:":",omittingEmptySubsequences:false)
+        guard dateParts.count==3,timeParts.count==2,
+              dateParts[0].count==4,dateParts[1].count==2,dateParts[2].count==2,
+              timeParts[0].count==2,timeParts[1].count==2,
+              dateParts.allSatisfy({Int($0) != nil}),timeParts.allSatisfy({Int($0) != nil}) else{return false}
+        return fields[2...6].allSatisfy{Double($0.trimmingCharacters(in:.whitespacesAndNewlines)) != nil}
+    }
+    private static func timestampDeclaresOffset(_ value:String)->Bool {
+        if value.uppercased().hasSuffix("Z") {return true}
+        guard value.count>=6 else{return false}
+        let suffix=Array(value.suffix(6))
+        return (suffix[0]=="+" || suffix[0]=="-") && suffix[3]==":" &&
+            [suffix[1],suffix[2],suffix[4],suffix[5]].allSatisfy(\.isNumber)
+    }
+}
+
 public struct ReviewedDataOperationPlan:Identifiable,Equatable,Sendable {
     public let id:UUID;public let mode:DataOperationsMode;public let instrument:String;public let timeframe:String
     public let filePath:String?;public let fileChecksum:String?;public let fileSelectionID:UUID?
-    public let from:String?;public let through:String?;public let sourceTimezone:String?;public let d1DateFormat:String;public let conflict:ConflictMode;public let acquisitionIntent:AcquisitionIntent
-    public init(id:UUID,mode:DataOperationsMode,instrument:String,timeframe:String,filePath:String?=nil,fileChecksum:String?=nil,fileSelectionID:UUID?=nil,from:String?=nil,through:String?=nil,sourceTimezone:String?=nil,d1DateFormat:String="auto",conflict:ConflictMode,acquisitionIntent:AcquisitionIntent = .custom){self.id=id;self.mode=mode;self.instrument=instrument;self.timeframe=timeframe;self.filePath=filePath;self.fileChecksum=fileChecksum;self.fileSelectionID=fileSelectionID;self.from=from;self.through=through;self.sourceTimezone=sourceTimezone;self.d1DateFormat=d1DateFormat;self.conflict=conflict;self.acquisitionIntent=acquisitionIntent}
-    public var intent:OperationIntent? { switch mode { case .importFile: guard let filePath else{return nil};return .importCSV(file:filePath,symbol:instrument,timeframe:timeframe,sourceTimezone:sourceTimezone,d1DateFormat:d1DateFormat,mode:conflict);case .fetch:guard let through else{return nil};switch acquisitionIntent{case .initial:guard let from else{return nil};return .acquireInitial(asset:instrument,timeframe:timeframe,from:from,through:through,mode:conflict);case .update:guard let from else{return nil};return .acquireUpdate(asset:instrument,timeframe:timeframe,from:from,through:through,mode:conflict);case .force:guard let from else{return nil};return .acquireForceHistory(asset:instrument,timeframe:timeframe,from:from,through:through,mode:conflict);case .custom:guard let from else{return nil};return .acquire(asset:instrument,timeframe:timeframe,from:from,through:through,mode:conflict)};default:return nil } }
+    public let from:String?;public let through:String?;public let sourceFormat:ManualCSVSourceFormat;public let timestampsDeclareOffsets:Bool;public let sourceTimezone:String?;public let d1DateFormat:String;public let conflict:ConflictMode;public let acquisitionIntent:AcquisitionIntent
+    public init(id:UUID,mode:DataOperationsMode,instrument:String,timeframe:String,filePath:String?=nil,fileChecksum:String?=nil,fileSelectionID:UUID?=nil,from:String?=nil,through:String?=nil,sourceFormat:ManualCSVSourceFormat = .standardOHLC,timestampsDeclareOffsets:Bool=false,sourceTimezone:String?=nil,d1DateFormat:String="auto",conflict:ConflictMode,acquisitionIntent:AcquisitionIntent = .custom){self.id=id;self.mode=mode;self.instrument=instrument;self.timeframe=timeframe;self.filePath=filePath;self.fileChecksum=fileChecksum;self.fileSelectionID=fileSelectionID;self.from=from;self.through=through;self.sourceFormat=sourceFormat;self.timestampsDeclareOffsets=timestampsDeclareOffsets;self.sourceTimezone=sourceTimezone;self.d1DateFormat=d1DateFormat;self.conflict=conflict;self.acquisitionIntent=acquisitionIntent}
+    public var intent:OperationIntent? { switch mode { case .importFile: guard let filePath else{return nil};return .importCSV(file:filePath,symbol:instrument,timeframe:timeframe,provider:sourceFormat.providerID,sourceTimezone:sourceTimezone,d1DateFormat:d1DateFormat,mode:conflict);case .fetch:guard let through else{return nil};switch acquisitionIntent{case .initial:guard let from else{return nil};return .acquireInitial(asset:instrument,timeframe:timeframe,from:from,through:through,mode:conflict);case .update:guard let from else{return nil};return .acquireUpdate(asset:instrument,timeframe:timeframe,from:from,through:through,mode:conflict);case .force:guard let from else{return nil};return .acquireForceHistory(asset:instrument,timeframe:timeframe,from:from,through:through,mode:conflict);case .custom:guard let from else{return nil};return .acquire(asset:instrument,timeframe:timeframe,from:from,through:through,mode:conflict)};default:return nil } }
     public func matches(mode:DataOperationsMode,instrument:String?,timeframe:String?,fileChecksum:String?)->Bool { self.mode==mode && self.instrument==instrument && self.timeframe==timeframe && (mode != .importFile || self.fileChecksum==fileChecksum) }
 }

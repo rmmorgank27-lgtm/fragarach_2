@@ -24,11 +24,11 @@ struct EstateContextDetailView: View {
                 ("Not enabled", "\(estate.estateSummary.notEnabledLanes ?? 0)"),
                 ("Operational coverage", estate.estateSummary.operationalCoveragePercent.map{"\($0)%"} ?? "Not measured"),
                 ("Healthy", "\(hierarchy.estateSummary.healthyCount)"),
-                ("Attention", "\(hierarchy.estateSummary.attentionCount)"),
                 ("Critical", "\(hierarchy.estateSummary.criticalCount)"),
                 ("Coverage", percent(hierarchy.estateSummary.coveragePercent)),
                 ("Freshness", percent(hierarchy.estateSummary.freshnessPercent))
             ]) }
+            GroupBox("Attention") { AttentionCountButton(lanes: hierarchy.estateSummary.attentionLanes) }
             SchedulerRecentEventsView(snapshot:scheduler)
             GroupBox("Aggregation") { Facts([("Truth", estate.estateSummary.aggregation.truthScore), ("Authority", estate.estateSummary.aggregation.authorityState), ("CAODT", estate.estateSummary.aggregation.caodt)]) }
         }.padding()
@@ -50,7 +50,8 @@ struct GroupContextDetailView: View {
                 Spacer()
                 VStack(alignment:.trailing){Text(summary.truthScore.map(String.init) ?? "—").font(.system(size:36,weight:.semibold,design:.rounded));Label(summary.authorityState,systemImage:"circle.fill").foregroundStyle(TruthPresentation.color(summary.authorityState))}
             }
-            GroupBox("Operational health") { Facts([("Symbols", "\(summary.symbolCount)"), ("Healthy", "\(summary.healthyCount)"), ("Attention", "\(summary.attentionCount)"), ("Critical", "\(summary.criticalCount)"), ("Coverage", percent(summary.coveragePercent)), ("Freshness", percent(summary.freshnessPercent)), ("CAODT", TruthPresentation.text(summary.caodt))]) }
+            GroupBox("Operational health") { Facts([("Symbols", "\(summary.symbolCount)"), ("Healthy", "\(summary.healthyCount)"), ("Critical", "\(summary.criticalCount)"), ("Coverage", percent(summary.coveragePercent)), ("Freshness", percent(summary.freshnessPercent)), ("CAODT", TruthPresentation.text(summary.caodt))]) }
+            GroupBox("Attention") { AttentionCountButton(lanes: summary.attentionLanes) }
             GroupBox("Attention symbols") {
                 if summary.attentionSymbols.isEmpty { Text("No symbols currently require attention.").foregroundStyle(.secondary).frame(maxWidth:.infinity,alignment:.leading).padding(.vertical,6) }
                 else { Text(summary.attentionSymbols.joined(separator: ", ")).textSelection(.enabled).frame(maxWidth:.infinity,alignment:.leading).padding(.vertical,6) }

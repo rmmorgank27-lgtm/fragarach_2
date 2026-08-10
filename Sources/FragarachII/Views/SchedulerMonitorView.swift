@@ -224,9 +224,28 @@ struct SchedulerMonitorView: View {
                 HStack(alignment:.firstTextBaseline) {
                     WorkspaceHeader(title:"Schedule",purpose:"Time-triggered lane checks and the next operational work horizon.")
                     Spacer()
-                    Button("Run Queue Now"){Task{await store.runSchedulerQueue()}}.buttonStyle(.borderedProminent)
-                    Button("Refresh Status"){Task{await store.refreshSchedulerStatus()}}
+                    Button {
+                        Task{await store.runSchedulerQueue()}
+                    } label: {
+                        if store.schedulerActionInProgress == "RUN_QUEUE" {
+                            HStack(spacing:6){ProgressView().controlSize(.small);Text("Waking Queue…")}
+                        } else { Text("Run Queue Now") }
+                    }.buttonStyle(.borderedProminent).disabled(store.schedulerActionInProgress != nil)
+                    Button {
+                        Task{await store.refreshSchedulerStatusFromUI()}
+                    } label: {
+                        if store.schedulerActionInProgress == "REFRESH" {
+                            HStack(spacing:6){ProgressView().controlSize(.small);Text("Refreshing…")}
+                        } else { Text("Refresh Status") }
+                    }.disabled(store.schedulerActionInProgress != nil)
                     diagnosticsButton()
+                }
+                if let message=store.schedulerActionMessage {
+                    Label(message,systemImage:store.schedulerActionFailed ? "exclamationmark.triangle.fill":"checkmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(store.schedulerActionFailed ? Color.orange:Color.green)
+                        .padding(.horizontal,10).padding(.vertical,7)
+                        .background(.regularMaterial,in:RoundedRectangle(cornerRadius:8))
                 }
                 GroupBox("Update speed") {
                     HStack(spacing:12) {
@@ -265,6 +284,8 @@ struct SchedulerMonitorView: View {
                                 TableColumn("Next Check") { row in Text(SchedulerFormatting.timestamp(row.nextCheckAtUTC)).font(.caption.monospaced()) }.width(min:175,ideal:215)
                                 TableColumn("Boundary") { row in Text(SchedulerFormatting.timestamp(row.nextExpectedBoundaryUTC)).font(.caption.monospaced()) }.width(min:175,ideal:215)
                                 TableColumn("Outcome / Retry") { row in Text(row.lastOutcome ?? ((row.retryCount ?? 0) > 0 ? "Retry \(row.retryCount ?? 0)" : "—")).foregroundStyle(.secondary) }.width(min:150,ideal:230)
+                                TableColumn("Reason") { row in Text(row.blockerReason ?? "—").foregroundStyle(.secondary) }.width(min:220,ideal:360)
+                                TableColumn("Repair") { row in Text(row.repairAction ?? "—").foregroundStyle(.secondary) }.width(min:220,ideal:330)
                             }.frame(minHeight:280,maxHeight:430)
                         }
                     }.padding(.vertical,4)
@@ -290,7 +311,9 @@ struct SchedulerMonitorView: View {
         let localFailures=blockedRows.filter { ($0.lastOutcome ?? "").uppercased().contains("LOCAL_PROGRAMMING_ERROR") }
         let noEligibleProvider=blockedRows.filter { ($0.lastOutcome ?? "").uppercased().contains("NO_ELIGIBLE_PROVIDER") }
         let calendarBlocks=blockedRows.filter { ($0.lastOutcome ?? "").uppercased().contains("OPERATIONAL_CALENDAR_UNAVAILABLE") }
-        if !credentialBlocks.isEmpty || !localFailures.isEmpty || !noEligibleProvider.isEmpty || !calendarBlocks.isEmpty {
+        let classifiedIDs=Set(credentialBlocks.map(\.id)+localFailures.map(\.id)+noEligibleProvider.map(\.id)+calendarBlocks.map(\.id))
+        let otherBlocks=blockedRows.filter { !classifiedIDs.contains($0.id) }
+        if !credentialBlocks.isEmpty || !localFailures.isEmpty || !noEligibleProvider.isEmpty || !calendarBlocks.isEmpty || !otherBlocks.isEmpty {
             GroupBox("Repair Actions") {
                 VStack(alignment:.leading,spacing:14) {
                     if !credentialBlocks.isEmpty {
@@ -340,6 +363,18 @@ struct SchedulerMonitorView: View {
                                 showDiagnostics=true
                                 Task { await store.loadSchedulerDiagnostics() }
                             }
+                            }
+                        }
+                    }
+                    if !otherBlocks.isEmpty {
+                        if !credentialBlocks.isEmpty || !localFailures.isEmpty || !noEligibleProvider.isEmpty || !calendarBlocks.isEmpty { Divider() }
+                        VStack(alignment:.leading,spacing:7) {
+                            Label("Lane-specific repair required · \(otherBlocks.count)",systemImage:"exclamationmark.triangle.fill").foregroundStyle(.orange)
+                            Text(otherBlocks.first?.flowImpact ?? "Only the listed lane is held; all other scheduled acquisition continues.").font(.caption).foregroundStyle(.secondary)
+                            Text(otherBlocks.first?.repairAction ?? "Open Scheduler Diagnostics, correct the reported condition, then retry the lane.").font(.caption).foregroundStyle(.secondary)
+                            HStack {
+                                Button("Open Scheduler Diagnostics") { showDiagnostics=true; Task { await store.loadSchedulerDiagnostics() } }
+                                Button("Retry repaired lanes") { Task { for lane in otherBlocks { await store.retrySchedulerLane(lane.id) }; await store.runSchedulerQueue() } }
                             }
                         }
                     }

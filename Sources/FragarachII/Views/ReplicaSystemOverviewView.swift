@@ -48,6 +48,7 @@ struct ReplicaSystemOverviewView: View {
                     state: studioState,
                     metrics: [
                         ("Published lanes", "\(snapshot?.latestPublication?.lanes.count ?? 0)"),
+                        ("MacBook requests", "\(requests(client).filter{$0.state == "WAITING_FOR_STUDIO"}.count)"),
                         ("Replica", snapshot?.latestPublication.map { short($0.authorityRevision) } ?? "None"),
                         ("Payload", payloadSize)
                     ]

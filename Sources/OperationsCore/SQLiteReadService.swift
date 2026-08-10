@@ -11,24 +11,60 @@ public enum AuthorityReadError: Error, LocalizedError, Sendable {
 public final class SQLiteReadService: @unchecked Sendable {
     public init() {}
 
-    public func load(path: String, operationLimit: Int = 100) throws -> AuthoritySnapshot {
+    public func load(path: String, operationLimit: Int = 100, estateTruth: EstateTruthState? = nil) throws -> AuthoritySnapshot {
         guard FileManager.default.fileExists(atPath: path) else { throw AuthorityReadError.missingDatabase(path) }
         var db: OpaquePointer?
-        let uri = "file:\(URL(fileURLWithPath: path).standardizedFileURL.path)?mode=ro"
-        let rc = sqlite3_open_v2(uri, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI | SQLITE_OPEN_NOMUTEX, nil)
+        // The authority remains SQL read-only via query_only.  The filesystem
+        // handle is read/write so SQLite may recreate transient WAL/SHM
+        // bookkeeping files during a writer checkpoint; strict mode=ro fails
+        // if it lands in the brief interval where the WAL file is absent.
+        let uri = "file:\(URL(fileURLWithPath: path).standardizedFileURL.path)?mode=rw"
+        let rc = sqlite3_open_v2(uri, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_URI | SQLITE_OPEN_NOMUTEX, nil)
         guard rc == SQLITE_OK, let db else { throw AuthorityReadError.sqlite("open failed (\(rc))") }
         defer { sqlite3_close(db) }
-        guard sqlite3_db_readonly(db, "main") == 1 else { throw AuthorityReadError.sqlite("SQLite did not enforce read-only mode") }
+        guard sqlite3_busy_timeout(db, 5_000) == SQLITE_OK else { throw AuthorityReadError.sqlite("could not configure read timeout") }
         try exec(db, "PRAGMA query_only=ON")
+        guard try int(db, "PRAGMA query_only") == 1 else { throw AuthorityReadError.sqlite("SQLite did not enforce query-only mode") }
         let tables = Set(try strings(db, "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'"))
         guard tables == foundationTables else { throw AuthorityReadError.incompatibleDatabase("current authority table identity failed") }
         let migrations = try int(db, "SELECT count(*) FROM schema_migrations")
         guard migrations == 10 else { throw AuthorityReadError.incompatibleDatabase("expected ten recognized migrations") }
         let registrations = try queryRegistrations(db)
-        let lanes = try queryLanes(db)
+        let coverageByLane = estateTruth.map { state in
+            Dictionary(uniqueKeysWithValues: state.truthMatrix.map { ($0.id, $0.truthState.coverage) })
+        }
+        let lanes = try queryLanes(db, coverageByLane: coverageByLane)
         let authorityEvents = try queryAuthorityEvents(db)
         let operations = try queryOperations(db, limit: max(1, min(operationLimit, 500)))
         return AuthoritySnapshot(databasePath: path, registrations: registrations, lanes: lanes, operations: operations, authorityEvents: authorityEvents, readAt: Date())
+    }
+
+    /// Loads only small operational facts. The timing history is deliberately
+    /// bounded by the scheduler journal, and the failed-ingest lookup never
+    /// touches governed bar or provenance rows.
+    public func loadOperationalMetrics(path: String) throws -> OperationalMetricsSnapshot {
+        guard FileManager.default.fileExists(atPath: path) else { throw AuthorityReadError.missingDatabase(path) }
+        let storageBytes = [path, "\(path)-wal", "\(path)-shm"].reduce(Int64(0)) { total, candidate in
+            let attributes = try? FileManager.default.attributesOfItem(atPath: candidate)
+            return total + ((attributes?[.size] as? NSNumber)?.int64Value ?? 0)
+        }
+        var db: OpaquePointer?
+        let uri = "file:\(URL(fileURLWithPath: path).standardizedFileURL.path)?mode=rw"
+        let rc = sqlite3_open_v2(uri, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_URI | SQLITE_OPEN_NOMUTEX, nil)
+        guard rc == SQLITE_OK, let db else { throw AuthorityReadError.sqlite("open failed (\(rc))") }
+        defer { sqlite3_close(db) }
+        guard sqlite3_busy_timeout(db, 5_000) == SQLITE_OK else { throw AuthorityReadError.sqlite("could not configure read timeout") }
+        try exec(db, "PRAGMA query_only=ON")
+        guard try int(db, "PRAGMA query_only") == 1 else { throw AuthorityReadError.sqlite("SQLite did not enforce query-only mode") }
+
+        let response = try queryProviderResponseTiming(db)
+        return .init(
+            storageBytes: storageBytes,
+            averageProviderResponseMilliseconds: response.averageMilliseconds,
+            providerResponseSampleCount: response.sampleCount,
+            lastFailedPacket: try queryLastFailedPacket(db),
+            readAt: Date()
+        )
     }
 
     /// Reads the operational Price History projection only. This deliberately
@@ -37,26 +73,32 @@ public final class SQLiteReadService: @unchecked Sendable {
     public func loadPriceHistory(path: String, symbol: String, timeframe: String, profilePointLimit: Int = 1_200) throws -> PriceHistoryOverview {
         guard FileManager.default.fileExists(atPath: path) else { throw AuthorityReadError.missingDatabase(path) }
         var db: OpaquePointer?
-        let uri = "file:\(URL(fileURLWithPath: path).standardizedFileURL.path)?mode=ro"
-        let rc = sqlite3_open_v2(uri, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI | SQLITE_OPEN_NOMUTEX, nil)
+        let uri = "file:\(URL(fileURLWithPath: path).standardizedFileURL.path)?mode=rw"
+        let rc = sqlite3_open_v2(uri, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_URI | SQLITE_OPEN_NOMUTEX, nil)
         guard rc == SQLITE_OK, let db else { throw AuthorityReadError.sqlite("open failed (\(rc))") }
         defer { sqlite3_close(db) }
-        guard sqlite3_db_readonly(db, "main") == 1 else { throw AuthorityReadError.sqlite("SQLite did not enforce read-only mode") }
+        guard sqlite3_busy_timeout(db, 5_000) == SQLITE_OK else { throw AuthorityReadError.sqlite("could not configure read timeout") }
         try exec(db, "PRAGMA query_only=ON")
+        guard try int(db, "PRAGMA query_only") == 1 else { throw AuthorityReadError.sqlite("SQLite did not enforce query-only mode") }
 
         let metadata = try queryPriceHistoryMetadata(db, symbol: symbol, timeframe: timeframe)
         let expectedCadence = expectedCadenceSeconds(for: timeframe)
         let summary = priceHistoryValidationSummary(metadata.validationSummary)
+        let latestObservationDate = metadata.latestBar.map {
+            String(ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: TimeInterval($0))).prefix(10))
+        }
         let gaps = try queryPriceHistoryGaps(
             db, symbol: symbol, timeframe: timeframe, expectedCadence: expectedCadence,
-            assetClass: metadata.assetClass
+            assetClass: metadata.assetClass,
+            validationConfirmsCompleteD1: timeframe.uppercased() == "D1"
+                && summary.missingExpectedCount == 0
+                && summary.throughDate.map { $0 >= (latestObservationDate ?? $0) } == true
         )
         let continuity = makeContinuity(
             observationCount: metadata.totalBarCount,
             gaps: gaps,
             expectedCadence: expectedCadence,
-            latestExpectedPresent: summary.latestExpectedPresent,
-            metadataWarning: summary.warning
+            latestExpectedPresent: summary.latestExpectedPresent
         )
         let profile = try queryPriceHistoryProfile(
             db,
@@ -119,7 +161,7 @@ public final class SQLiteReadService: @unchecked Sendable {
         )
     }
 
-    private func queryPriceHistoryGaps(_ db: OpaquePointer, symbol: String, timeframe: String, expectedCadence: Int64, assetClass: String?) throws -> [GovernedObservationGap] {
+    private func queryPriceHistoryGaps(_ db: OpaquePointer, symbol: String, timeframe: String, expectedCadence: Int64, assetClass: String?, validationConfirmsCompleteD1: Bool) throws -> [GovernedObservationGap] {
         // D1 permits the normal Friday-to-Monday interval; intraday lanes
         // surface every missing run longer than two expected bars.
         let threshold = expectedCadence >= 86_400 ? expectedCadence * 3 : expectedCadence * 2
@@ -144,15 +186,17 @@ public final class SQLiteReadService: @unchecked Sendable {
             let previous = sqlite3_column_int64(statement, 0)
             let next = sqlite3_column_int64(statement, 1)
             let duration = sqlite3_column_int64(statement, 2)
-            let expectedClosure = assetClass?.uppercased() == "FX"
-                && isExpectedFXWeekendClosure(previous: previous, next: next, duration: duration)
+            let expectedClosure = validationConfirmsCompleteD1 || (
+                assetClass?.uppercased() == "FX"
+                    && isExpectedFXWeekendClosure(previous: previous, next: next, duration: duration)
+            )
             result.append(.init(
                 previousObservationTimestamp: previous,
                 nextObservationTimestamp: next,
                 gapDuration: duration,
                 expectedCadence: expectedCadence,
                 classification: expectedClosure ? "EXPECTED_MARKET_CLOSURE" : "OBSERVED_INTERVAL_GAP",
-                reason: expectedClosure ? "FX_WEEKEND_CLOSURE" : nil
+                reason: expectedClosure ? "GOVERNED_CALENDAR_CLOSURE" : nil
             ))
         }
         return result
@@ -216,25 +260,27 @@ public final class SQLiteReadService: @unchecked Sendable {
         return result
     }
 
-    private func priceHistoryValidationSummary(_ text: String?) -> (state: String, latestExpectedPresent: Bool?, warning: String?) {
+    private func priceHistoryValidationSummary(_ text: String?) -> (state: String, latestExpectedPresent: Bool?, missingExpectedCount: Int?, throughDate: String?, warning: String?) {
         guard let text, let data = text.data(using: .utf8),
               let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               value["validator_version"] as? String != nil else {
-            return ("METADATA_UNAVAILABLE", nil, "Validation metadata is unavailable or malformed; governed observations remain readable.")
+            return ("METADATA_UNAVAILABLE", nil, nil, nil, "Validation metadata is unavailable or malformed; governed observations remain readable.")
         }
         guard let latestPresent = value["latest_expected_session_present"] as? Bool ?? value["latest_expected_closed_interval_present"] as? Bool else {
-            return ("METADATA_INCOMPLETE", nil, "Validation metadata does not declare the latest expected boundary.")
+            return ("METADATA_INCOMPLETE", nil, nil, nil, "Validation metadata does not declare the latest expected boundary.")
         }
-        return latestPresent ? ("VALIDATED_CURRENT", true, nil) : ("VALIDATED_DELAYED", false, nil)
+        let missing = value["missing_expected_session_count"] as? Int
+            ?? value["missing_expected_interval_count"] as? Int
+        let throughDate = value["through_date"] as? String
+        return latestPresent ? ("VALIDATED_CURRENT", true, missing, throughDate, nil) : ("VALIDATED_DELAYED", false, missing, throughDate, nil)
     }
 
-    private func makeContinuity(observationCount: Int, gaps: [GovernedObservationGap], expectedCadence: Int64, latestExpectedPresent: Bool?, metadataWarning: String?) -> GovernedContinuity {
-        let warnings = metadataWarning.map { [$0] } ?? []
+    private func makeContinuity(observationCount: Int, gaps: [GovernedObservationGap], expectedCadence: Int64, latestExpectedPresent: Bool?) -> GovernedContinuity {
         let latestState: String
         if observationCount == 0 { latestState = "UNAVAILABLE" }
         else if latestExpectedPresent == true { latestState = "CURRENT" }
         else { latestState = "LAST_AVAILABLE" }
-        return .init(expectedCadence: expectedCadence, observedCadence: nil, gaps: gaps, latestState: latestState, warnings: warnings)
+        return .init(expectedCadence: expectedCadence, observedCadence: nil, gaps: gaps, latestState: latestState, warnings: [])
     }
 
     private func expectedCadenceSeconds(for timeframe: String) -> Int64 {
@@ -287,7 +333,36 @@ public final class SQLiteReadService: @unchecked Sendable {
         return result
     }
 
-    private func queryLanes(_ db: OpaquePointer) throws -> [LaneRecord] {
+    private func queryLanes(_ db: OpaquePointer, coverageByLane: [String: TruthCoverage]?) throws -> [LaneRecord] {
+        if let coverageByLane {
+            let sql = """
+            SELECT l.asset,l.timeframe,l.high_watermark_open_time_utc,l.state_version,
+                   l.last_ingest_run_id,l.updated_at_utc,l.validation_summary
+            FROM lane_state l
+            WHERE NOT EXISTS (SELECT 1 FROM authority_events e WHERE json_extract(e.canonical_payload,'$.body.asset')=l.asset AND json_extract(e.canonical_payload,'$.body.timeframe')=l.timeframe
+              AND (json_extract(e.canonical_payload,'$.body.lifecycle_state') LIKE 'RETIRED%' OR json_extract(e.canonical_payload,'$.body.lifecycle_state') LIKE 'QUARANTINED%' OR json_extract(e.canonical_payload,'$.body.lifecycle_state')='PERMANENTLY_REMOVED')
+              AND NOT EXISTS(SELECT 1 FROM authority_events successor WHERE successor.supersedes_event_id=e.authority_event_id))
+            ORDER BY l.asset,l.timeframe
+            """
+            var statement: OpaquePointer?; try prepare(db, sql, &statement); defer { sqlite3_finalize(statement) }
+            var result: [LaneRecord] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                let asset=text(statement,0),timeframe=text(statement,1)
+                let highWatermark=optionalInt(statement,2)
+                let coverage=coverageByLane["\(asset):\(timeframe)"]
+                let summaryText=optionalText(statement,6)
+                let summary=summaryText.flatMap { try? JSONDecoder().decode(ValidationSummary.self,from:Data($0.utf8)) }
+                result.append(.init(
+                    asset:asset,timeframe:timeframe,highWatermark:highWatermark,
+                    stateVersion:Int(sqlite3_column_int64(statement,3)),
+                    lastIngestRunID:optionalText(statement,4),updatedAt:text(statement,5),
+                    barCount:coverage?.rowCount ?? 0,
+                    earliestBar:coverage.flatMap { epoch($0.earliestBar) },
+                    latestBar:highWatermark,validation:summary
+                ))
+            }
+            return result
+        }
         let sql = """
         SELECT l.asset,l.timeframe,l.high_watermark_open_time_utc,l.state_version,l.last_ingest_run_id,l.updated_at_utc,
                count(b.open_time_utc),min(b.open_time_utc),max(b.open_time_utc),l.validation_summary
@@ -310,16 +385,20 @@ public final class SQLiteReadService: @unchecked Sendable {
     private func queryOperations(_ db: OpaquePointer, limit: Int) throws -> [OperationRecord] {
         let sql = """
         SELECT r.ingest_run_id,r.kind,r.status,r.started_at_utc,r.finished_at_utc,r.raw_block_id,r.detail,
-               count(p.provenance_event_id),
-               sum(CASE WHEN p.merge_action='INSERT' THEN 1 ELSE 0 END),
-               sum(CASE WHEN p.merge_action='UNCHANGED' THEN 1 ELSE 0 END),
-               sum(CASE WHEN p.merge_action='CONFLICT_PRESERVED' THEN 1 ELSE 0 END),
-               sum(CASE WHEN p.merge_action='CORRECTED' THEN 1 ELSE 0 END),
-               coalesce(min(p.symbol),'—'),coalesce(min(p.timeframe),'—'),
+               coalesce(json_extract(r.detail,'$.inserted'),0)
+                 + coalesce(json_extract(r.detail,'$.unchanged'),0)
+                 + coalesce(json_extract(r.detail,'$.conflicts_preserved'),0)
+                 + coalesce(json_extract(r.detail,'$.corrected'),0),
+               coalesce(json_extract(r.detail,'$.inserted'),0),
+               coalesce(json_extract(r.detail,'$.unchanged'),0),
+               coalesce(json_extract(r.detail,'$.conflicts_preserved'),0),
+               coalesce(json_extract(r.detail,'$.corrected'),0),
+               coalesce(json_extract(r.detail,'$.asset'),'—'),
+               coalesce(json_extract(r.detail,'$.timeframe'),'—'),
                coalesce(json_extract(r.detail,'$.provider'),json_extract(r.detail,'$.source_name'),upper(r.kind)),
                coalesce(json_extract(r.detail,'$.warnings'),'[]')
-        FROM ingest_runs r LEFT JOIN provenance p ON p.ingest_run_id=r.ingest_run_id
-        GROUP BY r.ingest_run_id ORDER BY r.started_at_utc DESC LIMIT ?
+        FROM ingest_runs r
+        ORDER BY r.rowid DESC LIMIT ?
         """
         var statement: OpaquePointer?; try prepare(db, sql, &statement); sqlite3_bind_int(statement,1,Int32(limit)); defer { sqlite3_finalize(statement) }
         var result: [OperationRecord] = []
@@ -327,6 +406,42 @@ public final class SQLiteReadService: @unchecked Sendable {
             result.append(OperationRecord(id:text(statement,0),kind:text(statement,1),status:text(statement,2),startedAt:text(statement,3),finishedAt:optionalText(statement,4),rawBlockID:optionalText(statement,5),detailJSON:optionalText(statement,6),provenanceTotal:Int(sqlite3_column_int64(statement,7)),inserted:Int(sqlite3_column_int64(statement,8)),unchanged:Int(sqlite3_column_int64(statement,9)),conflicts:Int(sqlite3_column_int64(statement,10)),corrected:Int(sqlite3_column_int64(statement,11)),instrument:text(statement,12),timeframe:text(statement,13),source:text(statement,14),warningsJSON:text(statement,15)))
         }
         return result
+    }
+
+    private func queryProviderResponseTiming(_ db: OpaquePointer) throws -> (averageMilliseconds: Double?, sampleCount: Int) {
+        let sql = """
+        SELECT avg(CAST(json_extract(timing.value,'$.duration_provider_ms') AS REAL)),count(*)
+        FROM scheduler_runtime_state,json_each(state_json,'$.operation_timing_records') timing
+        WHERE json_type(timing.value,'$.duration_provider_ms') IN ('integer','real')
+          AND CAST(json_extract(timing.value,'$.duration_provider_ms') AS REAL) > 0
+        """
+        var statement: OpaquePointer?; try prepare(db, sql, &statement); defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { return (nil, 0) }
+        let average = sqlite3_column_type(statement, 0) == SQLITE_NULL ? nil : sqlite3_column_double(statement, 0)
+        return (average, Int(sqlite3_column_int64(statement, 1)))
+    }
+
+    private func queryLastFailedPacket(_ db: OpaquePointer) throws -> OperationalFailureRecord? {
+        let sql = """
+        SELECT finished_at_utc,
+               coalesce(json_extract(detail,'$.provider'),'UNKNOWN'),
+               coalesce(json_extract(detail,'$.asset'),'—'),
+               coalesce(json_extract(detail,'$.timeframe'),'—'),
+               coalesce(json_extract(detail,'$.rejections[0].code'),json_extract(detail,'$.error'),'FAILED')
+        FROM ingest_runs
+        WHERE status='failed'
+        ORDER BY rowid DESC
+        LIMIT 1
+        """
+        var statement: OpaquePointer?; try prepare(db, sql, &statement); defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        return .init(
+            occurredAt: text(statement, 0),
+            provider: text(statement, 1),
+            asset: text(statement, 2),
+            timeframe: text(statement, 3),
+            reason: text(statement, 4)
+        )
     }
 
     private func prepare(_ db: OpaquePointer, _ sql: String, _ statement: inout OpaquePointer?) throws { if sqlite3_prepare_v2(db,sql,-1,&statement,nil) != SQLITE_OK { throw AuthorityReadError.sqlite(String(cString:sqlite3_errmsg(db))) } }
@@ -341,4 +456,8 @@ public final class SQLiteReadService: @unchecked Sendable {
     private func text(_ s: OpaquePointer?, _ i:Int32)->String { String(cString:sqlite3_column_text(s,i)) }
     private func optionalText(_ s: OpaquePointer?, _ i:Int32)->String? { sqlite3_column_type(s,i)==SQLITE_NULL ? nil : text(s,i) }
     private func optionalInt(_ s: OpaquePointer?, _ i:Int32)->Int64? { sqlite3_column_type(s,i)==SQLITE_NULL ? nil : sqlite3_column_int64(s,i) }
+    private func epoch(_ value:String)->Int64? {
+        guard !value.isEmpty,let date=ISO8601DateFormatter().date(from:value) else{return nil}
+        return Int64(date.timeIntervalSince1970)
+    }
 }

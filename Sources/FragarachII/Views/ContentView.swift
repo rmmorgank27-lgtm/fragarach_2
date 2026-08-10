@@ -11,23 +11,38 @@ struct ContentView: View {
                 .toolbar { ToolbarItem { Button { Task{await store.refresh()} } label:{Label("Refresh",systemImage:"arrow.clockwise")}.keyboardShortcut("r",modifiers:.command).disabled(store.isRefreshing || store.activeOperationID != nil) } }
         }
         .navigationSplitViewStyle(.balanced)
-        .overlay(alignment:.bottom){
-            if let progress=store.estateAdmissionProgress { EstateAdmissionBar(progress:progress) }
-            else if store.activeOperationID != nil { ActiveOperationBar() }
+        .safeAreaInset(edge:.bottom,spacing:0){
+            if store.activeOperationID != nil { ActiveOperationBar() }
+            else if !store.estateAdmissionProgresses.isEmpty {
+                EstateAdmissionBar(progresses:store.estateAdmissionProgresses)
+            }
         }
     }
 }
 
 struct EstateAdmissionBar:View {
-    let progress:EstateAdmissionProgress
+    let progresses:[EstateAdmissionProgress]
     var body:some View {
         HStack(spacing:10) {
             ProgressView().controlSize(.small)
-            Text("\(progress.symbol) · Initial history").font(.caption.bold())
-            Text(progress.stage).font(.caption).foregroundStyle(.secondary)
+            Text(title).font(.caption.bold())
+            Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             Spacer()
             Text("Automatic onboarding").font(.caption).foregroundStyle(.secondary)
-        }.padding(10).background(.regularMaterial)
+        }.padding(10).background(.regularMaterial).overlay(alignment:.top){Divider()}
+    }
+    private var title:String {
+        guard progresses.count != 1 else{return "\(progresses[0].symbol) · Initial history"}
+        return "\(progresses.count) symbols · Initial history"
+    }
+    private var detail:String {
+        guard progresses.count != 1 else{return progresses[0].stage}
+        let symbols=progresses.map(\.symbol).joined(separator:", ")
+        let attention=progresses.filter{$0.stage.contains("attention")}.count
+        let active=progresses.filter{$0.activeTimeframe != nil}.count
+        if attention > 0 {return "\(symbols) · \(attention) need\(attention == 1 ? "s":"") attention"}
+        if active > 0 {return "\(symbols) · \(active) acquiring, \(progresses.count-active) queued or publishing"}
+        return "\(symbols) · queued or publishing"
     }
 }
 
@@ -50,7 +65,7 @@ struct ActiveOperationBar:View {
             } else {
                 Button("Cancel",role:.destructive){store.cancel()}
             }
-        }.padding(10).background(.regularMaterial)
+        }.padding(10).background(.regularMaterial).overlay(alignment:.top){Divider()}
     }
     private var ageLabel:String {
         guard let seconds=store.activeOperationAgeSeconds else { return "—" }

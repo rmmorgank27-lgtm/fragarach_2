@@ -387,8 +387,14 @@ struct DiscoverMarketView: View {
     private func confirmRegistration(_ plan: MarketRegistrationPlan) {
         reviewContext = nil
         Task {
+            store.beginEstateAdmission(
+                symbol:plan.canonicalRegistrationSymbol,
+                timeframes:["D1"],
+                stage:"Registering instrument"
+            )
             await store.run(.registerInstrument(candidate: plan.candidate))
             guard store.lastProcessResult?.exitCode == 0 else {
+                store.endEstateAdmission(symbol:plan.canonicalRegistrationSymbol)
                 searchError = readableRegistrationError()
                 return
             }
@@ -400,7 +406,7 @@ struct DiscoverMarketView: View {
             if !timeframes.isEmpty {
                 store.beginEstateAdmission(symbol:plan.canonicalRegistrationSymbol,timeframes:timeframes)
             }
-            continueToAcquire(plan.canonicalRegistrationSymbol)
+            searchFocused = true
             Task { await store.refreshProviderFacts() }
         }
     }
