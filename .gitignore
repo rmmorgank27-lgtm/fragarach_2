@@ -5,6 +5,7 @@ __pycache__/
 *.sqlite3-shm
 *.sqlite3-wal
 *.writer.lock
+*.audit.lock
 *.scheduler.json
 .coverage
 .pytest_cache/
@@ -19,3 +20,7 @@ dist/
 /data/
 /FRAGARACH_II_CONSTITUTION_FIX_V1.zip
 /FRAGARACH_II_CONSTITUTION_FIX_V1/
+/Imports/
+/orbital-angle-lab/
+/reports/estate_gap_report_*.artifact.json
+/reports/estate_gap_report_*.html
