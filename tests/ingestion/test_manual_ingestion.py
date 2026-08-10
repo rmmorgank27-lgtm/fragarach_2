@@ -127,14 +127,14 @@ class ManualIngestionTests(unittest.TestCase):
         self.assertEqual(initial.raw_block_id, repeated.raw_block_id)
         self.assertFalse(initial.raw_block_reused)
         self.assertTrue(repeated.raw_block_reused)
-        self.assertEqual((repeated.inserted, repeated.unchanged), (0, 1))
+        self.assertEqual((repeated.inserted, repeated.unchanged), (0, 0))
         self.assertNotEqual(initial.ingest_run_id, repeated.ingest_run_id)
         connection = open_read_only(self.database)
         try:
             self.assertEqual(connection.execute("SELECT count(*) FROM raw_blocks").fetchone()[0], 1)
             self.assertEqual(connection.execute("SELECT count(*) FROM bars").fetchone()[0], 1)
             self.assertEqual(connection.execute("SELECT count(*) FROM ingest_runs").fetchone()[0], 2)
-            self.assertEqual(connection.execute("SELECT count(*) FROM provenance").fetchone()[0], 2)
+            self.assertEqual(connection.execute("SELECT count(*) FROM provenance").fetchone()[0], 1)
         finally:
             connection.close()
 
@@ -158,6 +158,9 @@ class ManualIngestionTests(unittest.TestCase):
                 "SELECT open_time_utc FROM bars ORDER BY open_time_utc"
             ).fetchall()
             self.assertEqual(len(dates), 4)
+            self.assertEqual(
+                connection.execute("SELECT count(*) FROM provenance").fetchone()[0], 4
+            )
         finally:
             connection.close()
 

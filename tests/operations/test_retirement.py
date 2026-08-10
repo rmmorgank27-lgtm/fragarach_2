@@ -55,12 +55,12 @@ class EvidenceFreeRemovalTests(unittest.TestCase):
         register_instrument(self.db,self.candidate,registered_at_utc="2026-07-13T00:00:00+00:00")
     def tearDown(self):self.tmp.cleanup()
     def test_explicit_removal_then_fresh_registration_without_duplicates(self):
-        retire_instrument(self.db,"XAGUSD",scope="WHOLE_INSTRUMENT",selected_lanes=("D1",),reason="ERRONEOUS_OPERATOR_REGISTRATION",operator_note="test registration",typed_confirmation="")
+        retire_instrument(self.db,"XAGUSD",scope="WHOLE_INSTRUMENT",selected_lanes=("D1",),reason="ERRONEOUS_OPERATOR_REGISTRATION",operator_note="test registration",typed_confirmation="",completed_at="2026-07-14T04:00:00+00:00")
         before=open_read_only(self.db)
         try:registration_count=before.execute("SELECT count(*) FROM instrument_registrations WHERE asset='XAGUSD'").fetchone()[0]
         finally:before.close()
         with self.assertRaisesRegex(RetirementError,"PERMANENTLY REMOVE XAGUSD"):permanently_remove_instrument(self.db,"XAGUSD",typed_confirmation="REMOVE XAGUSD")
-        receipt=permanently_remove_instrument(self.db,"XAGUSD",typed_confirmation="PERMANENTLY REMOVE XAGUSD")
+        receipt=permanently_remove_instrument(self.db,"XAGUSD",typed_confirmation="PERMANENTLY REMOVE XAGUSD",removed_at="2026-07-15T04:00:00+00:00")
         self.assertEqual(receipt["outcome"],"PERMANENTLY_REMOVED");self.assertTrue(is_permanently_removed(self.db,"XAGUSD","D1"));self.assertEqual(discover_market(self.db,"XAGUSD")["markets"][0]["available_actions"],("ADD_TO_FRAGARACH",))
         class NoTransport:
             requests=[]

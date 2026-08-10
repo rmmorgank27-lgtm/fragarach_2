@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import plistlib
+import sqlite3
 import tempfile
 import threading
 import time
@@ -14,6 +16,7 @@ from fragarach_ii.scheduler_daemon import (
     AcquisitionOwnership,
     PersistentSchedulerRuntime,
     ServicePaths,
+    authority_database_identity,
     install_service,
     launch_agent_definition,
     make_command,
@@ -21,6 +24,7 @@ from fragarach_ii.scheduler_daemon import (
     send_service_request,
     service_status,
 )
+from fragarach_ii.lane_update_register import LaneUpdateRegister
 from fragarach_ii.storage import initialize_database, verify_integrity
 from fragarach_ii.storage.schema import APPLICATION_TABLES
 
@@ -69,6 +73,32 @@ class Spec049SchedulerServiceTests(unittest.TestCase):
                 first.release()
             self.assertFalse(ownership_is_active(paths))
 
+    def test_database_identity_survives_atomic_authority_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "authority.sqlite3"
+            initialize_database(database)
+            identity_before = authority_database_identity(database)
+            support_before = ServicePaths.create(database, home=root / "home").support
+
+            replacement = root / "compacted.sqlite3"
+            initialize_database(replacement)
+            os.replace(replacement, database)
+
+            self.assertEqual(authority_database_identity(database), identity_before)
+            self.assertEqual(ServicePaths.create(database, home=root / "home").support, support_before)
+
+    def test_database_identity_distinguishes_configured_authority_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "first.sqlite3"
+            second = root / "second.sqlite3"
+            initialize_database(first)
+            initialize_database(second)
+            self.assertNotEqual(
+                authority_database_identity(first), authority_database_identity(second)
+            )
+
     def test_live_status_idempotent_command_and_graceful_stop(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -100,6 +130,7 @@ class Spec049SchedulerServiceTests(unittest.TestCase):
                 command_identifier="second-button-press",
             ))
             self.assertEqual(first["result"], "accepted")
+            self.assertEqual(first["detail"]["outcome"], "QUEUE_WAKE_REQUESTED")
             self.assertEqual(second["result"], "already applied")
             self.assertEqual(third["result"], "already applied")
             self.assertEqual(first["contract"], COMMAND_CONTRACT)
@@ -117,6 +148,39 @@ class Spec049SchedulerServiceTests(unittest.TestCase):
             self.assertTrue(report.ok)
             self.assertEqual(report.application_tables, APPLICATION_TABLES)
             self.assertEqual(len(APPLICATION_TABLES), 12)
+
+    def test_live_status_overlays_running_register_workers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "authority.sqlite3"
+            initialize_database(database)
+            paths = self.paths(root, database)
+            runtime = PersistentSchedulerRuntime(paths, credential=None, monitor_only=True)
+            register = LaneUpdateRegister(database)
+            with sqlite3.connect(register.path) as connection:
+                connection.executemany(
+                    """INSERT INTO lane_update_register
+                       (asset,timeframe,state,updated_at_utc,priority)
+                       VALUES(?,?,'RUNNING','2026-07-30T13:00:00+00:00',30)""",
+                    [(symbol, "M5") for symbol in ("SUIUSD", "LINKUSD", "BTCUSD", "ETHUSD")],
+                )
+            runtime._snapshot = {
+                "scheduler_mode": "TIME_TRIGGERED_REGISTER",
+                "execution": {
+                    "cycle_id": "prior", "active_workers": 0,
+                    "available_workers": 4, "completed_at": "2026-07-30T12:59:00+00:00",
+                },
+                "scheduler_progress": {},
+                "active_activity": None,
+            }
+
+            status = runtime._current_status()
+
+            self.assertEqual(status["execution"]["active_workers"], 4)
+            self.assertEqual(status["execution"]["available_workers"], 0)
+            self.assertEqual(status["register"]["running_count"], 4)
+            self.assertEqual(status["heartbeat_cycle_state"], "ACTIVE")
+            self.assertEqual(status["operational_health"]["worker_pool"]["active_workers"], 4)
 
 
 if __name__ == "__main__":

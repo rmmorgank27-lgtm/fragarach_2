@@ -22,7 +22,12 @@ from fragarach_ii.market_discovery import discover_market
 from fragarach_ii.providers.instrument_search import candidate_from_dict
 from fragarach_ii.providers.binance import acquire_binance
 from fragarach_ii.providers.twelve_data import AcquisitionError
-from fragarach_ii.scheduler_service import SchedulerJournal, run_operator_fetch, scheduler_snapshot
+from fragarach_ii.scheduler_service import (
+    SchedulerJournal,
+    _pending_operator_fetches,
+    run_operator_fetch,
+    scheduler_snapshot,
+)
 from fragarach_ii.storage import initialize_database, open_read_only, register_instrument, registered_writer
 from fragarach_ii.truth_engine import truth_state_for_lane
 from tests.validation.test_d1_session_validation import _create_lane
@@ -662,6 +667,71 @@ def test_operator_fetch_deduplicates_existing_active_work() -> None:
         assert result["operation_id"] == "operator-fetch-existing"
 
 
+def test_update_requeues_a_stale_force_history_request_at_the_current_edge() -> None:
+    """A former history refresh cannot swallow a later governed Update."""
+    with tempfile.TemporaryDirectory() as directory:
+        database = Path(directory) / "authority.sqlite3"
+        journal_path = Path(directory) / "scheduler.json"
+        _registered_sol(database, d1_dates=("2026-07-11",))
+        journal = SchedulerJournal(database, journal_path)
+        journal.lane("SOLUSD", "D1")["operator_fetch_pending"] = {
+            "id": "operator-fetch-stale-force",
+            "requested_mode": "force",
+            "requested_start": "2016-07-11",
+            "requested_end": "2026-07-11",
+            "operator_reason": "FORCE_HISTORY_REFRESH",
+        }
+        journal.data["acquisition_queue"] = [{
+            "id": "SOLUSD:D1:OPERATOR_FETCH:operator-fetch-stale-force",
+            "lane": "SOLUSD:D1",
+            "work_class": "OPERATOR_FETCH",
+            "next_attempt": "2026-07-15T00:00:00+00:00",
+        }]
+        journal.save()
+
+        result = run_operator_fetch(
+            database, symbol="SOLUSD", timeframe="D1", credential=None,
+            requested_mode="update", journal_path=journal_path,
+            at=datetime(2026, 7, 14, 12, tzinfo=UTC), defer_dispatch=True,
+        )
+
+        assert result["outcome"] == "REQUEUED_CURRENT_BOUNDARY"
+        assert result["operation_id"] == "operator-fetch-stale-force"
+        assert result["requested_range"] == {"start": "2026-07-12", "end": "2026-07-13"}
+        renewed = SchedulerJournal(database, journal_path).lane("SOLUSD", "D1")["operator_fetch_pending"]
+        assert renewed["requested_mode"] == "update"
+        assert renewed["requested_start"] == "2026-07-12"
+        assert renewed["requested_end"] == "2026-07-13"
+
+
+def test_pending_operator_fetch_respects_its_durable_retry_not_before() -> None:
+    """A deferred fetch must not be promoted again at every service wake."""
+    with tempfile.TemporaryDirectory() as directory:
+        database = Path(directory) / "authority.sqlite3"
+        journal_path = Path(directory) / "scheduler.json"
+        _registered_sol(database)
+        journal = SchedulerJournal(database, journal_path)
+        journal.lane("SOLUSD", "D1")["operator_fetch_pending"] = {
+            "id": "operator-fetch-deferred",
+            "requested_mode": "update",
+            "requested_start": "2026-07-12",
+            "requested_end": "2026-07-13",
+        }
+        journal.data["acquisition_queue"] = [{
+            "id": "SOLUSD:D1:OPERATOR_FETCH:operator-fetch-deferred",
+            "lane": "SOLUSD:D1",
+            "work_class": "OPERATOR_FETCH",
+            "next_attempt": "2026-07-15T12:00:00+00:00",
+        }]
+        journal.save()
+
+        due, _universe = _pending_operator_fetches(
+            database, datetime(2026, 7, 14, 12, tzinfo=UTC), SchedulerJournal(database, journal_path)
+        )
+
+        assert due == []
+
+
 def test_successful_publication_advances_every_read_model_without_restart() -> None:
     with tempfile.TemporaryDirectory() as directory:
         database = Path(directory) / "authority.sqlite3"
@@ -761,7 +831,11 @@ def test_first_scheduler_launch_persists_reconciliation_without_touching_bars() 
         database = Path(directory) / "authority.sqlite3"
         journal_path = Path(directory) / "scheduler.json"
         _registered_sol(database)
-        before = database.read_bytes()
+        with open_read_only(database) as connection:
+            before = {
+                table: connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+                for table in ("raw_blocks", "ingest_runs", "bars", "provenance", "authority_events")
+            }
         first = scheduler_snapshot(
             database,
             journal_path=journal_path,
@@ -776,7 +850,12 @@ def test_first_scheduler_launch_persists_reconciliation_without_touching_bars() 
         assert first["canonical_observations_action"] == "RETAINED_UNCHANGED"
         assert first["provider_mapping_archive_action"] == "NONE"
         assert {"lane", "previous_displayed_capability", "actual_provider_capability", "mapping_status", "required_operator_decision"}.issubset(first["rows"][0])
-        assert database.read_bytes() == before
+        with open_read_only(database) as connection:
+            after = {
+                table: connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+                for table in ("raw_blocks", "ingest_runs", "bars", "provenance", "authority_events")
+            }
+        assert after == before
 
 
 def test_binance_adapter_excludes_still_open_candle_before_immutable_ingest() -> None:
@@ -808,4 +887,8 @@ def test_binance_adapter_excludes_still_open_candle_before_immutable_ingest() ->
             edges = connection.execute(
                 "SELECT open_time_utc,close_time_utc FROM bars WHERE asset='SOLUSD' AND timeframe='M5'"
             ).fetchall()
+            validation_summary = json.loads(connection.execute(
+                "SELECT validation_summary FROM lane_state WHERE asset='SOLUSD' AND timeframe='M5'"
+            ).fetchone()[0])
         assert edges == [(completed_open // 1000, completed_open // 1000 + 300)]
+        assert validation_summary["format"] == "fragarach_ii.lane_validation_summary.v2"

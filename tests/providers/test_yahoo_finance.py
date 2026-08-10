@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from fragarach_ii.providers.yahoo_finance import acquire_yahoo
 from fragarach_ii.providers.twelve_data import AcquisitionError
 from fragarach_ii.acquisition_orchestrator import classify_failure
-from fragarach_ii.storage import RegistrationCandidate, initialize_database, register_instrument
+from fragarach_ii.storage import RegistrationCandidate, initialize_database, open_read_only, register_instrument
 
 
 def _epoch(day: str) -> int:
@@ -77,6 +77,12 @@ def test_yahoo_row_local_ohlc_rejection_preserves_valid_observations(tmp_path):
     assert result["rejections"] == (
         {"source_row_number": 2, "code": "INVALID_OHLC", "message": "high is below close"},
     )
+    with open_read_only(database) as connection:
+        summary = json.loads(connection.execute(
+            "SELECT validation_summary FROM lane_state WHERE asset='ASXCBA' AND timeframe='D1'"
+        ).fetchone()[0])
+    assert summary["format"] == "fragarach_ii.lane_validation_summary.v1"
+    assert summary["calendar_id"] == "AUSTRALIAN_EQUITIES_D1_V1"
 
 
 def test_yahoo_empty_valid_rows_is_retryable_provider_response(tmp_path):
@@ -99,7 +105,7 @@ def test_yahoo_empty_valid_rows_is_retryable_provider_response(tmp_path):
             provider_symbol_override="DE", fetch=lambda _url: body,
         )
     except AcquisitionError as error:
-        assert error.code == "INVALID_RESPONSE"
-        assert classify_failure(error)[0] == "TWELVEDATA_INVALID_RESPONSE"
+        assert error.code == "PROVIDER_D1_NOT_READY"
+        assert classify_failure(error)[0] == "PROVIDER_D1_NOT_READY"
     else:
         raise AssertionError("an empty Yahoo daily response must not be accepted")

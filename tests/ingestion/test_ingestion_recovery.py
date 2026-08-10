@@ -95,7 +95,10 @@ class IngestionRecoveryTests(unittest.TestCase):
             for reader in readers:
                 self.assertEqual(reader.execute("SELECT count(*) FROM bars").fetchone()[0], 0)
                 reader.commit()
-                self.assertEqual(reader.execute("SELECT count(*) FROM bars").fetchone()[0], 2)
+                # At 12:00 UTC the 2026-07-10 FX D1 session has not reached
+                # its governed New York close. The reader sees the newly
+                # committed, completed 2026-07-09 bar only.
+                self.assertEqual(reader.execute("SELECT count(*) FROM bars").fetchone()[0], 1)
         finally:
             for reader in readers:
                 reader.close()
@@ -115,4 +118,3 @@ class IngestionRecoveryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

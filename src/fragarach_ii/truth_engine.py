@@ -10,6 +10,7 @@ from typing import Any
 from .freshness import assess_lane_freshness, authority_revision_for_lane, normalized_utc
 from .storage import open_read_only
 from .retirement import is_permanently_removed,is_retired
+from .validation.price_outliers import assess_lane_price_quality
 
 
 TRUTH_STATE_CONTRACT = "fragarach_ii.truth_state.v1"
@@ -53,7 +54,7 @@ def truth_state_for_lane(
     try:
         registration = connection.execute(
             """
-            SELECT provider_id,provider_contract,provider_symbol,registration_status
+            SELECT provider_id,provider_contract,provider_symbol,registration_status,asset_class
             FROM instrument_registrations WHERE asset=? AND timeframe='D1'
             """,
             (symbol,),
@@ -94,6 +95,12 @@ def truth_state_for_lane(
         authority_revision = authority_revision_for_lane(
             connection, symbol=symbol, timeframe=timeframe
         )
+        price_quality = assess_lane_price_quality(
+            connection,
+            symbol=symbol,
+            timeframe=timeframe,
+            asset_class=str(registration[4]),
+        )
         return _calculate(
             symbol,
             timeframe,
@@ -104,6 +111,7 @@ def truth_state_for_lane(
             freshness,
             authority_revision,
             authority_generated,
+            price_quality,
         )
     finally:
         connection.close()
@@ -138,6 +146,7 @@ def truth_state_from_persisted_facts(
     freshness: dict[str, object],
     authority_revision: str,
     authority_generated: str | None = None,
+    price_quality: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Build TruthState from an already-indexed Estate projection row.
 
@@ -149,6 +158,7 @@ def truth_state_from_persisted_facts(
         symbol, timeframe, registration, range_row, validation,
         ("ESTATE_PROJECTION",) if ledger_bound else None, freshness,
         authority_revision, authority_generated,
+        price_quality,
     )
 
 
@@ -162,6 +172,7 @@ def _calculate(
     freshness=None,
     authority_revision="UNPUBLISHED_TEST_AUTHORITY",
     authority_generated=None,
+    price_quality=None,
 ):
     row_count, earliest, latest, latest_close = range_row
     if freshness is None:
@@ -207,12 +218,17 @@ def _calculate(
         validation, timeframe=timeframe, latest=latest, latest_close=latest_close,
     )
     validation_state, integrity_score = _integrity(validation)
+    price_quality_failed = bool(
+        price_quality and price_quality.get("state") == "FAILED"
+    )
+    if price_quality_failed:
+        validation_state, integrity_score = "FAILED", 0
     intraday=bool(validation and validation.get("format")=="fragarach_ii.lane_validation_summary.v2")
     expected = validation.get("expected_interval_count" if intraday else "expected_session_count") if validation else None
     present = validation.get("present_expected_interval_count" if intraday else "present_expected_session_count") if validation else None
     missing = validation.get("missing_expected_interval_count" if intraday else "missing_expected_session_count") if validation else None
     continuity_score = _continuity(validation, expected, present, missing)
-    if validation_stale:
+    if validation_stale and not price_quality_failed:
         # A persisted validation summary is a point-in-time audit.  Once the
         # canonical edge has moved beyond its checked boundary it cannot be
         # used to claim current gaps or reduce live operational health.  Keep
@@ -246,7 +262,7 @@ def _calculate(
         "freshness": {"score": freshness_score, "basis": freshness["reason_code"]},
         "integrity": {
             "score": integrity_score,
-            "basis": "STALE_VALIDATION_SNAPSHOT" if validation_stale else validation_state,
+            "basis": "EXTREME_PRICE_OUTLIER" if price_quality_failed else "STALE_VALIDATION_SNAPSHOT" if validation_stale else validation_state,
         },
         "historical_depth": {"score": depth_score, "basis": depth_basis},
         "continuity": {
@@ -272,15 +288,23 @@ def _calculate(
     )
     if truth_score == 100 and any(score < 100 for score in measured.values()):
         truth_score = 99
-    state = "GREEN" if truth_score >= 80 else "AMBER" if truth_score >= 50 else "RED"
-    if freshness.get("severity") == "CRITICAL":
+    # ``authority_state`` is the operational work signal shown in the Estate
+    # scorecards.  Quality-score deductions (for example history depth or a
+    # legacy validation warning) remain explainable in the score, but must not
+    # be represented as a lane that needs an update when its current edge is
+    # already complete.  Freshness is the governed source of update work.
+    if price_quality_failed or freshness.get("severity") in {"CRITICAL", "UNAVAILABLE"}:
         state = "RED"
-    elif freshness.get("state") == "Behind" and state == "GREEN":
+    elif freshness.get("state") == "Behind":
         state = "AMBER"
+    else:
+        state = "GREEN"
     limitations = [name.upper() + "_NOT_MEASURED" for name, item in components.items() if item["score"] is None]
     if validation_stale:
         limitations = [item for item in limitations if item not in {"INTEGRITY_NOT_MEASURED", "CONTINUITY_NOT_MEASURED"}]
         limitations.append("VALIDATION_SNAPSHOT_STALE")
+    if price_quality_failed:
+        limitations.append("EXTREME_PRICE_OUTLIER")
     result = {
         "contract": TRUTH_STATE_CONTRACT,
         "engine_version": TRUTH_ENGINE_VERSION,
@@ -297,7 +321,7 @@ def _calculate(
         "provider_score": None,
         "authority_state": state,
         "evidence_integrity": {
-            "state": "Healthy" if validation_state == "PASS" else "Attention" if validation_state == "WARNING" else "Not current" if validation_state == "STALE" else "Limited",
+            "state": "Critical" if price_quality_failed else "Healthy" if validation_state == "PASS" else "Attention" if validation_state == "WARNING" else "Not current" if validation_state == "STALE" else "Limited",
             "score": integrity_score,
         },
         "freshness_dimension": {
@@ -308,13 +332,14 @@ def _calculate(
         "overall_operational_state": (
             "Critical" if state == "RED" else "Attention" if state == "AMBER" else "Healthy"
         ),
-        "operational_state_label": f"{'Valid' if validation_state == 'PASS' else 'Validation snapshot stale' if validation_state == 'STALE' else 'Incomplete'} · {freshness.get('operational_state', freshness.get('state'))}",
+        "operational_state_label": f"{'Extreme price outlier' if price_quality_failed else 'Valid' if validation_state == 'PASS' else 'Validation snapshot stale' if validation_state == 'STALE' else 'Incomplete'} · {freshness.get('operational_state', freshness.get('state'))}",
         "validation_state": validation_state,
         "caodt": caodt,
         "latest_canonical_observation": caodt,
         "authority_revision": authority_revision,
         "freshness": freshness,
         "validation": {"state": validation_state, "summary": validation, "snapshot_stale": validation_stale},
+        "price_quality": price_quality or {"state": "NOT_MEASURED", "outlier_count": 0, "findings": []},
         "gap_classification": gap_classification,
         "gap_impact": gap_impact,
         "coverage": {

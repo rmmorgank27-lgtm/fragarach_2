@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterable
@@ -12,6 +13,9 @@ from .storage import initialize_database, open_read_only, registered_writer, tra
 
 
 STATE_CONTRACT = "fragarach_ii.scheduler_state_store.v1"
+_AUDIT_ID_CACHE_LOCK = threading.Lock()
+_AUDIT_ID_CACHE: dict[tuple[str, int | None, int | None, str], set[str]] = {}
+_AUDIT_ID_CACHE_INITIALIZED: set[tuple[str, int | None, int | None, str]] = set()
 
 
 def _canonical(value: object) -> str:
@@ -35,9 +39,36 @@ class SchedulerStateStore:
         journal = Path(journal_path).expanduser().resolve()
         digest = hashlib.sha256(str(journal).encode("utf-8")).hexdigest()
         self.state_key = f"SCHEDULER_V1:{digest}"
+        self._bind_audit_cache()
+
+    def _bind_audit_cache(self) -> None:
+        try:
+            identity = self.database_path.stat()
+            device, inode = identity.st_dev, identity.st_ino
+        except OSError:
+            device, inode = None, None
+        self._audit_cache_key = (
+            str(self.database_path), device, inode, self.state_key,
+        )
+        # A scheduler save can happen at several stages of one provider
+        # request.  The journal's hot history deliberately overlaps between
+        # those saves, so repeatedly issuing an ON CONFLICT probe for every
+        # already-persisted event turns an append-only audit into a large
+        # random-index workload. Keep one cache per database identity and state
+        # key for the entire process—not per SchedulerStateStore instance,
+        # because each scheduler cycle constructs a fresh journal facade.
+        with _AUDIT_ID_CACHE_LOCK:
+            self._known_audit_event_ids = _AUDIT_ID_CACHE.setdefault(
+                self._audit_cache_key, set()
+            )
 
     def ensure(self) -> None:
         initialize_database(self.database_path)
+        # A new test/operator database may not have existed at construction.
+        # Bind again after creation so subsequent journal facades share its
+        # stable filesystem identity rather than the pre-creation placeholder.
+        if self._audit_cache_key[1] is None:
+            self._bind_audit_cache()
 
     def load(self) -> dict[str, object] | None:
         try:
@@ -63,6 +94,12 @@ class SchedulerStateStore:
 
         payload = _canonical(state)
         audit_events = tuple(_audit_events(self.state_key, audit_state or state))
+        self._initialize_known_audit_event_ids(audit_events)
+        with _AUDIT_ID_CACHE_LOCK:
+            pending_audit_events = tuple(
+                event for event in audit_events
+                if event[0] not in self._known_audit_event_ids
+            )
         now = _utc_now()
         with registered_writer(self.database_path) as connection:
             with transaction(connection):
@@ -83,17 +120,47 @@ class SchedulerStateStore:
                     """,
                     (self.state_key, payload, revision, now),
                 )
-                connection.executemany(
-                    """
-                    INSERT INTO scheduler_audit_events
-                        (event_id, state_key, category, lane_id, occurred_at_utc,
-                         payload_json, payload_sha256)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(event_id) DO NOTHING
-                    """,
-                    audit_events,
-                )
+                if pending_audit_events:
+                    connection.executemany(
+                        """
+                        INSERT INTO scheduler_audit_events
+                            (event_id, state_key, category, lane_id, occurred_at_utc,
+                             payload_json, payload_sha256)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(event_id) DO NOTHING
+                        """,
+                        pending_audit_events,
+                    )
+                with _AUDIT_ID_CACHE_LOCK:
+                    self._known_audit_event_ids.update(
+                        event[0] for event in pending_audit_events
+                    )
         return revision
+
+    def _initialize_known_audit_event_ids(
+        self, audit_events: tuple[tuple[str, str, str, str | None, str, str, str], ...],
+    ) -> None:
+        """Prime the cache without probing the multi-gigabyte audit index.
+
+        Runtime state and its projected audit events are committed by ``save``
+        in one SQLite transaction. Therefore, if the runtime row already
+        exists, every event represented by that loaded state was committed
+        with it. A fresh database has no runtime row and correctly leaves the
+        cache empty so the initial events are inserted.
+        """
+        with _AUDIT_ID_CACHE_LOCK:
+            if self._audit_cache_key in _AUDIT_ID_CACHE_INITIALIZED:
+                return
+            with open_read_only(self.database_path) as connection:
+                runtime_exists = connection.execute(
+                    "SELECT 1 FROM scheduler_runtime_state WHERE state_key=?",
+                    (self.state_key,),
+                ).fetchone() is not None
+            if runtime_exists:
+                self._known_audit_event_ids.update(
+                    event[0] for event in audit_events
+                )
+            _AUDIT_ID_CACHE_INITIALIZED.add(self._audit_cache_key)
 
 
 def _audit_events(

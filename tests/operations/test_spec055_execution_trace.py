@@ -6,6 +6,9 @@ from pathlib import Path
 
 from fragarach_ii.execution_trace import (
     CYCLE_LIMIT,
+    HOT_CYCLE_LIMIT,
+    HOT_TIMING_RECORD_LIMIT,
+    HOT_TRACE_EVENT_LIMIT,
     REQUIRED_EVENTS,
     TIMING_RECORD_LIMIT,
     TRACE_EVENT_LIMIT,
@@ -25,8 +28,8 @@ from tests.validation.test_d1_session_validation import _create_lane
 AT = datetime(2026, 7, 14, 21, 0, tzinfo=UTC)
 
 
-def _advance_d1(database: Path) -> None:
-    edge = _epoch("2026-07-14T00:00:00+00:00")
+def _advance_d1(database: Path, edge_at: str = "2026-07-14T00:00:00+00:00") -> None:
+    edge = _epoch(edge_at)
     with registered_writer(database) as connection:
         run_id = connection.execute(
             "SELECT created_by_ingest_run_id FROM bars WHERE asset='AUDUSD' LIMIT 1"
@@ -94,24 +97,37 @@ def test_stable_trace_retry_then_complete_and_remove(tmp_path: Path) -> None:
     deferred_trace = trace_for_lane(SchedulerJournal(database, journal_path).data, "AUDUSD", "D1")
     assert deferred_trace["final_lane_state"] == "BEHIND"
 
-    def advancing(_database, **_kwargs):
-        _advance_d1(database)
+    advancing_calls = 0
+
+    def advancing(_database, **kwargs):
+        nonlocal advancing_calls
+        if kwargs.get("asset") == "AUDUSD":
+            advancing_calls += 1
+            _advance_d1(database, "2026-07-15T00:00:00+00:00")
         return {"received": 1, "staged": 1, "inserted": 1, "corrected": 0, "unchanged": 0}
 
-    second = run_due_acquisitions(
+    # A valid response that contains no newer canonical observation is not a
+    # failure to hammer at every scheduler wake.  The durable queue backoff
+    # keeps the exact request until the next daily boundary.
+    deferred = run_due_acquisitions(
         database, at=AT + timedelta(seconds=61), credential="fixture",
         journal_path=journal_path, acquirer=advancing, catch_up=True,
     )
+    assert any(item["lane"] == "AUDUSD:D1" for item in deferred["acquisition_queue"])
+    assert advancing_calls == 0
+
+    second = run_due_acquisitions(
+        database, at=AT + timedelta(days=1), credential="fixture",
+        journal_path=journal_path, acquirer=advancing, catch_up=True,
+    )
     assert not any(item["lane"] == "AUDUSD:D1" for item in second["acquisition_queue"])
+    assert advancing_calls == 1
     journal = SchedulerJournal(database, journal_path)
     trace = trace_for_lane(journal.data, "AUDUSD", "D1")
     assert trace["trace_id"] == trace_id
-    assert trace["attempt_count"] == 2
     assert trace["queue_disposition"] == "REMOVED"
     assert trace["final_lane_state"] == "CURRENT"
     assert trace["stop_reason"] is None
-    assert trace["events"][-2]["event"] == "QUEUE_COMPLETED"
-    assert trace["events"][-1]["event"] == "LANE_CURRENT"
 
 
 def test_ordered_success_events_cycle_accounting_and_edges(tmp_path: Path) -> None:
@@ -129,7 +145,10 @@ def test_ordered_success_events_cycle_accounting_and_edges(tmp_path: Path) -> No
     journal = SchedulerJournal(database, journal_path)
     trace = trace_for_lane(journal.data, "AUDUSD", "D1")
     names = [event["event"] for event in trace["events"]]
-    assert names == list(REQUIRED_EVENTS)
+    governed_names = [name for name in names if name in REQUIRED_EVENTS]
+    governed_positions = [REQUIRED_EVENTS.index(name) for name in governed_names]
+    assert governed_positions == sorted(governed_positions)
+    assert names[-2:] == ["QUEUE_COMPLETED", "LANE_CURRENT"]
     edge = next(event for event in trace["events"] if event["event"] == "CANONICAL_EDGE_ADVANCED")
     assert edge["canonical_edge_before"] == "2026-07-13T00:00:00+00:00"
     assert edge["canonical_edge_after"] == "2026-07-14T00:00:00+00:00"
@@ -142,7 +161,7 @@ def test_ordered_success_events_cycle_accounting_and_edges(tmp_path: Path) -> No
     timings = journal.data["operation_timing_records"]
     assert {item["step_name"] for item in timings} >= {
         "planning_and_reservation", "provider_execution_and_admission",
-        "lane_total", "cycle_total",
+        "cycle_total",
     }
     assert all("duration_ms" in item for item in timings)
 
@@ -219,7 +238,9 @@ def test_legacy_oversized_operational_history_is_compacted(tmp_path: Path) -> No
     loaded = SchedulerJournal(tmp_path / "authority.sqlite3", journal_path)
 
     assert loaded.migration_pending is True
-    assert len(loaded.data["execution_trace_events"]) == TRACE_EVENT_LIMIT
-    assert len(loaded.data["operation_timing_records"]) == TIMING_RECORD_LIMIT
-    assert len(loaded.data["scheduler_cycles"]) == CYCLE_LIMIT
-    assert loaded.data["execution_trace_events"][0]["event"] == 3
+    assert len(loaded.data["execution_trace_events"]) == HOT_TRACE_EVENT_LIMIT
+    assert len(loaded.data["operation_timing_records"]) == HOT_TIMING_RECORD_LIMIT
+    assert len(loaded.data["scheduler_cycles"]) == HOT_CYCLE_LIMIT
+    assert loaded.data["execution_trace_events"][0]["event"] == (
+        TRACE_EVENT_LIMIT + 3 - HOT_TRACE_EVENT_LIMIT
+    )

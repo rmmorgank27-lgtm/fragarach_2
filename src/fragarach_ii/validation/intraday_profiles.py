@@ -17,11 +17,17 @@ class IntradayProfile:
 def profile_for(asset_class:str,timeframe:str)->IntradayProfile:
     asset_class=asset_class.upper();timeframe=timeframe.upper()
     if timeframe not in DURATIONS:raise ValueError(f"UNSUPPORTED_TIMEFRAME: {timeframe}")
-    family={"FX":"fx/FX","METALS":"metals/METALS","CRYPTO":"crypto/CRYPTO"}.get(asset_class)
+    family={
+        "FX":"fx/FX",
+        "METALS":"metals/METALS",
+        "CRYPTO":"crypto/CRYPTO",
+        "ENERGY":"energy/ENERGY",
+    }.get(asset_class)
     if family is None:raise ValueError(f"INTRADAY_PROFILE_NOT_COMMISSIONED: {asset_class}")
     path=Path(__file__).resolve().parents[3]/"constitution"/"authorities"/f"{family}_{timeframe}_AUTHORITY_V1.md"
     checksum=hashlib.sha256(path.read_bytes()).hexdigest()
     if asset_class=="CRYPTO":return IntradayProfile(asset_class,timeframe,"CRYPTO_24X7_UTC_V1","CRYPTO_CONTINUOUS_UTC_V1","UTC",True,checksum)
+    if asset_class=="ENERGY":return IntradayProfile(asset_class,timeframe,"ENERGY_REFERENCE_24X5_NEW_YORK_ROLLOVER_V1","ENERGY_REFERENCE_DAILY_SESSION_V1","America/New_York",False,checksum)
     prefix="FX" if asset_class=="FX" else "METALS"
     return IntradayProfile(asset_class,timeframe,f"{prefix}_24X5_NEW_YORK_ROLLOVER_V1",f"{prefix}_DAILY_SESSION_V1","America/New_York",False,checksum)
 

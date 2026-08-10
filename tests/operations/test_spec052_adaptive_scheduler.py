@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
-from fragarach_ii.adaptive_scheduler import calculate_throughput, time_triggered_pacing
+from fragarach_ii.adaptive_scheduler import (
+    calculate_throughput,
+    mixed_provider_worker_capacity,
+    time_triggered_pacing,
+)
 from fragarach_ii.acquisition_orchestrator import RateBudgetController
 from fragarach_ii.scheduler_service import _fair_bounded_selection
 from tests.operations.test_spec042_orchestrator import profile
@@ -71,7 +76,26 @@ def test_time_triggered_speed_modes_bound_workers_and_catch_up_delay() -> None:
     assert high == {"claim_limit": 55, "worker_limit": 4, "catch_up_delay_seconds": 0.0}
 
 
-def test_operator_fetch_is_first_and_reserves_capacity_during_backlog() -> None:
+def test_mixed_provider_capacity_adds_independent_provider_slots() -> None:
+    twelve = profile("TWELVE_DATA", priority=1, credential=True)
+    yahoo = profile("YAHOO_FINANCE", priority=2, limit=30)
+    binance = profile("BINANCE", priority=1, limit=600)
+    twelve = replace(twelve, concurrency_limit=4)
+    yahoo = replace(yahoo, concurrency_limit=1)
+    binance = replace(binance, concurrency_limit=2)
+
+    capacity = mixed_provider_worker_capacity((twelve, yahoo, binance))
+    balanced = time_triggered_pacing("BALANCED", provider_worker_limit=capacity)
+
+    assert capacity == 7
+    assert balanced == {
+        "claim_limit": 7,
+        "worker_limit": 7,
+        "catch_up_delay_seconds": 1.0,
+    }
+
+
+def test_current_cadence_leads_and_operator_fetch_keeps_one_bounded_slot() -> None:
     work = [item(index) for index in range(20)] + [
         item(100, work_class="OPERATOR_RETRY", priority="RETRY_QUEUE"),
         item(101, work_class="OPERATOR_FETCH", priority="OPERATOR_FETCH"),
@@ -83,10 +107,33 @@ def test_operator_fetch_is_first_and_reserves_capacity_during_backlog() -> None:
         data = {"fairness_cursor": 0}
 
     selected = _fair_bounded_selection(work, 6, Journal())
-    assert selected[0]["work_class"] == "OPERATOR_FETCH"
-    assert selected[1]["work_class"] == "NORMAL"
-    assert selected[-1]["work_class"] != "OPERATOR_RETRY"
+    assert selected[0]["work_class"] == "NORMAL"
+    assert selected[1]["work_class"] == "OPERATOR_FETCH"
+    assert sum(value["work_class"] == "OPERATOR_FETCH" for value in selected) == 1
+    assert all(value["work_class"] != "OPERATOR_RETRY" for value in selected)
     assert target["reserved_capacity"] == 0  # the 5-credit plan margin is the shared reserve
+
+
+def test_higher_cadence_retry_preempts_lower_cadence_current_boundary() -> None:
+    work = [
+        {
+            **item(1, priority="RETRY_QUEUE"),
+            "symbol": "FDX", "timeframe": "D1",
+        },
+        {
+            **item(2, work_class="NORMAL", priority="CURRENT_BOUNDARY"),
+            "symbol": "LINKUSD", "timeframe": "H1",
+        },
+    ]
+
+    class Journal:
+        data = {"fairness_cursor": 0}
+
+    selected = _fair_bounded_selection(work, 8, Journal())
+
+    assert [(value["symbol"], value["timeframe"]) for value in selected] == [
+        ("FDX", "D1"),
+    ]
 
 
 def test_provider_budget_exhaustion_never_exposes_capacity() -> None:

@@ -15,6 +15,7 @@ from fragarach_ii.providers import AcquisitionError, acquire_twelve_data
 from fragarach_ii.providers.maximum_history import acquire_maximum_twelve_data
 from fragarach_ii.providers.config import load_provider_config
 from fragarach_ii.providers.http import HttpRequest, HttpResponse, ResponseTooLarge
+from fragarach_ii.providers.twelve_data import _provider_timezone
 from fragarach_ii.storage import open_read_only, verify_integrity, RegistrationCandidate, register_instrument
 from fragarach_ii.storage.schema import APPLICATION_TABLES
 
@@ -192,11 +193,43 @@ class TwelveDataAcquisitionTests(unittest.TestCase):
         target = transport.requests[0].target
         self.assertEqual(
             target,
-            "/time_series?format=JSON&interval=1day&order=ASC&start_date=2026-07-09T00%3A00%3A00&end_date=2026-07-10T23%3A59%3A59&symbol=AUD%2FUSD&timezone=UTC",
+            "/time_series?format=JSON&interval=1day&order=ASC&start_date=2026-07-09&end_date=2026-07-10&outputsize=2&symbol=AUD%2FUSD&timezone=UTC",
         )
         self.assertNotIn("test-secret-value", target)
         self.assertNotIn("test-secret-value", result.as_json())
         self.assertEqual(result.provider_symbol, "AUD/USD")
+
+    def test_daily_provider_timezone_matches_the_governed_session(self) -> None:
+        self.assertEqual(_provider_timezone("FX", "D1", "UTC"), "UTC")
+        self.assertEqual(_provider_timezone("METALS", "D1", "UTC"), "UTC")
+        self.assertEqual(_provider_timezone("US_EQUITIES", "D1", "UTC"), "America/New_York")
+        self.assertEqual(_provider_timezone("CRYPTO", "D1", "UTC"), "UTC")
+
+    def test_single_day_history_request_uses_end_bounded_date_only_window(self) -> None:
+        body = json.dumps(
+            {
+                "meta": {"symbol": "AUD/USD", "interval": "1day"},
+                "values": [
+                    {
+                        "datetime": "2026-07-10",
+                        "open": "0.65",
+                        "high": "0.66",
+                        "low": "0.64",
+                        "close": "0.655",
+                    }
+                ],
+                "status": "ok",
+            }
+        ).encode()
+
+        _, transport = self.acquire(
+            body, from_date="2026-07-10", through_date="2026-07-10"
+        )
+
+        target = transport.requests[0].target
+        self.assertNotIn("start_date=", target)
+        self.assertIn("end_date=2026-07-10", target)
+        self.assertIn("outputsize=1", target)
 
     def test_initial_history_resolves_earliest_and_acquires_backward_in_chunks(self) -> None:
         earliest=b'{"status":"ok","datetime":"2010-01-04 00:00:00"}'
@@ -236,14 +269,15 @@ class TwelveDataAcquisitionTests(unittest.TestCase):
         first, _ = self.acquire(body)
         second, _ = self.acquire(body)
         self.assertEqual((first.inserted, first.unchanged), (2, 0))
-        self.assertEqual((second.inserted, second.unchanged), (0, 2))
+        self.assertEqual((second.inserted, second.unchanged), (0, 0))
         self.assertEqual(first.raw_block_id, second.raw_block_id)
         self.assertTrue(second.raw_block_reused)
+        self.assertTrue(second.read_only_verification)
         connection = open_read_only(self.database)
         try:
             self.assertEqual(connection.execute("SELECT count(*) FROM raw_blocks").fetchone()[0], 1)
             self.assertEqual(connection.execute("SELECT count(*) FROM bars WHERE volume IS NULL").fetchone()[0], 2)
-            self.assertEqual(connection.execute("SELECT count(*) FROM provenance").fetchone()[0], 4)
+            self.assertEqual(connection.execute("SELECT count(*) FROM provenance").fetchone()[0], 2)
         finally:
             connection.close()
 
@@ -304,6 +338,67 @@ class TwelveDataAcquisitionTests(unittest.TestCase):
                 )
             self.assertEqual(raised.exception.code, code)
             self.assertEqual(_counts(database)[:4], (0, 0, 0, 0))
+
+    def test_all_out_of_range_daily_packet_is_preserved_and_reported_not_ready(self) -> None:
+        payload = {
+            "meta": {"symbol":"AUD/USD", "interval":"1day"},
+            "values": [{
+                "datetime":"2026-07-11", "open":"0.65", "high":"0.66",
+                "low":"0.64", "close":"0.655",
+            }],
+            "status":"ok",
+        }
+        with self.assertRaises(AcquisitionError) as raised:
+            self.acquire(
+                json.dumps(payload, separators=(",", ":")).encode(),
+                from_date="2026-07-10", through_date="2026-07-10",
+                credit_authority_managed=True,
+            )
+        self.assertEqual(raised.exception.code, "PROVIDER_D1_NOT_READY")
+        with open_read_only(self.database) as connection:
+            self.assertEqual(connection.execute("SELECT count(*) FROM bars").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT count(*) FROM raw_blocks").fetchone()[0], 1)
+            run = connection.execute("SELECT status,detail FROM ingest_runs").fetchone()
+        self.assertEqual(run[0], "failed")
+        self.assertEqual(json.loads(run[1])["rejections"][0]["code"], "OUT_OF_RANGE_OBSERVATION")
+
+    def test_extreme_fx_price_outlier_is_quarantined_before_canonical_admission(self) -> None:
+        values = []
+        for day in range(1, 13):
+            values.append(
+                {
+                    "datetime": f"2026-07-{day:02d}",
+                    "open": "0.5900",
+                    "high": "1.71632" if day == 7 else "0.5960",
+                    "low": "0.5840",
+                    "close": "0.5910",
+                }
+            )
+        body = json.dumps(
+            {
+                "meta": {"symbol": "AUD/USD", "interval": "1day"},
+                "values": values,
+                "status": "ok",
+            }
+        ).encode()
+
+        result, _ = self.acquire(
+            body, from_date="2026-07-01", through_date="2026-07-12"
+        )
+
+        self.assertEqual((result.received, result.staged, result.rejected), (12, 11, 1))
+        with open_read_only(self.database) as connection:
+            bad = connection.execute(
+                "SELECT 1 FROM bars WHERE asset='AUDUSD' AND open_time_utc=strftime('%s','2026-07-07')"
+            ).fetchone()
+            detail = json.loads(
+                connection.execute(
+                    "SELECT detail FROM ingest_runs WHERE ingest_run_id=?",
+                    (result.ingest_run_id,),
+                ).fetchone()[0]
+            )
+        self.assertIsNone(bad)
+        self.assertEqual(detail["rejections"][0]["code"], "EXTREME_PRICE_OUTLIER")
 
     def test_retryable_failure_can_recover_without_duplicate_attempt_state(self) -> None:
         body = _fixture("audusd_d1_2026-07-09_2026-07-10.json")

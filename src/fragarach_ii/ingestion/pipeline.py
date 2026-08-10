@@ -136,7 +136,8 @@ def ingest_staged_batches(
             if not preserve_rejected_evidence:
                 raise ValueError("rejected staged provider evidence is not persistable")
             with transaction(connection, measurement=sqlite_write):
-                reused = _ensure_raw_blocks(connection, evidences)
+                reused_raw_block_ids = _ensure_raw_blocks(connection, evidences)
+                reused = len(reused_raw_block_ids) == len(evidences)
                 _record_active_run(
                     connection, ingest_run_id, evidence.raw_block_id, evidence.received_at, run_kind
                 )
@@ -149,16 +150,33 @@ def ingest_staged_batches(
 
         try:
             with transaction(connection, measurement=sqlite_write):
-                reused = _ensure_raw_blocks(connection, evidences)
+                reused_raw_block_ids = _ensure_raw_blocks(connection, evidences)
+                reused = len(reused_raw_block_ids) == len(evidences)
                 _record_active_run(
                     connection, ingest_run_id, evidence.raw_block_id, evidence.received_at, run_kind
                 )
-                counts = merge_staged_bars(
-                    connection,
-                    batch.bars,
-                    ingest_run_id=ingest_run_id,
-                    merge_mode=merge_mode,
-                    recorded_at=evidence.received_at,
+                # A content-addressed raw response is immutable scientific
+                # evidence.  Once all of this admission's raw blocks are
+                # already present, staging them again cannot add a canonical
+                # observation or new provenance.  Retain this attempt as an
+                # ingest run, but do not manufacture a second per-bar
+                # "UNCHANGED" event for the same source bytes.
+                bars_requiring_admission = tuple(
+                    bar for bar in batch.bars
+                    if _bar_requires_admission(
+                        connection, bar, merge_mode, reused_raw_block_ids
+                    )
+                )
+                counts = (
+                    MergeCounts()
+                    if not bars_requiring_admission
+                    else merge_staged_bars(
+                        connection,
+                        bars_requiring_admission,
+                        ingest_run_id=ingest_run_id,
+                        merge_mode=merge_mode,
+                        recorded_at=evidence.received_at,
+                    )
                 )
                 sqlite_write["rows_inserted"] = counts.inserted + counts.corrected
                 sqlite_write["rows_unchanged"] = counts.unchanged
@@ -176,7 +194,7 @@ def ingest_staged_batches(
                 )
         except BaseException as error:
             with transaction(connection, measurement=sqlite_write):
-                failure_reused = _ensure_raw_blocks(connection, evidences)
+                failure_reused = len(_ensure_raw_blocks(connection, evidences)) == len(evidences)
                 _record_active_run(
                     connection, ingest_run_id, evidence.raw_block_id, evidence.received_at, run_kind
                 )
@@ -219,10 +237,15 @@ def _combine_batches(batches: tuple[StagingBatch, ...]) -> StagingBatch:
     )
 
 
-def _ensure_raw_blocks(connection: sqlite3.Connection, evidences: tuple[RawEvidence, ...]) -> bool:
-    """Persist every source response; return whether all were already known."""
-    reused = [_ensure_raw_block(connection, evidence) for evidence in evidences]
-    return all(reused)
+def _ensure_raw_blocks(
+    connection: sqlite3.Connection, evidences: tuple[RawEvidence, ...]
+) -> frozenset[str]:
+    """Persist every source response and return the previously known raw IDs."""
+    return frozenset(
+        evidence.raw_block_id
+        for evidence in evidences
+        if _ensure_raw_block(connection, evidence)
+    )
 
 
 def _ensure_raw_block(connection: sqlite3.Connection, evidence: RawEvidence) -> bool:
@@ -248,6 +271,45 @@ def _ensure_raw_block(connection: sqlite3.Connection, evidence: RawEvidence) -> 
         ),
     )
     return False
+
+
+def _bar_requires_admission(
+    connection: sqlite3.Connection,
+    bar: object,
+    merge_mode: str,
+    reused_raw_block_ids: frozenset[str],
+) -> bool:
+    """Return whether this staged observation can add new authority.
+
+    A reused raw block may still be deliberately corrected after it was first
+    preserved as a conflict.  Only the no-op case (same canonical values), or
+    a preserve-mode conflict that has already been recorded for these exact
+    source bytes, is skipped.
+    """
+    from fragarach_ii.staging.contract import StagedBar
+
+    if not isinstance(bar, StagedBar):
+        raise TypeError("expected staged bar")
+    if bar.raw_block_id not in reused_raw_block_ids:
+        return True
+    current = connection.execute(
+        """SELECT close_time_utc,open,high,low,close,volume FROM bars
+           WHERE asset=? AND timeframe=? AND open_time_utc=?""",
+        bar.canonical_key,
+    ).fetchone()
+    if current is None:
+        return True
+    if tuple(current) == (bar.close_timestamp, *bar.values):
+        return False
+    if merge_mode == "correct":
+        return True
+    return connection.execute(
+        """SELECT 1 FROM provenance
+           WHERE raw_block_id=? AND symbol=? AND timeframe=? AND timestamp=?
+             AND source_row_number=? AND merge_action='CONFLICT_PRESERVED'
+           LIMIT 1""",
+        (bar.raw_block_id, *bar.canonical_key, bar.source_row_number),
+    ).fetchone() is None
 
 
 def _require_registration(connection: sqlite3.Connection, symbol: str, timeframe: str) -> None:
@@ -361,6 +423,7 @@ def _outcome_json(
             "duplicate_conflicting": batch.duplicate_conflicting,
             "duplicate_identical": batch.duplicate_identical,
             "raw_block_reused": reused,
+            "canonical_admission_skipped": reused,
         },
     )
 

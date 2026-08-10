@@ -13,10 +13,24 @@ import urllib.error
 import urllib.request
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode, urlparse
+
+from .external_consumer_service import (
+    _bounded_observations,
+    _direct_observation,
+    _range_available_response,
+    _range_empty_response,
+    _range_request_fields,
+)
+from .history_range_contract import (
+    LEGACY_CONSUMER_IDENTITY,
+    HistoryRangeContractError,
+    request_identity,
+    validate_range,
+)
 
 LITE_STATUS_CONTRACT = "fragarach_lite.status.v1"
 LITE_RECEIPT_CONTRACT = "fragarach_lite.replica_receipt.v1"
@@ -25,6 +39,8 @@ LITE_CATALOGUE_CONTRACT = "fragarach_lite.catalogue.v1"
 PUBLICATION_CONTRACT = "fragarach.replica_publication.v1"
 REPLICA_DATABASE_CONTRACT = "fragarach.replica_database.v1"
 _REVISION = re.compile(r"^sha256:([0-9a-f]{64})$")
+REPLICA_HOUSEKEEPING_INTERVAL_SECONDS = 63 * 60
+REPLICA_HOUSEKEEPING_CONTRACT = "fragarach_lite.housekeeping.v1"
 
 
 def utc_now() -> str:
@@ -154,6 +170,77 @@ def _configuration(paths: LitePaths) -> dict[str, Any]:
     if not isinstance(value, dict) or value.get("contract") != "fragarach_lite.configuration.v1":
         raise FragarachLiteError("LITE_NOT_CONFIGURED", str(paths.configuration))
     return value
+
+
+def _housekeeping_path(paths: LitePaths) -> Path:
+    return paths.root / "housekeeping.json"
+
+
+def _parsed_utc(value: object) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return parsed.astimezone(UTC) if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _run_replica_housekeeping(
+    paths: LitePaths,
+    registry: dict[str, Any],
+    *,
+    endpoint: str,
+    token: str,
+    timeout: float,
+    now: datetime | None = None,
+    interval_seconds: int = REPLICA_HOUSEKEEPING_INTERVAL_SECONDS,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Periodically retry retained failures without weakening verification."""
+
+    observed = (now or datetime.now(UTC)).astimezone(UTC)
+    previous = _read_json(_housekeeping_path(paths), {})
+    last_run = _parsed_utc(previous.get("last_run_at_utc") if isinstance(previous, dict) else None)
+    due = last_run is None or (observed - last_run).total_seconds() >= max(interval_seconds, 1)
+    if not due:
+        return registry, previous if isinstance(previous, dict) else {}
+
+    failed = [
+        request for request in registry.get("requests") or []
+        if isinstance(request, dict)
+        and request.get("state") == "FAILED"
+        and request.get("retention", "RETAIN") == "RETAIN"
+        and request.get("request_id")
+    ]
+    retried: list[str] = []
+    errors: list[dict[str, str]] = []
+    for request in failed:
+        try:
+            updated = _event(
+                endpoint, token, str(request["request_id"]), "ACCEPTED",
+                timeout=timeout, transferred_bytes=0, verified_bytes=0,
+            )
+            _write_local_request(paths, updated)
+            retried.append(f"{request.get('symbol')}:{request.get('timeframe')}")
+        except FragarachLiteError as error:
+            errors.append({
+                "lane": f"{request.get('symbol')}:{request.get('timeframe')}",
+                "code": error.code,
+                "error": str(error),
+            })
+
+    status = {
+        "contract": REPLICA_HOUSEKEEPING_CONTRACT,
+        "last_run_at_utc": observed.isoformat(timespec="seconds"),
+        "next_run_at_utc": (observed + timedelta(seconds=max(interval_seconds, 1))).isoformat(timespec="seconds"),
+        "failed_found": len(failed),
+        "retried": retried,
+        "errors": errors,
+        "outcome": "ISSUES_RETRIED" if retried else "RETRY_FAILED" if errors else "CLEAR",
+    }
+    _atomic_json(_housekeeping_path(paths), status)
+    if retried:
+        registry = _request_json(f"{endpoint}/v2/replication/registry", token, timeout=timeout)
+        _atomic_json(paths.selective_registry, registry)
+    return registry, status
 
 
 def _request_json(url: str, token: str, *, timeout: float) -> dict[str, Any]:
@@ -536,6 +623,9 @@ def sync_selective(paths: LitePaths, *, allow_unsigned: bool = False,
     if registry.get("contract") != "fragarach.selective_registry.v2":
         raise FragarachLiteError("INVALID_SELECTIVE_REGISTRY", str(registry.get("contract")))
     _atomic_json(paths.selective_registry, registry)
+    registry, housekeeping = _run_replica_housekeeping(
+        paths, registry, endpoint=endpoint, token=token, timeout=timeout,
+    )
     active_by_lane = {(item["symbol"], item["timeframe"]): item
                       for item in selective_active_lanes(paths)}
     admitted = 0
@@ -628,7 +718,8 @@ def sync_selective(paths: LitePaths, *, allow_unsigned: bool = False,
     latest = _request_json(f"{endpoint}/v2/replication/registry", token, timeout=timeout)
     _atomic_json(paths.selective_registry, latest)
     return {"contract": "fragarach_lite.selective_sync.v2", "admitted": admitted,
-            "active_lanes": len(selective_active_lanes(paths)), "registry": latest}
+            "active_lanes": len(selective_active_lanes(paths)), "registry": latest,
+            "housekeeping": housekeeping}
 
 
 def sync_lite(
@@ -977,15 +1068,56 @@ def market_history(
     start_utc: str,
     end_utc_exclusive: str,
     as_of_utc: str,
+    consumer: str | None = None,
+    evidence_requirement: str | None = None,
 ) -> dict[str, Any]:
     requested_symbol = symbol.strip().upper()
     requested_timeframe = timeframe.strip().upper()
+    consumer_identity = (consumer or LEGACY_CONSUMER_IDENTITY).strip()
+    if not requested_symbol or not requested_timeframe:
+        raise FragarachLiteError(
+            "INVALID_REQUEST", "symbol and timeframe are required"
+        )
+    if not consumer_identity:
+        raise FragarachLiteError("CONSUMER_REQUIRED", "consumer identity is required")
+    try:
+        start, end, as_of = validate_range(
+            start_utc, end_utc_exclusive, as_of_utc
+        )
+    except HistoryRangeContractError as error:
+        raise FragarachLiteError(error.code, str(error)) from error
+    identity = request_identity(
+        symbol=requested_symbol,
+        timeframe=requested_timeframe,
+        start=start,
+        end=end,
+        as_of=as_of,
+        consumer=consumer_identity,
+    )
+    request = _range_request_fields(
+        identity, consumer_identity, requested_symbol, requested_timeframe,
+        start, end, as_of,
+    )
+    if requested_timeframe == "M15" and evidence_requirement is not None:
+        if evidence_requirement.strip().upper() != "SYNTHETIC_PERMITTED":
+            return _lite_history_compat(_range_empty_response(
+                request,
+                availability_state="UNAVAILABLE",
+                status="SYNTHETIC_NOT_PERMITTED",
+                warnings=["SYNTHETIC_EVIDENCE_NOT_PERMITTED"],
+                evidence_class="SYNTHETIC",
+            ))
     selective = next((item for item in selective_active_lanes(paths)
                       if item.get("symbol") == requested_symbol
                       and item.get("timeframe") == requested_timeframe), None)
     receipt = active_receipt(paths) if not selective_mode(paths) else None
     if receipt is None and selective is None:
-        return _history_response("NO_REPLICA", ["NO_VERIFIED_REPLICA"])
+        return _lite_history_compat(_range_empty_response(
+            request,
+            availability_state="UNAVAILABLE",
+            status="NO_REPLICA",
+            warnings=["NO_VERIFIED_REPLICA"],
+        ))
     control = _read_json(paths.control, {})
     paused = control.get("paused_lanes") or [] if isinstance(control, dict) else []
     if any(
@@ -994,72 +1126,110 @@ def market_history(
         and item.get("timeframe") == requested_timeframe
         for item in paused
     ):
-        return _history_response("LANE_PAUSED", ["LANE_PAUSED_BY_OPERATOR"])
-    start = _timestamp(start_utc, "start_utc")
-    end = _timestamp(end_utc_exclusive, "end_utc_exclusive")
-    as_of = _timestamp(as_of_utc, "as_of_utc")
-    if end <= start:
-        raise FragarachLiteError("INVALID_TIME_WINDOW", "end must follow start")
-    upper = min(end, as_of)
+        return _lite_history_compat(_range_empty_response(
+            request,
+            availability_state="UNAVAILABLE",
+            status="LANE_PAUSED",
+            warnings=["LANE_PAUSED_BY_OPERATOR"],
+        ))
     database = Path(str(selective["database"] if selective else receipt["replica_database"]))
     connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
     try:
         canonical = _resolve_symbol(connection, requested_symbol)
         if canonical is None:
-            return _history_response("NOT_REGISTERED", ["SYMBOL_NOT_REGISTERED"])
+            return _lite_history_compat(_range_empty_response(
+                request,
+                availability_state="UNAVAILABLE",
+                status="NOT_REGISTERED",
+                warnings=["SYMBOL_NOT_REGISTERED"],
+            ))
         lane = connection.execute(
-            "SELECT data_fingerprint FROM lanes WHERE symbol=? AND timeframe=?",
+            """SELECT data_fingerprint,first_bar_utc
+               FROM lanes WHERE symbol=? AND timeframe=?""",
             (canonical, requested_timeframe),
         ).fetchone()
         if lane is None:
-            return _history_response("TIMEFRAME_NOT_ACTIVE", ["TIMEFRAME_NOT_ACTIVE"])
+            return _lite_history_compat(_range_empty_response(
+                {**request, "symbol": canonical},
+                availability_state="UNAVAILABLE",
+                status="TIMEFRAME_NOT_ACTIVE",
+                warnings=["TIMEFRAME_NOT_ACTIVE"],
+            ))
+        registration = connection.execute(
+            """SELECT asset_class,calendar_id FROM registrations
+               WHERE symbol=?""",
+            (canonical,),
+        ).fetchone()
         rows = connection.execute(
             """SELECT open_time_utc,close_time_utc,open,high,low,close,volume
-               FROM bars WHERE symbol=? AND timeframe=? AND open_time_utc>=?
-                 AND open_time_utc<? AND (close_time_utc IS NULL OR close_time_utc<=?)
+               FROM bars WHERE symbol=? AND timeframe=?
+                 AND open_time_utc>=? AND open_time_utc<?
                ORDER BY open_time_utc""",
-            (canonical, requested_timeframe, int(start.timestamp()), int(upper.timestamp()), int(as_of.timestamp())),
+            (
+                canonical, requested_timeframe,
+                int(start.timestamp()), int(end.timestamp()),
+            ),
         ).fetchall()
     finally:
         connection.close()
-    if not rows:
-        return _history_response("NO_HISTORY", ["NO_HISTORY_IN_REQUESTED_WINDOW"])
-    digest = hashlib.sha256()
-    bars = []
-    for row in rows:
-        canonical_row = json.dumps(
-            [canonical, requested_timeframe, *row], ensure_ascii=False, separators=(",", ":")
-        ).encode("utf-8") + b"\n"
-        digest.update(canonical_row)
-        bars.append(
-            {
-                "timestamp": _iso_epoch(row[0]),
-                "close_timestamp": _iso_epoch(row[1]) if row[1] is not None else None,
-                "open": row[2],
-                "high": row[3],
-                "low": row[4],
-                "close": row[5],
-                "volume": row[6],
-            }
-        )
+    try:
+        candidates = [
+            _direct_observation(
+                row,
+                timeframe=requested_timeframe,
+                asset_class=str(registration[0] if registration else "UNKNOWN"),
+                calendar_id=(str(registration[1]) if registration and registration[1] else None),
+                exchange_name=None,
+                symbol=canonical,
+            )
+            for row in rows
+        ]
+    except (RuntimeError, ValueError) as error:
+        return _lite_history_compat(_range_empty_response(
+            {**request, "symbol": canonical},
+            availability_state="UNSUPPORTED",
+            status="COMPLETION_AUTHORITY_UNAVAILABLE",
+            warnings=[f"COMPLETION_AUTHORITY_UNAVAILABLE: {error}"],
+        ))
+    observations = _bounded_observations(candidates, start, end, as_of)
     source = selective if selective else receipt
     warnings = ["REPLICA_SIGNATURE_NOT_COMMISSIONED"] if source.get("signature_state") != "SIGNED" else []
-    return {
-        "contract": LITE_HISTORY_CONTRACT,
-        "status": "AVAILABLE_WITH_WARNINGS" if warnings else "AVAILABLE",
-        "warnings": warnings,
-        "symbol": canonical,
-        "timeframe": requested_timeframe,
-        "requested_start_utc": start_utc,
-        "requested_end_utc_exclusive": end_utc_exclusive,
-        "as_of_utc": as_of_utc,
-        "fulfilled_start_utc": bars[0]["timestamp"],
-        "fulfilled_end_utc_exclusive": _iso_epoch(rows[-1][1]) if rows[-1][1] else None,
-        "bar_count": len(bars),
-        "bars": bars,
-        "data_fingerprint": f"sha256:{digest.hexdigest()}",
-        "source_receipt": selective if selective else receipt,
-    }
+    if requested_timeframe == "M15" and evidence_requirement is None:
+        warnings.append("LEGACY_SYNTHETIC_PERMISSION_CONTEXT")
+    lane_revision = f"sha256:{str(lane[0]).removeprefix('sha256:')}"
+    response = _range_available_response(
+        {**request, "symbol": canonical},
+        observations=observations,
+        all_observations=candidates,
+        start=start,
+        end=end,
+        as_of=as_of,
+        authority_kind="FRAGARACH_LITE_REPLICA",
+        authority_revision=str(
+            source.get("origin_authority_revision")
+            or source.get("source_revision")
+            or lane_revision
+        ),
+        source_receipt=source,
+        evidence_class="SYNTHETIC" if requested_timeframe == "M15" else "REAL",
+        additional_warnings=warnings,
+    )
+    if lane[1] is not None and datetime.fromtimestamp(int(lane[1]), UTC) > start:
+        reasons = response["truncation"]["reasons"]
+        if "REQUESTED_START_PRECEDES_AVAILABLE_HISTORY" not in reasons:
+            reasons.append("REQUESTED_START_PRECEDES_AVAILABLE_HISTORY")
+            response["warnings"].append("REQUESTED_START_PRECEDES_AVAILABLE_HISTORY")
+            response["data_quality_warnings"].append(
+                "REQUESTED_START_PRECEDES_AVAILABLE_HISTORY"
+            )
+            response["truncation"]["state"] = "TRUNCATED"
+            response["truncated"] = True
+            if observations:
+                response["availability_state"] = "PARTIAL"
+                response["coverage"]["state"] = "PARTIAL"
+                response["effective_range"]["state"] = "PARTIAL"
+                response["partial_coverage"] = True
+    return _lite_history_compat(response)
 
 
 def _history_response(status: str, warnings: list[str]) -> dict[str, Any]:
@@ -1069,6 +1239,31 @@ def _history_response(status: str, warnings: list[str]) -> dict[str, Any]:
         "warnings": warnings,
         "bar_count": 0,
         "bars": [],
+    }
+
+
+def _lite_history_compat(response: dict[str, Any]) -> dict[str, Any]:
+    """Retain every v1 Lite field while exposing the shared range contract."""
+
+    observations = response.get("observations") or []
+    availability = response.get("availability_state")
+    warnings = response.get("warnings") or []
+    legacy_status = response.get("status")
+    if availability in {"AVAILABLE", "PARTIAL"}:
+        legacy_status = "AVAILABLE_WITH_WARNINGS" if warnings else "AVAILABLE"
+    elif availability == "EMPTY":
+        legacy_status = "NO_HISTORY"
+    effective = response.get("effective_range") or {}
+    return {
+        **response,
+        "contract": LITE_HISTORY_CONTRACT,
+        "transport_contract": LITE_HISTORY_CONTRACT,
+        "status": legacy_status,
+        "fulfilled_start_utc": effective.get("start_utc"),
+        "fulfilled_end_utc_exclusive": effective.get("end_utc_exclusive"),
+        "bar_count": len(observations),
+        "bars": observations,
+        "data_fingerprint": response.get("ordered_range_fingerprint"),
     }
 
 

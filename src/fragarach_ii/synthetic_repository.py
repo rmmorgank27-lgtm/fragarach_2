@@ -11,12 +11,14 @@ import json
 import math
 import os
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from .commissioning_authority import canonical_market
 from .freshness import authority_revision_for_lane
 from .storage import open_read_only
 from .validation.intraday_profiles import profile_for
@@ -97,8 +99,17 @@ def load_registry(path: str | Path | None = None) -> dict[str, object]:
             raise SyntheticRepositoryError("DUPLICATE_REGISTRATION", ":".join(key))
         seen.add(key)
         registrations.append(registration)
+    automatic_registrations = [
+        _validate_automatic_registration_policy(dict(raw), rules)
+        for raw in payload.get("automatic_registrations", [])
+    ]
     _validate_lineage_graph(registrations)
-    return {"contract": REGISTRY_CONTRACT, "rules": rules, "registrations": registrations}
+    return {
+        "contract": REGISTRY_CONTRACT,
+        "rules": rules,
+        "registrations": registrations,
+        "automatic_registrations": automatic_registrations,
+    }
 
 
 class SyntheticRepository:
@@ -119,6 +130,7 @@ class SyntheticRepository:
 
     def activate_registry(self, *, generate_on_activation: bool = True) -> list[dict[str, object]]:
         registry = load_registry(self.registry_path)
+        registrations = self._expanded_registrations(registry)
         self.initialise()
         new_ids: list[str] = []
         with self._connect() as connection:
@@ -129,10 +141,14 @@ class SyntheticRepository:
                        rule_json=excluded.rule_json,checksum=excluded.checksum""",
                     (rule.rule_id, rule.version, _json(rule.as_dict()), rule.checksum),
                 )
-            for item in registry["registrations"]:
-                self._verify_source_authority(connection, item)
+            for item in registrations:
                 registration_id = f"{item['symbol']}:{item['target_timeframe']}"
-                if connection.execute("SELECT 1 FROM synthetic_registrations WHERE registration_id=?", (registration_id,)).fetchone() is None:
+                existing = connection.execute(
+                    "SELECT 1 FROM synthetic_registrations WHERE registration_id=?",
+                    (registration_id,),
+                ).fetchone()
+                if existing is None:
+                    self._verify_source_authority(connection, item)
                     new_ids.append(registration_id)
                 connection.execute(
                     """INSERT INTO synthetic_registrations(
@@ -164,13 +180,22 @@ class SyntheticRepository:
                     ),
                 )
         if generate_on_activation and new_ids:
-            self.generate_all()
+            self._generate_registration_ids(new_ids)
         return self.list_products(refresh_status=False)
 
     def generate_all(self, *, generated_at: datetime | None = None) -> list[dict[str, object]]:
         self.activate_registry(generate_on_activation=False)
+        active = [
+            item["id"] for item in self.list_products(refresh_status=False)
+            if item["registration_status"] == "ACTIVE"
+        ]
+        return self._generate_registration_ids(active, generated_at=generated_at)
+
+    def _generate_registration_ids(
+        self, registration_ids: list[str], *, generated_at: datetime | None = None,
+    ) -> list[dict[str, object]]:
         results = []
-        pending = {item["id"] for item in self.list_products(refresh_status=False) if item["registration_status"] == "ACTIVE"}
+        pending = set(registration_ids)
         while pending:
             progressed = False
             for registration_id in sorted(pending):
@@ -190,6 +215,67 @@ class SyntheticRepository:
                     results.append({"id": registration_id, "status": "Unavailable", "reason": "SOURCE_SYNTHETIC_UNAVAILABLE"})
                 break
         return results
+
+    def _expanded_registrations(
+        self, registry: dict[str, object],
+    ) -> list[dict[str, object]]:
+        registrations = list(registry["registrations"])
+        seen = {
+            (item["symbol"], item["target_timeframe"])
+            for item in registrations
+        }
+        with open_read_only(self.authority_database) as authority:
+            for policy in registry["automatic_registrations"]:
+                rows = authority.execute(
+                    """
+                    SELECT r.asset,r.asset_class
+                    FROM instrument_registrations AS r
+                    JOIN evidence_lanes AS lane
+                      ON lane.asset=r.asset AND lane.timeframe=?
+                    WHERE r.timeframe='D1'
+                      AND r.registration_status LIKE 'REGISTERED_%'
+                      AND EXISTS (
+                        SELECT 1 FROM bars
+                        WHERE bars.asset=r.asset AND bars.timeframe=?
+                      )
+                    ORDER BY r.asset
+                    """,
+                    (policy["source_timeframe"], policy["source_timeframe"]),
+                ).fetchall()
+                for symbol, asset_class in rows:
+                    market = canonical_market(str(asset_class))
+                    if market in policy["excluded_markets"]:
+                        continue
+                    rule_id = policy["asset_class_rules"].get(
+                        str(asset_class).strip().upper()
+                    )
+                    if rule_id is None:
+                        continue
+                    rule = registry["rules"][(rule_id, 1)]
+                    key = (str(symbol), policy["target_timeframe"])
+                    if key in seen:
+                        continue
+                    registrations.append(_validate_registration({
+                        "symbol": str(symbol),
+                        "target_timeframe": policy["target_timeframe"],
+                        "evidence_class": "SYNTHETIC",
+                        "immediate_source_symbol": str(symbol),
+                        "immediate_source_timeframe": policy["source_timeframe"],
+                        "immediate_source_evidence_class": "REAL",
+                        "originating_real_symbol": str(symbol),
+                        "originating_real_timeframe": policy["source_timeframe"],
+                        "aggregation_rule": rule.rule_id,
+                        "aggregation_rule_version": rule.version,
+                        "calendar_authority": rule.calendar,
+                        "session_alignment": (
+                            f"{rule.session_anchor} {rule.timezone}"
+                        ),
+                        "authorised_consumers": policy["authorised_consumers"],
+                        "status": policy["status"],
+                    }, registry["rules"]))
+                    seen.add(key)
+        _validate_lineage_graph(registrations)
+        return registrations
 
     def generate(self, registration_id: str, *, generated_at: datetime | None = None) -> dict[str, object]:
         self.initialise()
@@ -279,11 +365,27 @@ class SyntheticRepository:
         return self.generate_all(generated_at=generated_at)
 
     def product(self, registration_id: str, *, refresh_status: bool = True) -> dict[str, object]:
-        products = self.list_products(refresh_status=refresh_status)
-        product = next((item for item in products if item["id"] == registration_id), None)
-        if product is None:
-            raise SyntheticRepositoryError("UNREGISTERED_SYNTHETIC_PRODUCT", registration_id)
-        return product
+        if not self.path.exists():
+            raise SyntheticRepositoryError(
+                "UNREGISTERED_SYNTHETIC_PRODUCT", registration_id
+            )
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM synthetic_registrations WHERE registration_id=?",
+                (registration_id,),
+            ).fetchone()
+            if row is None:
+                raise SyntheticRepositoryError(
+                    "UNREGISTERED_SYNTHETIC_PRODUCT", registration_id
+                )
+            product = self._product_row(connection, row, refresh_status)
+            if refresh_status:
+                connection.execute(
+                    """UPDATE synthetic_registrations
+                       SET generation_status=? WHERE registration_id=?""",
+                    (product["status"], registration_id),
+                )
+            return product
 
     def list_products(self, *, refresh_status: bool = True) -> list[dict[str, object]]:
         if not self.path.exists():
@@ -301,32 +403,41 @@ class SyntheticRepository:
                     )
             return products
 
-    def observations(self, registration_id: str) -> list[dict[str, object]]:
+    def observations(
+        self, registration_id: str, *, include_provenance: bool = True,
+    ) -> list[dict[str, object]]:
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM synthetic_observations WHERE registration_id=? ORDER BY open_time_utc",
                 (registration_id,),
             ).fetchall()
-            provenance = {
-                row["target_open_time_utc"]: row for row in connection.execute(
-                    "SELECT * FROM synthetic_provenance WHERE registration_id=?", (registration_id,)
+            provenance = ({
+                row["target_open_time_utc"]: row
+                for row in connection.execute(
+                    """SELECT * FROM synthetic_provenance
+                       WHERE registration_id=?""",
+                    (registration_id,),
                 ).fetchall()
-            }
-        return [{
+            } if include_provenance else {})
+        observations = [{
             "timestamp": row["open_time_utc"], "close_time_utc": row["close_time_utc"],
             "open": row["open"], "high": row["high"], "low": row["low"], "close": row["close"],
             "volume": row["volume"], "synthetic_revision": row["synthetic_revision"],
-            "provenance": {
-                "source_observation_start": provenance[row["open_time_utc"]]["source_observation_start"],
-                "source_observation_end": provenance[row["open_time_utc"]]["source_observation_end"],
-                "source_authority_revision": provenance[row["open_time_utc"]]["source_authority_revision"],
-                "source_synthetic_revision": provenance[row["open_time_utc"]]["source_synthetic_revision"],
-                "originating_real_authority_revision": provenance[row["open_time_utc"]]["originating_real_authority_revision"],
-                "aggregation_rule_version": provenance[row["open_time_utc"]]["aggregation_rule_version"],
-                "generated_time": provenance[row["open_time_utc"]]["generated_time"],
-                "complete_lineage": json.loads(provenance[row["open_time_utc"]]["complete_lineage_json"]),
-            },
         } for row in rows]
+        if include_provenance:
+            for observation in observations:
+                source = provenance[observation["timestamp"]]
+                observation["provenance"] = {
+                    "source_observation_start": source["source_observation_start"],
+                    "source_observation_end": source["source_observation_end"],
+                    "source_authority_revision": source["source_authority_revision"],
+                    "source_synthetic_revision": source["source_synthetic_revision"],
+                    "originating_real_authority_revision": source["originating_real_authority_revision"],
+                    "aggregation_rule_version": source["aggregation_rule_version"],
+                    "generated_time": source["generated_time"],
+                    "complete_lineage": json.loads(source["complete_lineage_json"]),
+                }
+        return observations
 
     def _source(self, connection, registration, generated):
         symbol = registration["immediate_source_symbol"]
@@ -398,7 +509,7 @@ class SyntheticRepository:
                     status = parent_status
             try:
                 if status not in {"Stale", "Unavailable"}:
-                    current = self._source(connection, row, datetime.now(UTC))["revision"]
+                    current = self._current_source_revision(connection, row)
                     if current != row["source_revision"]:
                         status = "Stale"
             except SyntheticRepositoryError:
@@ -422,6 +533,35 @@ class SyntheticRepository:
             "observation_count": row["observation_count"],
             "complete_lineage": json.loads(row["complete_lineage_json"] or "[]"),
         }
+
+    def _current_source_revision(self, connection, registration):
+        symbol = registration["immediate_source_symbol"]
+        timeframe = registration["immediate_source_timeframe"]
+        if registration["immediate_source_evidence_class"] == "REAL":
+            with open_read_only(self.authority_database) as authority:
+                lane = authority.execute(
+                    """SELECT 1 FROM evidence_lanes
+                       WHERE asset=? AND timeframe=?""",
+                    (symbol, timeframe),
+                ).fetchone()
+                if lane is None:
+                    raise SyntheticRepositoryError(
+                        "SOURCE_REAL_LANE_UNAVAILABLE",
+                        f"{symbol}:{timeframe}",
+                    )
+                return authority_revision_for_lane(
+                    authority, symbol=symbol, timeframe=timeframe,
+                )
+        parent = connection.execute(
+            """SELECT synthetic_revision,content_checksum
+               FROM synthetic_registrations WHERE registration_id=?""",
+            (f"{symbol}:{timeframe}",),
+        ).fetchone()
+        if parent is None:
+            raise SyntheticRepositoryError(
+                "SOURCE_SYNTHETIC_UNAVAILABLE", f"{symbol}:{timeframe}"
+            )
+        return f"synthetic:{parent['synthetic_revision']}:{parent['content_checksum']}"
 
     def _verify_source_authority(self, connection, item):
         if item["immediate_source_evidence_class"] == "REAL":
@@ -475,12 +615,20 @@ class SyntheticRepository:
                 (registration_id, code, detail, generated.isoformat()),
             )
 
+    @contextmanager
     def _connect(self):
         connection = sqlite3.connect(self.path, timeout=30)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA journal_mode=WAL")
-        return connection
+        try:
+            yield connection
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
 
 class SyntheticConsumerService:
@@ -490,6 +638,7 @@ class SyntheticConsumerService:
     def get_product(
         self, *, symbol: str, timeframe: str, consumer: str,
         evidence_requirement: str = "REAL_ONLY", regenerate_if_stale: bool = True,
+        include_provenance: bool = True,
     ) -> dict[str, object]:
         symbol, timeframe = symbol.strip().upper(), timeframe.strip().upper()
         requirement = evidence_requirement.strip().upper()
@@ -497,7 +646,11 @@ class SyntheticConsumerService:
         try:
             product = self.repository.product(registration_id)
         except SyntheticRepositoryError:
-            return self._real_product(symbol, timeframe, requirement)
+            self.repository.activate_registry(generate_on_activation=False)
+            try:
+                product = self.repository.product(registration_id)
+            except SyntheticRepositoryError:
+                return self._real_product(symbol, timeframe, requirement)
         if consumer not in product["authorised_consumers"]:
             raise SyntheticRepositoryError("CONSUMER_NOT_AUTHORISED", f"{consumer}:{registration_id}")
         if requirement == "REAL_ONLY":
@@ -509,14 +662,16 @@ class SyntheticConsumerService:
             }
         if requirement != "SYNTHETIC_PERMITTED":
             raise SyntheticRepositoryError("INVALID_EVIDENCE_REQUIREMENT", requirement)
-        if product["status"] == "Stale" and regenerate_if_stale:
-            self.repository.generate_all()
+        if product["status"] in {"Stale", "Unavailable"} and regenerate_if_stale:
+            self.repository.generate(registration_id)
             product = self.repository.product(registration_id)
         return {
             "contract": CONSUMER_CONTRACT, "status": product["status"],
             "symbol": symbol, "timeframe": timeframe, "evidence_class": "SYNTHETIC",
             "source_lineage": product["complete_lineage"], "synthetic_revision": product["synthetic_revision"],
-            "observations": self.repository.observations(registration_id),
+            "observations": self.repository.observations(
+                registration_id, include_provenance=include_provenance,
+            ),
         }
 
     def _real_product(self, symbol, timeframe, requirement):
@@ -544,8 +699,16 @@ def notify_source_revision_advanced(authority_database, symbol, timeframe, *, re
     repository = SyntheticRepository(authority_database, repository_path, registry_path)
     if not repository.path.exists():
         return []
+    products = repository.list_products(refresh_status=False)
+    if not any(
+        item["immediate_source_symbol"] == symbol
+        and item["immediate_source_timeframe"] == timeframe
+        for item in products
+    ):
+        repository.activate_registry(generate_on_activation=False)
+        products = repository.list_products(refresh_status=False)
     dependents = [
-        item for item in repository.list_products(refresh_status=False)
+        item for item in products
         if item["immediate_source_symbol"] == symbol and item["immediate_source_timeframe"] == timeframe
     ]
     results = []
@@ -607,6 +770,52 @@ def _validate_registration(item, rules):
         raise SyntheticRepositoryError("CALENDAR_AUTHORITY_MISMATCH", f"{item['symbol']}:{item['target_timeframe']}")
     if not item["authorised_consumers"]:
         raise SyntheticRepositoryError("NO_AUTHORISED_CONSUMER", f"{item['symbol']}:{item['target_timeframe']}")
+    return item
+
+
+def _validate_automatic_registration_policy(item, rules):
+    required = {
+        "policy_id", "source_timeframe", "target_timeframe",
+        "excluded_markets", "asset_class_rules", "authorised_consumers", "status",
+    }
+    missing = required - set(item)
+    if missing:
+        raise SyntheticRepositoryError(
+            "INCOMPLETE_AUTOMATIC_REGISTRATION_POLICY",
+            ",".join(sorted(missing)),
+        )
+    item["source_timeframe"] = str(item["source_timeframe"]).upper()
+    item["target_timeframe"] = str(item["target_timeframe"]).upper()
+    item["excluded_markets"] = {
+        str(value).strip().upper() for value in item["excluded_markets"]
+    }
+    item["asset_class_rules"] = {
+        str(asset_class).strip().upper(): str(rule_id)
+        for asset_class, rule_id in item["asset_class_rules"].items()
+    }
+    if not item["authorised_consumers"]:
+        raise SyntheticRepositoryError(
+            "NO_AUTHORISED_CONSUMER", str(item["policy_id"])
+        )
+    for asset_class, rule_id in item["asset_class_rules"].items():
+        candidates = [
+            rule for (candidate_id, _), rule in rules.items()
+            if candidate_id == rule_id
+        ]
+        if len(candidates) != 1:
+            raise SyntheticRepositoryError(
+                "AGGREGATION_RULE_UNAVAILABLE",
+                f"{item['policy_id']}:{asset_class}:{rule_id}",
+            )
+        rule = candidates[0]
+        if (
+            rule.source_timeframe != item["source_timeframe"]
+            or rule.target_timeframe != item["target_timeframe"]
+        ):
+            raise SyntheticRepositoryError(
+                "RULE_RELATIONSHIP_MISMATCH",
+                f"{item['policy_id']}:{asset_class}",
+            )
     return item
 
 

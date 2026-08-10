@@ -11,6 +11,7 @@ from fragarach_ii.truth_engine import truth_state_for_lane
 from fragarach_ii.estate_truth_service import estate_truth_state
 from fragarach_ii.external_consumer_service import HistoryService,INTRADAY_CONTRACT
 from fragarach_ii.estate_timeframe_audit import audit_target_timeframes
+from fragarach_ii.validation.intraday import validate_intraday_lane
 
 NOW=datetime(2026,7,10,16,30,tzinfo=UTC)
 class Transport:
@@ -65,5 +66,32 @@ class Spec025IntradayTests(unittest.TestCase):
           {"datetime":"2026-07-13 09:30:00","open":"1","high":"2","low":"0.5","close":"1.5"}]}
         batch=stage_twelve_data_response(json.dumps(response).encode(),asset="AUDUSD",provider_symbol="AUD/USD",from_date=date(2026,7,12),through_date=date(2026,7,13),raw_block_id="raw-session",received_at="2026-07-13T15:00:00+00:00",timeframe="H1",asset_class="FX",observed_at=datetime(2026,7,13,15,tzinfo=UTC))
         self.assertEqual([row.code for row in batch.rejections],["OUTSIDE_EXPECTED_SESSION","MISALIGNED_INTERVAL_OPEN"])
+
+    def test_edge_admission_extends_intraday_validation_without_changing_full_result(self):
+        ensure_commissioned_lane(self.db,"AUDUSD","H1",observed_at="2026-07-10T01:00:00+00:00")
+        first=json.dumps({"status":"ok","meta":{"symbol":"AUD/USD","interval":"1h"},"values":[
+          {"datetime":"2026-07-10 09:00:00","open":"1","high":"2","low":"0.5","close":"1.5"},
+          {"datetime":"2026-07-10 10:00:00","open":"1.5","high":"2","low":"1","close":"1.8"},
+          {"datetime":"2026-07-10 11:00:00","open":"1.8","high":"2","low":"1.7","close":"1.9"}]},separators=(",",":")).encode()
+        acquire_twelve_data(self.db,asset="AUDUSD",timeframe="H1",from_date="2026-07-10",through_date="2026-07-10",credential="secret",transport=Transport(first),clock=lambda:NOW,sleeper=lambda _:None)
+        later=datetime(2026,7,10,17,30,tzinfo=UTC)
+        edge=json.dumps({"status":"ok","meta":{"symbol":"AUD/USD","interval":"1h"},"values":[
+          {"datetime":"2026-07-10 12:00:00","open":"1.9","high":"2.1","low":"1.8","close":"2"}]},separators=(",",":")).encode()
+        result=acquire_twelve_data(self.db,asset="AUDUSD",timeframe="H1",from_date="2026-07-10",through_date="2026-07-10",credential="secret",transport=Transport(edge),clock=lambda:later,sleeper=lambda _:None)
+        self.assertEqual(result.inserted,1)
+        with open_read_only(self.db) as connection:
+            incremental=json.loads(connection.execute("SELECT validation_summary FROM lane_state WHERE asset='AUDUSD' AND timeframe='H1'").fetchone()[0])
+        complete=validate_intraday_lane(self.db,symbol="AUDUSD",timeframe="H1",through_date="2026-07-10",persist=False,clock=lambda:later).lane_summary().as_dict()
+        self.assertEqual(incremental,complete)
+
+    def test_unchanged_provider_evidence_reuses_committed_validation(self):
+        ensure_commissioned_lane(self.db,"AUDUSD","H1",observed_at="2026-07-10T01:00:00+00:00")
+        body=json.dumps({"status":"ok","meta":{"symbol":"AUD/USD","interval":"1h"},"values":[
+          {"datetime":"2026-07-10 11:00:00","open":"1.2","high":"2","low":"1","close":"1.8"}]},separators=(",",":")).encode()
+        acquire_twelve_data(self.db,asset="AUDUSD",timeframe="H1",from_date="2026-07-10",through_date="2026-07-10",credential="secret",transport=Transport(body),clock=lambda:NOW,sleeper=lambda _:None)
+        def must_not_run(*_args,**_kwargs):raise AssertionError("unchanged authority was revalidated")
+        repeated=acquire_twelve_data(self.db,asset="AUDUSD",timeframe="H1",from_date="2026-07-10",through_date="2026-07-10",credential="secret",transport=Transport(body),clock=lambda:NOW,sleeper=lambda _:None,validator=must_not_run)
+        self.assertEqual((repeated.inserted,repeated.corrected),(0,0))
+        self.assertNotEqual(repeated.validation_calendar_id,"DEFERRED")
 
 if __name__=="__main__":unittest.main()

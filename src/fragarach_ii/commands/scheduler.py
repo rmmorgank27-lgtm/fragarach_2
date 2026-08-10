@@ -47,6 +47,7 @@ from fragarach_ii.scheduler_service import (
     update_freshness_override,
     run_operator_fetch,
 )
+from fragarach_ii.estate_audit import audit_history, audit_schedule, configure_audit_schedule
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -58,7 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
             "run", "status", "service-run", "service-status", "send-command",
             "install", "enable", "disable", "start", "stop", "restart", "update", "repair", "uninstall",
             "force-reconcile", "repair-monitor", "diagnostics", "cancel-operation", "reconcile-mutation",
-            "manual-request", "run-queue", "retry", "fetch", "m5-freshness", "scheduler-policy", "queue-bandwidth", "pause", "resume", "audit-estate",
+            "manual-request", "run-queue", "retry", "fetch", "m5-freshness", "scheduler-policy", "queue-bandwidth", "pause", "resume", "audit-estate", "audit-schedule", "audit-history",
         ),
         default="run",
     )
@@ -89,6 +90,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--temporary", action="store_true")
     parser.add_argument("--ingestion-session")
     parser.add_argument("--pause-identifier")
+    parser.add_argument("--audit-run-id")
+    parser.add_argument("--weekday", choices=("MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"))
+    parser.add_argument("--hour", type=int)
+    parser.add_argument("--minute", type=int)
     parser.add_argument("--json", action="store_true", dest="json_output")
     return parser
 
@@ -214,6 +219,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if arguments.mode == "audit-estate":
         print(json.dumps(audit_estate(arguments.database), sort_keys=True, separators=(",", ":")))
+        return 0
+    if arguments.mode == "audit-schedule":
+        supplied = (arguments.weekday, arguments.hour, arguments.minute)
+        if any(value is not None for value in supplied):
+            if any(value is None for value in supplied):
+                raise SystemExit("--weekday, --hour, and --minute are required together")
+            value = configure_audit_schedule(
+                arguments.database, weekday=arguments.weekday,
+                hour=arguments.hour, minute=arguments.minute,
+            )
+        else:
+            value = audit_schedule(arguments.database)
+        print(json.dumps(value, sort_keys=True, separators=(",", ":")))
+        return 0
+    if arguments.mode == "audit-history":
+        print(json.dumps(audit_history(arguments.database, audit_run_id=arguments.audit_run_id), sort_keys=True, separators=(",", ":")))
         return 0
     if arguments.mode == "run-queue":
         print(json.dumps(request_run_queue(

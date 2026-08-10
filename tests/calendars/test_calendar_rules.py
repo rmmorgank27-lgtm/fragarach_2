@@ -51,6 +51,7 @@ class CalendarRuleTests(unittest.TestCase):
         self.assertFalse(session_classification(date(2026, 7, 3), calendar)[0])
         self.assertFalse(session_classification(date(2026, 6, 19), calendar)[0])
         self.assertFalse(session_classification(date(2012, 10, 29), calendar)[0])
+        self.assertFalse(session_classification(date(2025, 1, 9), calendar)[0])
         self.assertTrue(session_classification(date(2026, 7, 6), calendar)[0])
 
     def test_australian_equities_use_asx_cash_market_holidays(self) -> None:

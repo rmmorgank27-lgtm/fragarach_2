@@ -45,6 +45,7 @@ def query_report(database: Path) -> tuple[list[dict[str, object]], list[dict[str
     connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
     try:
+        connection.execute("PRAGMA query_only = ON")
         lane_rows = connection.execute(
             """
             SELECT l.asset,l.timeframe,r.asset_class,count(b.open_time_utc) AS bar_count,
@@ -85,14 +86,30 @@ def query_report(database: Path) -> tuple[list[dict[str, object]], list[dict[str
             "missing_expected_interval_count",
             validation.get("missing_expected_session_count"),
         )
+        latest_present = validation.get(
+            "latest_expected_closed_interval_present",
+            validation.get("latest_expected_session_present"),
+        )
+        material = validation.get("material_gap_count")
+        if missing is None:
+            current_gaps: int | str = "Not measured"
+            recent_gaps: int | str = "Not measured"
+            historical_gaps: int | str = "Not measured"
+        else:
+            current_gaps = 0 if latest_present else min(1, int(missing))
+            recent_gaps = min(max(0, int(missing) - current_gaps), int(material or 0))
+            historical_gaps = max(0, int(missing) - current_gaps - recent_gaps)
         lane_metadata[(row["asset"], row["timeframe"])] = {
             "asset_class": row["asset_class"] or "Unknown",
             "bar_count": int(row["bar_count"]),
             "range_start": iso(row["earliest"]) if row["earliest"] is not None else "No data",
             "range_end": iso(row["latest"]) if row["latest"] is not None else "No data",
             "validation_missing": missing if missing is not None else "Not measured",
-            "material_gaps": validation.get("material_gap_count", "Not measured"),
+            "material_gaps": material if material is not None else "Not measured",
             "non_material_gaps": validation.get("non_material_gap_count", "Not measured"),
+            "current_gaps": current_gaps,
+            "recent_gaps": recent_gaps,
+            "historical_gaps": historical_gaps,
         }
 
     details: list[dict[str, object]] = []
@@ -122,20 +139,23 @@ def query_report(database: Path) -> tuple[list[dict[str, object]], list[dict[str
         by_lane[lane].append(detail)
 
     lanes: list[dict[str, object]] = []
-    for lane, gaps in by_lane.items():
-        metadata = lane_metadata[lane]
-        largest = max(gaps, key=lambda gap: int(gap["gap_minutes"]))
-        most_recent = max(gaps, key=lambda gap: str(gap["next_bar"]))
+    for lane, metadata in lane_metadata.items():
+        gaps = by_lane.get(lane, [])
+        largest = max(gaps, key=lambda gap: int(gap["gap_minutes"])) if gaps else None
+        most_recent = max(gaps, key=lambda gap: str(gap["next_bar"])) if gaps else None
         lanes.append(
             {
                 "symbol": lane[0],
                 "timeframe": lane[1],
                 "observed_gap_count": len(gaps),
-                "largest_gap": largest["gap"],
-                "largest_gap_minutes": largest["gap_minutes"],
-                "most_recent_gap_end": most_recent["next_bar"],
+                "largest_gap": largest["gap"] if largest else "None",
+                "largest_gap_minutes": largest["gap_minutes"] if largest else 0,
+                "most_recent_gap_end": most_recent["next_bar"] if most_recent else "None",
                 "validation_missing": metadata["validation_missing"],
                 "material_gaps": metadata["material_gaps"],
+                "current_gaps": metadata["current_gaps"],
+                "recent_gaps": metadata["recent_gaps"],
+                "historical_gaps": metadata["historical_gaps"],
                 "bars": metadata["bar_count"],
                 "available_range": f"{metadata['range_start']} — {metadata['range_end']}",
             }
@@ -154,7 +174,11 @@ def query_report(database: Path) -> tuple[list[dict[str, object]], list[dict[str
     detail_samples.sort(key=lambda gap: (str(gap["symbol"]), str(gap["timeframe"]), -int(gap["gap_minutes"])))
     stats = {
         "total_lanes": len(lane_metadata),
-        "lanes_with_observed_gaps": len(lanes),
+        "audited_lanes": sum(
+            metadata["validation_missing"] != "Not measured"
+            for metadata in lane_metadata.values()
+        ),
+        "lanes_with_observed_gaps": sum(bool(gaps) for gaps in by_lane.values()),
         "observed_gaps": len(details),
         "expected_fx_weekends_excluded": expected_weekends,
     }
@@ -183,7 +207,9 @@ def make_artifact(lanes: list[dict[str, object]], details: list[dict[str, object
             "largest_gap_minutes": lane["largest_gap_minutes"],
             "largest_gap": lane["largest_gap"],
         }
-        for lane in lanes[:12]
+        for lane in [
+            lane for lane in lanes if int(lane["observed_gap_count"]) > 0
+        ][:12]
     ]
     return {
         "surface": "report",
@@ -215,6 +241,13 @@ def make_artifact(lanes: list[dict[str, object]], details: list[dict[str, object
                     "sourceId": "estate_gap_query",
                     "metrics": [{"label": "Lanes scanned", "field": "total_lanes", "format": "number"}],
                 },
+                {
+                    "id": "audited_lanes",
+                    "description": "Lanes with a current persisted calendar-aware validation summary.",
+                    "dataset": "summary",
+                    "sourceId": "estate_gap_query",
+                    "metrics": [{"label": "Validated lanes", "field": "audited_lanes", "format": "number"}],
+                },
             ],
             "charts": [
                 {
@@ -235,7 +268,7 @@ def make_artifact(lanes: list[dict[str, object]], details: list[dict[str, object
             "tables": [
                 {
                     "id": "lane_gaps",
-                    "title": "Affected symbol/timeframe lanes",
+                    "title": "All symbol/timeframe lanes",
                     "dataset": "lane_gaps",
                     "sourceId": "estate_gap_query",
                     "defaultSort": {"field": "largest_gap_minutes", "direction": "desc"},
@@ -248,6 +281,9 @@ def make_artifact(lanes: list[dict[str, object]], details: list[dict[str, object
                         {"field": "most_recent_gap_end", "label": "Most recent gap ends", "type": "text"},
                         {"field": "validation_missing", "label": "Validation missing", "type": "text"},
                         {"field": "material_gaps", "label": "Material gaps", "type": "text"},
+                        {"field": "current_gaps", "label": "Current", "type": "text"},
+                        {"field": "recent_gaps", "label": "Recent", "type": "text"},
+                        {"field": "historical_gaps", "label": "Historical", "type": "text"},
                         {"field": "available_range", "label": "Available range", "type": "text"},
                     ],
                 },
@@ -271,18 +307,20 @@ def make_artifact(lanes: list[dict[str, object]], details: list[dict[str, object
             "blocks": [
                 {"id": "title", "type": "markdown", "body": "# Estate Gap Report"},
                 {
-                    "id": "technical_summary",
+                    "id": "executive_summary",
                     "type": "markdown",
                     "sourceId": "estate_gap_query",
                     "body": (
-                        "## Technical summary\n\n"
-                        f"The scan found **{stats['observed_gaps']} observed discontinuities** across "
-                        f"**{stats['lanes_with_observed_gaps']} of {stats['total_lanes']} governed lanes**. "
-                        f"It excludes **{stats['expected_fx_weekends_excluded']} normal FX weekend closures**. "
-                        "Use the lane table to prioritise symbols; use the detailed table to inspect each missing interval."
+                        "## Executive Summary\n\n"
+                        f"- **{stats['lanes_with_observed_gaps']} of {stats['total_lanes']} lanes have observed continuity breaks.** "
+                        f"The scan found {stats['observed_gaps']} discontinuities after excluding "
+                        f"{stats['expected_fx_weekends_excluded']} normal FX weekend closures.\n"
+                        f"- **{stats['audited_lanes']} lanes have a current calendar-aware validation.** "
+                        "Use the all-lane table to review every symbol and timeframe, including lanes with zero observed breaks or validation not yet measured.\n"
+                        "- **Prioritise current and recent validator gaps first.** Then investigate the largest historical breaks without interpolating prices."
                     ),
                 },
-                {"id": "metrics", "type": "metric-strip", "cardIds": ["affected_lanes", "observed_gaps", "scanned_lanes"]},
+                {"id": "metrics", "type": "metric-strip", "cardIds": ["affected_lanes", "observed_gaps", "scanned_lanes", "audited_lanes"]},
                 {
                     "id": "definitions",
                     "type": "markdown",
@@ -292,7 +330,7 @@ def make_artifact(lanes: list[dict[str, object]], details: list[dict[str, object
                 {
                     "id": "lane_table_intro",
                     "type": "markdown",
-                    "body": "## Prioritise lanes by the largest break\n\nThe chart ranks the 12 most consequential continuity breaks. The table that follows has one row per affected symbol/timeframe and is sorted by the same measure for exact lookup.",
+                    "body": "## Prioritise lanes by the largest break\n\nThe chart ranks the 12 most consequential continuity breaks. The table that follows has one row for every governed symbol/timeframe lane, including zero-gap and not-yet-validated lanes, and is sorted by largest observed break for exact lookup.",
                 },
                 {"id": "largest_gap_chart", "type": "chart", "chartId": "largest_gap_ranking", "layout": "full"},
                 {"id": "lane_table", "type": "table", "tableId": "lane_gaps", "layout": "full"},
@@ -311,6 +349,11 @@ def make_artifact(lanes: list[dict[str, object]], details: list[dict[str, object
                     "id": "next_steps",
                     "type": "markdown",
                     "body": "## Next steps\n\nPrioritise rows with material validator gaps or the largest observed intervals. Re-run this report after scheduler catch-up or a controlled historical import to confirm that the specific interval has closed.",
+                },
+                {
+                    "id": "further_questions",
+                    "type": "markdown",
+                    "body": "## Further questions\n\nWhich unvalidated lanes should be commissioned next, and which large historical breaks have an approved source available for a preserve-only repair?",
                 },
             ],
         },

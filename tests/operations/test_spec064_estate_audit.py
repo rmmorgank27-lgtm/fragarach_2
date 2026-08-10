@@ -3,8 +3,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
-from fragarach_ii.estate_audit import audit_status, run_estate_audit
+from fragarach_ii.estate_audit import (
+    audit_history, audit_schedule, audit_status, configure_audit_schedule,
+    run_estate_audit, weekly_audit_due,
+)
 from fragarach_ii.lane_update_register import LaneUpdateRegister
+from fragarach_ii.freshness import provider_route_revision_for_lane
 from fragarach_ii.storage import open_read_only, registered_writer
 from tests.operations.test_spec063_time_triggered_lane_scheduler import _m5_lane
 
@@ -42,7 +46,7 @@ def test_operator_audit_is_immutable_and_never_acquires(tmp_path: Path) -> None:
     assert audit_status(database)["audit_run_id"] == second["audit_run_id"]
 
 
-def test_missing_update_register_row_is_repaired_without_canonical_mutation(tmp_path: Path) -> None:
+def test_missing_update_register_row_is_reported_without_runtime_mutation(tmp_path: Path) -> None:
     database = _valid_m5_lane(tmp_path)
     register = LaneUpdateRegister(database)
     register.audit_estate(at=NOW, reason="TEST_SEED")
@@ -56,12 +60,12 @@ def test_missing_update_register_row_is_repaired_without_canonical_mutation(tmp_
     with open_read_only(database) as connection:
         after = connection.execute("SELECT count(*) FROM bars").fetchone()[0]
     assert report["finding_counts"]["REPAIRABLE"] >= 1
-    assert report["safe_repairs_applied"] >= 1
+    assert report["safe_repairs_applied"] == 0
     assert before == after
-    assert any(row["asset"] == "AUDUSD" and row["timeframe"] == "M5" for row in register.rows())
+    assert not any(row["asset"] == "AUDUSD" and row["timeframe"] == "M5" for row in register.rows())
 
 
-def test_route_revision_drift_creates_review_plan_and_blocks_only_that_lane(tmp_path: Path) -> None:
+def test_route_revision_drift_creates_review_plan_without_blocking_lane(tmp_path: Path) -> None:
     database = _valid_m5_lane(tmp_path)
     register = LaneUpdateRegister(database)
     register.audit_estate(at=NOW, reason="TEST_SEED")
@@ -73,6 +77,65 @@ def test_route_revision_drift_creates_review_plan_and_blocks_only_that_lane(tmp_
     report = run_estate_audit(database, at=NOW)
     target = next(row for row in register.rows() if row["asset"] == "AUDUSD" and row["timeframe"] == "M5")
 
-    assert report["finding_counts"]["BLOCKING"] >= 1
+    assert report["finding_counts"]["WARNING"] >= 1
+    assert report["overall_result"] == "ATTENTION"
     assert report["repair_plan_id"] is not None
+    assert target["state"] == "READY"
+
+
+def test_reviewed_route_revision_refresh_preserves_blocked_lane_state(tmp_path: Path) -> None:
+    database = _valid_m5_lane(tmp_path)
+    register = LaneUpdateRegister(database)
+    register.audit_estate(at=NOW, reason="TEST_SEED")
+    register.block(
+        asset="AUDUSD", timeframe="M5",
+        reason="LOCAL_PROGRAMMING_ERROR; reviewed repair pending", at=NOW,
+    )
+    with register._connection() as connection:
+        connection.execute(
+            "UPDATE lane_update_register SET provider_route_revision='stale' "
+            "WHERE asset='AUDUSD' AND timeframe='M5'"
+        )
+
+    result = register.refresh_provider_route_revisions(at=NOW, reason="TEST_REVIEW")
+    target = next(
+        row for row in register.rows()
+        if row["asset"] == "AUDUSD" and row["timeframe"] == "M5"
+    )
+
+    assert result["route_revisions_changed"] >= 1
+    assert result["lane_states_changed"] == 0
     assert target["state"] == "BLOCKED"
+    assert target["last_outcome"].startswith("LOCAL_PROGRAMMING_ERROR")
+
+
+def test_provider_route_revision_does_not_change_after_normal_publication(tmp_path: Path) -> None:
+    database = _valid_m5_lane(tmp_path)
+    with open_read_only(database) as connection:
+        before = provider_route_revision_for_lane(connection, symbol="AUDUSD", timeframe="M5")
+    with registered_writer(database) as connection:
+        connection.execute(
+            "UPDATE lane_state SET state_version=state_version+1,last_ingest_run_id=NULL,updated_at_utc=? WHERE asset='AUDUSD' AND timeframe='M5'",
+            (datetime(2026, 7, 15, tzinfo=UTC).isoformat(),),
+        )
+    with open_read_only(database) as connection:
+        after = provider_route_revision_for_lane(connection, symbol="AUDUSD", timeframe="M5")
+    assert after == before
+
+
+def test_weekly_audit_uses_persisted_brisbane_schedule_and_keeps_manual_runs_separate(tmp_path: Path) -> None:
+    database = _valid_m5_lane(tmp_path)
+    configured = configure_audit_schedule(database, weekday="SUNDAY", hour=10, minute=30)
+    assert configured["timezone"] == "Australia/Brisbane"
+    assert configured["local_time"] == "10:30"
+    due_at = datetime.fromisoformat(configured["next_scheduled_at_utc"])
+    assert weekly_audit_due(database, at=due_at)
+
+    run_estate_audit(database, at=due_at, trigger="OPERATOR_REQUEST")
+    assert weekly_audit_due(database, at=due_at)
+
+    weekly = run_estate_audit(database, at=due_at, trigger="WEEKLY_MAINTENANCE")
+    assert not weekly_audit_due(database, at=due_at)
+    reports = audit_history(database, audit_run_id=weekly["audit_run_id"])
+    assert reports["reports"][0]["audit_run_id"] == weekly["audit_run_id"]
+    assert reports["selected_report"]["audit_run_id"] == weekly["audit_run_id"]

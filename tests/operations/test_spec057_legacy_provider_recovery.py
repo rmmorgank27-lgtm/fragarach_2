@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
-import shutil
-import sqlite3
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -12,27 +12,89 @@ import pytest
 from fragarach_ii.estate_truth_service import estate_truth_state
 from fragarach_ii.market_discovery import discover_market
 from fragarach_ii.onboarding import register_provider_aware_instrument
-from fragarach_ii.provider_facts import load_provider_facts, provider_facts_path, representation_mapping
+from fragarach_ii.provider_facts import (
+    load_provider_facts,
+    provider_facts_path,
+    representation_mapping,
+    save_provider_facts,
+)
 from fragarach_ii.providers.instrument_search import candidate_from_dict
 from fragarach_ii.scheduler_service import SchedulerJournal
-from fragarach_ii.storage import open_read_only
+from fragarach_ii.storage import (
+    initialize_database,
+    open_read_only,
+    registered_writer,
+    register_instrument,
+)
 
 
-ROOT = Path(__file__).resolve().parents[2]
-RUNTIME = ROOT / "data/runtime/spec002_real_evidence_acceptance.sqlite3"
 NOW = datetime(2026, 7, 16, 3, 0, tzinfo=UTC)
 
 
 def _legacy_fdx(tmp_path: Path) -> tuple[Path, Path]:
     database = tmp_path / "authority.sqlite3"
     journal = Path(f"{database}.scheduler.json")
-    # The native runtime is WAL-backed.  SQLite's online backup includes the
-    # current WAL state, unlike a raw file copy while the app is running.
-    with sqlite3.connect(RUNTIME) as source, sqlite3.connect(database) as destination:
-        source.backup(destination)
-    facts = provider_facts_path(RUNTIME)
-    if facts.exists():
-        shutil.copy2(facts, provider_facts_path(database))
+    initialize_database(database)
+    representation = discover_market(database, "FDX")["markets"][0]["representations"][0]
+    candidate = candidate_from_dict(json.loads(base64.urlsafe_b64decode(
+        representation["registration_plan"]["candidate"]
+    )))
+    register_instrument(
+        database,
+        replace(
+            candidate,
+            provider_id=None,
+            provider_contract=None,
+            provider_symbol=None,
+            provider_instrument_type=None,
+        ),
+        registered_at_utc="2026-07-13T00:00:00+00:00",
+    )
+    save_provider_facts(database, load_provider_facts(database))
+    payload = b"synthetic legacy FDX evidence"
+    observed = "2026-07-16T03:00:00+00:00"
+    final_session = datetime(2026, 7, 13, tzinfo=UTC)
+    opens = [
+        int((final_session - timedelta(days=offset)).timestamp())
+        for offset in reversed(range(205))
+    ]
+    with registered_writer(database) as connection:
+        connection.execute(
+            """INSERT INTO raw_blocks
+               (raw_block_id,sha256,source_name,source_locator,media_type,
+                received_at_utc,byte_length,payload)
+               VALUES ('raw-fdx',?,'fixture','fixture','text/plain',?,?,?)""",
+            (hashlib.sha256(payload).hexdigest(), observed, len(payload), payload),
+        )
+        connection.execute(
+            """INSERT INTO ingest_runs
+               (ingest_run_id,kind,status,started_at_utc,finished_at_utc,raw_block_id,detail)
+               VALUES ('run-fdx','fixture','committed',?,?,'raw-fdx',?)""",
+            (observed, observed, json.dumps({"asset": "FDX", "timeframe": "D1"})),
+        )
+        for index, opened in enumerate(opens, start=1):
+            connection.execute(
+                """INSERT INTO bars
+                   (asset,timeframe,open_time_utc,open,high,low,close,
+                    created_by_ingest_run_id,updated_by_ingest_run_id)
+                   VALUES ('FDX','D1',?,'200','202','199','201','run-fdx','run-fdx')""",
+                (opened,),
+            )
+            connection.execute(
+                """INSERT INTO provenance
+                   (provenance_event_id,ingest_run_id,raw_block_id,symbol,timeframe,
+                    timestamp,source_row_number,merge_action,candidate_open,candidate_high,
+                    candidate_low,candidate_close,recorded_at)
+                   VALUES (?,'run-fdx','raw-fdx','FDX','D1',?,?,'INSERT','200','202','199','201',?)""",
+                (f"event-fdx-{index}", opened, index, observed),
+            )
+        connection.execute(
+            """INSERT INTO lane_state
+               (asset,timeframe,high_watermark_open_time_utc,state_version,
+                last_ingest_run_id,updated_at_utc)
+               VALUES ('FDX','D1',?,1,'run-fdx',?)""",
+            (opens[-1], observed),
+        )
     return database, journal
 
 
@@ -91,33 +153,26 @@ def test_fdx_provider_recovery_preserves_evidence_and_queues_one_update(tmp_path
     )
     after_registration, after_evidence = _registration_and_evidence(database)
     mapping = representation_mapping(database, "YAHOO_FINANCE", "FDX")
-    queue = [
-        item for item in SchedulerJournal(database, journal).data["acquisition_queue"]
-        if item.get("lane") == "FDX:D1"
-    ]
+    pending = SchedulerJournal(database, journal).lane("FDX", "D1")["operator_fetch_pending"]
 
     assert receipt["outcome"] == "PROVIDER_SETUP_COMPLETED"
     assert before_registration == after_registration
     assert before_evidence == after_evidence
     assert mapping is not None and mapping["provider_symbol"] == "FDX"
     assert mapping["status"] == "OPERATOR_RESOLVED"
-    assert receipt["scheduler_reconciliation"]["outcome"] == "UPDATE_QUEUED"
-    assert len(queue) == 1
-    assert queue[0]["selected_provider"] == "YAHOO_FINANCE"
-    assert queue[0]["missing_range"]["start"] >= "2026-07-13"
-    assert queue[0]["missing_range"]["end"] <= "2026-07-15"
+    assert receipt["scheduler_reconciliation"]["outcome"] == "INITIAL_HISTORY_QUEUED"
+    assert pending["requested_mode"] == "update"
+    assert pending["requested_start"] >= "2026-07-13"
+    assert pending["requested_end"] <= "2026-07-15"
 
     revision = load_provider_facts(database)["revision"]
     replay = register_provider_aware_instrument(
         database, candidate, registered_at_utc="2026-07-16T03:01:00+00:00"
     )
-    queue_after_replay = [
-        item for item in SchedulerJournal(database, journal).data["acquisition_queue"]
-        if item.get("lane") == "FDX:D1"
-    ]
+    pending_after_replay = SchedulerJournal(database, journal).lane("FDX", "D1")["operator_fetch_pending"]
     assert replay["outcome"] == "PROVIDER_SETUP_COMPLETED"
     assert load_provider_facts(database)["revision"] == revision
-    assert len(queue_after_replay) == 1
+    assert pending_after_replay["id"] == pending["id"]
 
 
 def test_failed_legacy_mapping_write_leaves_the_lane_unchanged(tmp_path: Path) -> None:

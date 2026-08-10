@@ -7,6 +7,7 @@ import math
 import os
 import fcntl
 import hashlib
+import sqlite3
 import tempfile
 import threading
 import time
@@ -28,7 +29,7 @@ from .history_depth import governed_d1_initial_start
 from .lane_freshness_service import lane_freshness_report
 from .operational_schedule import latest_closed_session_date, schedule_for_lane
 from .lane_update_register import LaneUpdateRegister, REGISTER_CONTRACT
-from .estate_audit import audit_status, run_estate_audit
+from .estate_audit import audit_status, run_estate_audit, weekly_audit_due
 from .acquisition_orchestrator import (
     acquisition_capability_projection,
     cached_acquisition_capability_projection,
@@ -81,6 +82,7 @@ from .credentials import CredentialAuthority, CredentialState
 from .adaptive_scheduler import (
     POLICIES,
     calculate_throughput,
+    mixed_provider_worker_capacity,
     normalize_policy,
     policy_label,
     time_triggered_pacing,
@@ -840,13 +842,16 @@ def _execution_reason_code(classification: str) -> str:
         "PUBLICATION_ERROR": "PUBLICATION_FAILED",
         "QUEUE_COMPLETION_ERROR": "QUEUE_COMPLETION_FAILED",
         "INVALID_OHLC": "RAW_EVIDENCE_REJECTED",
+        "PROVIDER_D1_NOT_READY": "PROVIDER_NOT_READY",
         "NO_NEW_DATA": "EMPTY_RESPONSE",
         "AUTHENTICATION_FAILED": "PROVIDER_UNAVAILABLE",
         "CREDENTIAL_MISSING": "PROVIDER_UNAVAILABLE",
     }.get(classification, "HTTP_ERROR")
 
 
-def _retry_delay_seconds(attempt_number: int) -> int:
+def _retry_delay_seconds(attempt_number: int, classification: str | None = None) -> int:
+    if classification == "PROVIDER_D1_NOT_READY":
+        return 300 if attempt_number <= 1 else 600
     return min(30, 2 ** max(1, attempt_number))
 
 
@@ -854,6 +859,7 @@ def _retryable_failure(classification: str) -> bool:
     return classification in {
         "TWELVEDATA_RATE_LIMIT_429", "TWELVEDATA_UPSTREAM_5XX",
         "TWELVEDATA_TRANSPORT_FAILURE",
+        "PROVIDER_D1_NOT_READY",
         "TWELVEDATA_INVALID_RESPONSE",
         "LOCAL_PARSE_ERROR", "LOCAL_ADMISSION_ERROR", "LOCAL_CANONICAL_ERROR",
         "SQLITE_BUSY", "SQLITE_LOCKED", "SQLITE_WRITE_ERROR",
@@ -886,7 +892,7 @@ def _file_revision(path: str | Path) -> tuple[str, int | None, int | None]:
     resolved = Path(path).expanduser().resolve()
     try:
         status = resolved.stat()
-    except OSError:
+    except (OSError, sqlite3.Error):
         return str(resolved), None, None
     return str(resolved), status.st_mtime_ns, status.st_size
 
@@ -915,21 +921,32 @@ def _idle_input_revision(
 
 
 def _authority_change_token(database_path: str | Path) -> str:
-    """Cheaply identify a new authority publication without reading the estate.
+    """Cheaply identify semantic authority changes for desktop refresh.
 
-    SQLite keeps normal scheduler writes in the WAL, so fingerprint both the
-    database and its WAL metadata.  The token is a refresh signal for the
-    desktop projection, not a canonical authority revision.
+    WAL metadata also changes for Scheduler claims, heartbeats and retry
+    bookkeeping. Using it as the refresh token made the desktop repeatedly
+    rebuild the complete Estate even when canonical authority had not changed.
+    The token follows every canonical lane version, including intraday lanes;
+    the desktop coalesces publication bursts and waits for idle workers before
+    rebuilding its expensive Estate projection.
     """
     database = Path(database_path).expanduser().resolve()
-    parts: list[str] = []
-    for path in (database, Path(f"{database}-wal")):
-        try:
-            stat = path.stat()
-            parts.append(f"{path.name}:{stat.st_mtime_ns}:{stat.st_size}")
-        except OSError:
-            parts.append(f"{path.name}:missing")
-    return hashlib.sha256("|".join(parts).encode()).hexdigest()
+    try:
+        with open_read_only(database) as connection:
+            row = connection.execute(
+                """
+                SELECT
+                  (SELECT coalesce(max(registered_at_utc),'') FROM instrument_registrations),
+                  (SELECT coalesce(max(updated_at_utc),'') FROM lane_state),
+                  (SELECT coalesce(sum(state_version),0) FROM lane_state),
+                  (SELECT coalesce(max(recorded_at_utc),'') FROM authority_events),
+                  (SELECT count(*) FROM instrument_registrations)
+                """
+            ).fetchone()
+        facts = [str(value or "") for value in row]
+    except (OSError, sqlite3.Error):
+        facts = ["authority-unavailable"]
+    return hashlib.sha256("|".join(facts).encode()).hexdigest()
 
 
 def _stable_past_due_no_work(snapshot: dict[str, object], now: datetime) -> bool:
@@ -1562,17 +1579,8 @@ def _repair_twelve_data_credential_health(
     provider_state: dict[str, object],
     credentials: dict[str, str],
 ) -> bool:
-    """Clear stale provider auth state only after a remote credential probe."""
-    if not credentials.get("TWELVE_DATA"):
-        return False
-    resolution = CredentialAuthority().resolve("TWELVE_DATA")
-    if (
-        resolution.state is not CredentialState.AVAILABLE
-        or resolution.validation_source != "Credential Authority Twelve Data probe"
-    ):
-        return False
-    facts = load_provider_facts(database_path)
-    if facts.get("credential_state") != "Configured":
+    """Clear stale provider auth state only after verified provider success."""
+    if not _twelve_data_credential_is_verified(database_path, credentials):
         return False
     state = provider_state.get("TWELVE_DATA")
     if not isinstance(state, dict):
@@ -1596,6 +1604,29 @@ def _repair_twelve_data_credential_health(
         cooldown=None, wait_reason=None, wait_scope=None,
     )
     return True
+
+
+def _twelve_data_credential_is_verified(
+    database_path: str | Path, credentials: dict[str, str],
+) -> bool:
+    """Whether a current, successful Twelve Data response proves auth recovery.
+
+    Scheduler requests themselves use the canonical credential.  A successful
+    authenticated request is just as strong a recovery proof as the dedicated
+    credential probe; requiring only the latter left already-blocked lanes
+    frozen after normal acquisition had demonstrably recovered.
+    """
+    if not credentials.get("TWELVE_DATA"):
+        return False
+    resolution = CredentialAuthority().resolve("TWELVE_DATA")
+    if resolution.state is not CredentialState.AVAILABLE:
+        return False
+    if resolution.validation_source not in {
+        "Credential Authority Twelve Data probe",
+        "Twelve Data HTTP response",
+    }:
+        return False
+    return load_provider_facts(database_path).get("credential_state") == "Configured"
 
 
 def run_due_acquisitions(
@@ -1717,15 +1748,17 @@ def _run_due_acquisitions_unlocked(
     profiles = tuple(provider_profiles or load_provider_profiles())
     profiles_by_id = {profile.provider: profile for profile in profiles}
     selected_policy = _scheduler_policy(journal)
+    provider_worker_capacity = mixed_provider_worker_capacity(profiles)
     time_triggered_pace = time_triggered_pacing(
         selected_policy,
-        provider_worker_limit=max((profile.concurrency_limit for profile in profiles), default=1),
+        provider_worker_limit=provider_worker_capacity,
     )
     credentials = credential_map(credential)
     credential_repaired = _repair_twelve_data_credential_health(
         database_path, journal.providers, credentials
     )
-    if credential_repaired and update_register is not None:
+    credential_verified = _twelve_data_credential_is_verified(database_path, credentials)
+    if credential_verified and update_register is not None:
         update_register.release_verified_credential_blocks(at=observed)
     budgets = build_rate_budgets(
         profiles, journal.providers, monotonic=monotonic,
@@ -1990,7 +2023,7 @@ def _run_due_acquisitions_unlocked(
     worker_limit = (
         int(time_triggered_pace["worker_limit"])
         if time_triggered
-        else max(1, max((profile.concurrency_limit for profile in profiles), default=1))
+        else provider_worker_capacity
     )
     # The journal/state critical sections remain serialized below, but provider
     # work is deliberately outside that lock.  Do not special-case injected
@@ -2487,7 +2520,15 @@ def _run_due_acquisitions_unlocked(
                             cycle["queue_completed_count"] = int(cycle["queue_completed_count"]) + 1
                             outcome, final_reason = "SUCCESS", "NO_CHANGE"
                             break
-                        next_attempt = (observed + timedelta(seconds=60)).isoformat()
+                        # A completed provider response that does not advance
+                        # the edge is evidence that this boundary is not yet
+                        # available from the source.  Retrying the identical
+                        # request every scheduler wake only burns credits and
+                        # can starve the rest of the estate.  Keep the exact
+                        # request durable, but do not retry it before the
+                        # next daily boundary.  An explicit Update that has a
+                        # newer governed range supersedes this backoff below.
+                        next_attempt = (observed + timedelta(days=1)).isoformat()
                         detail = "Provider response admitted no observation beyond the canonical edge"
                         queued.update(
                             queue_reason=detail, waiting_reason=detail,
@@ -2653,7 +2694,7 @@ def _run_due_acquisitions_unlocked(
                         budgets[provider].inspect().get("rate_limit_until")
                         if classification == "TWELVEDATA_RATE_LIMIT_429" else None
                     ) or (observed + timedelta(seconds=_retry_delay_seconds(
-                        int(queued.get("attempt_number", 1) or 1)
+                        int(queued.get("attempt_number", 1) or 1), classification
                     ))).isoformat()
                     retryable = _retryable_failure(classification) or partial_advanced
                     failure = {
@@ -3065,9 +3106,9 @@ class SchedulerService:
                 # instance and are safe to make retryable.
                 register.recover_running(at=self.clock())
                 startup_recovery_pending = False
-            if register.audit_due(at=self.clock()):
-                # Weekly maintenance is intentionally the one recurring
-                # full-estate audit.  Routine wakes below remain indexed.
+            if weekly_audit_due(self.database_path, at=self.clock()):
+                # Weekly maintenance is calendar-based in Brisbane time.
+                # Manual audits never shift this recurring full-estate check.
                 run_estate_audit(
                     self.database_path, at=self.clock(), trigger="WEEKLY_MAINTENANCE",
                 )
@@ -3251,6 +3292,11 @@ def _pending_operator_fetches(
 
     universe = active_universe(database_path)
     active = universe["active_lanes"]
+    next_attempt_by_lane = {
+        str(item.get("lane")): item.get("next_attempt")
+        for item in journal.data.get("acquisition_queue", [])
+        if isinstance(item, dict) and item.get("lane")
+    }
     result: list[dict[str, object]] = []
     with open_read_only(database_path) as connection:
         for lane_id, _recorded, request in pending:
@@ -3262,6 +3308,19 @@ def _pending_operator_fetches(
                 # Operator work is never allowed to revive a retired or
                 # uncommissioned lane.  Reconciliation/audit owns archival.
                 continue
+            next_attempt = next_attempt_by_lane.get(lane_id)
+            if next_attempt:
+                try:
+                    if datetime.fromisoformat(str(next_attempt)) > observed:
+                        # The queue record is the durable retry authority for
+                        # a pending operator fetch.  Do not promote it on
+                        # every daemon wake while it is deliberately backed
+                        # off.
+                        continue
+                except ValueError:
+                    # Preserve malformed legacy state for the normal request
+                    # validation path rather than silently dropping work.
+                    pass
             start, end = request.get("requested_start"), request.get("requested_end")
             if not isinstance(start, str) or not start or not isinstance(end, str) or not end:
                 continue
@@ -3294,7 +3353,7 @@ def _pending_operator_fetches(
                 "operator_fetch_mode": request.get("requested_mode"),
                 "operator_fetch_backfill": bool(request.get("backfill_from_start")),
                 "requested_bounds": [requested_start, end],
-                "next_attempt": None,
+                "next_attempt": next_attempt,
                 "enqueued_at": request.get("requested_at") or observed.isoformat(),
                 "queue_age_seconds": 0.0,
                 "dispatch_priority": "OPERATOR_FETCH",
@@ -3508,7 +3567,7 @@ def _due_lanes(database_path, observed, journal, *, catch_up):
                 ),
                 None,
             )
-            if next_attempt and not operator_retry and not operator_fetch:
+            if next_attempt and not operator_retry:
                 try:
                     if datetime.fromisoformat(str(next_attempt)) > observed:
                         continue
@@ -3611,42 +3670,52 @@ def _fair_bounded_selection(due, max_tasks, journal):
         historical=[item for item in remaining if _operational_priority_group(item)[0] == 4]
         eligible=protected+historical
     # Cadence is a strict release gate, not a rotating fairness dimension.
-    # Operator work leads the batch. Ordinary work is released from exactly
-    # one timeframe tier, so lower cadences cannot start while a higher tier
-    # remains eligible. Queue age only orders peers inside that tier.
+    # Ordinary work is released from exactly one timeframe tier, so a lower
+    # cadence cannot occupy every worker while a higher-cadence retry is due.
+    # Queue age only orders peers inside that tier.
     ordered=sorted(eligible,key=_operational_dispatch_key)
-    # A current, calendar-approved boundary is the Scheduler's core upkeep
-    # obligation.  Explicit operator fetches are important but often request
-    # historical depth; letting those consume every worker can freeze a
-    # continuously-open crypto lane behind closed-market work over a weekend.
-    # Reserve the first available slots for normal current-boundary work.
-    current=[item for item in ordered if _dispatch_priority(item) == "CURRENT_BOUNDARY"]
-    selected=current[:limit]
-    capacity=limit-len(selected)
-    if capacity <= 0:
-        return selected
-    selected_ids={id(item) for item in selected}
+    ordinary=[item for item in ordered if _cadence_phase(item) == 1]
     operator=[
         item for item in ordered
-        if _cadence_phase(item) == 0 and id(item) not in selected_ids
+        if _cadence_phase(item) == 0
     ]
-    selected.extend(operator[:capacity])
-    capacity=limit-len(selected)
-    if capacity <= 0:
-        return selected
-    ordinary=[
-        item for item in ordered
-        if _cadence_phase(item) == 1 and id(item) not in selected_ids
-    ]
-    candidates=ordinary or [item for item in ordered if _cadence_phase(item) == 2]
-    if not candidates:
-        return selected
-    active_timeframe=min(_timeframe_rank(str(item.get("timeframe") or "")) for item in candidates)
-    selected.extend(
-        item for item in candidates
-        if _timeframe_rank(str(item.get("timeframe") or "")) == active_timeframe
+    if ordinary:
+        active_timeframe=min(
+            _timeframe_rank(str(item.get("timeframe") or ""))
+            for item in ordinary
+        )
+        active_tier=[
+            item for item in ordinary
+            if _timeframe_rank(str(item.get("timeframe") or "")) == active_timeframe
+        ]
+        # Current boundaries keep the first slot; an explicit operator fetch
+        # keeps the next bounded slot when capacity permits. Remaining peers
+        # from the active cadence tier follow in their governed order.
+        selected=[]
+        if active_tier:
+            selected.append(active_tier[0])
+        if operator and len(selected) < limit:
+            selected.append(operator[0])
+        if len(selected) < limit:
+            selected_ids={id(item) for item in selected}
+            selected.extend(
+                item for item in active_tier
+                if id(item) not in selected_ids
+            )
+        return selected[:limit]
+    if operator:
+        return operator[:limit]
+    historical=[item for item in ordered if _cadence_phase(item) == 2]
+    if not historical:
+        return []
+    active_timeframe=min(
+        _timeframe_rank(str(item.get("timeframe") or ""))
+        for item in historical
     )
-    return selected[:limit]
+    return [
+        item for item in historical
+        if _timeframe_rank(str(item.get("timeframe") or "")) == active_timeframe
+    ][:limit]
 
 
 def _operational_priority_group(item):
@@ -4967,6 +5036,43 @@ def run_operator_fetch(
     recorded = journal.lane(canonical_symbol, canonical_timeframe)
     existing = recorded.get("operator_fetch_pending")
     if isinstance(existing, dict):
+        existing_mode = str(existing.get("requested_mode") or "").lower()
+        existing_bounds = (
+            str(existing.get("requested_start") or ""),
+            str(existing.get("requested_end") or ""),
+        )
+        # Update means "fetch the current governed edge".  A prior Force
+        # History request (or an older Update planned against a stale edge)
+        # must not make that operator action a no-op.  Reuse the operation
+        # identity so a second writer is never created, but replace only the
+        # obsolete pending intent with the newly governed bounds.
+        if mode == "update" and existing_mode in {"update", "force"} and existing_bounds != bounds:
+            existing.update(
+                requested_mode="update",
+                requested_start=bounds[0],
+                requested_end=bounds[1],
+                backfill_from_start=False,
+                operator_reason=operator_reason,
+                requested_at=observed.isoformat(),
+            )
+            recorded.pop("last_operator_fetch_result", None)
+            journal.data["acquisition_queue"] = [
+                item for item in journal.data.get("acquisition_queue", [])
+                if not (
+                    isinstance(item, dict)
+                    and item.get("lane") == f"{canonical_symbol}:{canonical_timeframe}"
+                    and item.get("work_class") == "OPERATOR_FETCH"
+                )
+            ]
+            journal.data["dispatch_generation"] = int(journal.data.get("dispatch_generation", 0) or 0) + 1
+            journal.save()
+            return {
+                "contract": "fragarach_ii.acquisition_result.v1",
+                "work_class": "OPERATOR_FETCH", "outcome": "REQUEUED_CURRENT_BOUNDARY",
+                "operation_id": existing.get("id"), "symbol": canonical_symbol,
+                "timeframe": canonical_timeframe,
+                "requested_range": {"start": bounds[0], "end": bounds[1]},
+            }
         if mode == "initial" and existing.get("requested_mode") != "initial":
             # Upgrade a previously queued empty-lane Update in place.  This
             # preserves its queue identity and avoids making the operator
@@ -5503,6 +5609,21 @@ def request_retry(
     with open_read_only(database_path) as connection:
         freshness = assess_lane_freshness(connection, symbol=symbol, timeframe=timeframe, as_of=now)
     if freshness.get("state") == "Current":
+        update_register = LaneUpdateRegister(database_path)
+        checked_boundary = str(
+            freshness.get("expected_latest")
+            or freshness.get("latest_canonical_observation")
+            or ""
+        )
+        if update_register.is_seeded() and checked_boundary:
+            # A repaired lane can become current through another successful
+            # cycle before the operator's retry is handled.  Clearing only the
+            # journal queue left its obsolete BLOCKED row visible forever.
+            update_register.record_checked(
+                asset=symbol, timeframe=timeframe,
+                checked_boundary=checked_boundary, at=now,
+                outcome="ALREADY_SATISFIED_REPAIRED",
+            )
         journal.data["acquisition_queue"] = [
             item for item in journal.data.get("acquisition_queue", [])
             if item.get("lane") != lane_id
@@ -5610,6 +5731,7 @@ def _structured_provider_result(classification: str) -> str:
         "QUEUE_BANDWIDTH_EXHAUSTED": "WAITING_FOR_LOCAL_BUDGET",
         "TWELVEDATA_TRANSPORT_FAILURE": "TRANSIENT_PROVIDER_FAILURE",
         "TWELVEDATA_UPSTREAM_5XX": "TRANSIENT_PROVIDER_FAILURE",
+        "PROVIDER_D1_NOT_READY": "TRANSIENT_PROVIDER_FAILURE",
         "TWELVEDATA_INVALID_RESPONSE": "INVALID_EVIDENCE",
         "CREDENTIAL_MISSING": "CREDENTIAL_MISSING", "AUTHENTICATION_FAILED": "AUTHENTICATION_FAILED", "ENTITLEMENT_BLOCKED": "ENTITLEMENT_BLOCKED",
         "INVALID_RESPONSE": "INVALID_EVIDENCE", "INVALID_CHRONOLOGY": "INVALID_EVIDENCE",

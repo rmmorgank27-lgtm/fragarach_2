@@ -52,6 +52,7 @@ def lane_freshness_report(
             """
         ).fetchall()
         event_ids_by_lane = _current_event_ids_by_lane(connection, lanes)
+        latest_provider_runs = _latest_provider_runs_by_lane(connection, lanes)
         rows = [
             _audit_lane(
                 connection,
@@ -60,6 +61,7 @@ def lane_freshness_report(
                 validation_summary=row[2],
                 authority_generated=authority_generated,
                 current_event_ids=event_ids_by_lane.get((str(row[0]), str(row[1])), []),
+                latest_run=latest_provider_runs.get((str(row[0]), str(row[1]))),
             )
             for row in lanes
         ]
@@ -124,6 +126,48 @@ def _current_event_ids_by_lane(connection, lanes) -> dict[tuple[str, str], list[
     return result
 
 
+def _latest_provider_runs_by_lane(connection, lanes) -> dict[tuple[str, str], tuple[object, ...]]:
+    """Load the provider run bound to each lane's latest publication.
+
+    The former per-lane JSON query scanned the complete ``ingest_runs`` table
+    for every commissioned lane. On the live estate that multiplied one
+    250 MB read into tens of gigabytes of work during every desktop refresh.
+    ``lane_state.last_ingest_run_id`` is the governed publication binding, so
+    primary-key lookups provide the relevant run without any history scan.
+    """
+
+    targets = {(str(row[0]), str(row[1])) for row in lanes}
+    result: dict[tuple[str, str], tuple[object, ...]] = {}
+    for asset, timeframe, kind, status, started, finished, detail_text in connection.execute(
+        """
+        SELECT s.asset,s.timeframe,i.kind,i.status,i.started_at_utc,
+               i.finished_at_utc,i.detail
+        FROM lane_state s
+        JOIN ingest_runs i ON i.ingest_run_id=s.last_ingest_run_id
+        WHERE i.kind LIKE 'provider_%'
+        """
+    ):
+        try:
+            detail = json.loads(detail_text)
+        except (TypeError, ValueError, AttributeError):
+            continue
+        key = (str(asset), str(timeframe))
+        if key not in targets:
+            continue
+        result[key] = (
+            kind,
+            status,
+            started,
+            finished,
+            detail.get("provider"),
+            int(detail.get("inserted") or 0),
+            int(detail.get("corrected") or 0),
+            int(detail.get("unchanged") or 0),
+            int(detail.get("rejected") or 0),
+        )
+    return result
+
+
 def render_lane_freshness_markdown(report: dict[str, object]) -> str:
     """Render the primary operational monitor as a compact factual table."""
 
@@ -172,6 +216,7 @@ def _audit_lane(
     validation_summary: str | None,
     authority_generated: datetime,
     current_event_ids: list[str],
+    latest_run: tuple[object, ...] | None,
 ) -> dict[str, object]:
     freshness = assess_lane_freshness(
         connection,
@@ -182,22 +227,6 @@ def _audit_lane(
     revision = authority_revision_for_lane(
         connection, symbol=symbol, timeframe=timeframe, current_event_ids=current_event_ids
     )
-    latest_run = connection.execute(
-        """
-        SELECT kind,status,started_at_utc,finished_at_utc,
-               json_extract(detail,'$.provider'),
-               coalesce(json_extract(detail,'$.inserted'),0),
-               coalesce(json_extract(detail,'$.corrected'),0),
-               coalesce(json_extract(detail,'$.unchanged'),0),
-               coalesce(json_extract(detail,'$.rejected'),0)
-        FROM ingest_runs
-        WHERE json_extract(detail,'$.asset')=?
-          AND json_extract(detail,'$.timeframe')=?
-          AND kind LIKE 'provider_%'
-        ORDER BY coalesce(finished_at_utc,started_at_utc) DESC LIMIT 1
-        """,
-        (symbol, timeframe),
-    ).fetchone()
     if latest_run is None:
         provider_request = "NOT_OBSERVED"
         observation_advance = "NOT_OBSERVED"

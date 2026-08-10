@@ -9,6 +9,7 @@ from fragarach_ii.ingestion import RawEvidence,ingest_staged_batch
 from fragarach_ii.ingestion.validation import RowValidationError,deduplicate_bars,stage_record
 from fragarach_ii.providers.yahoo_symbols import yahoo_equity_symbol_for_representation
 from fragarach_ii.staging import StagingBatch,StagingRejection
+from .post_ingest_validation import persist_committed_lane_validation
 from .twelve_data import AcquisitionError
 
 def yahoo_symbol(asset:str,asset_class:str)->str:
@@ -17,7 +18,7 @@ def yahoo_symbol(asset:str,asset_class:str)->str:
     if listed:return listed
     return {"SPX":"^GSPC","DJI":"^DJI","NDX":"^NDX","FTSE":"^FTSE","DAX":"^GDAXI","XJO":"^AXJO"}.get(asset,asset)
 
-def acquire_yahoo(database_path:str|Path,*,asset:str,asset_class:str,from_date:str,through_date:str,merge_mode:str="preserve",fetch=None,provider_symbol_override:str|None=None,mapping_class:str|None=None):
+def acquire_yahoo(database_path:str|Path,*,asset:str,asset_class:str,from_date:str,through_date:str,merge_mode:str="preserve",fetch=None,provider_symbol_override:str|None=None,mapping_class:str|None=None,progress=None):
     symbol=provider_symbol_override or yahoo_symbol(asset,asset_class);start=date.fromisoformat(from_date);end=date.fromisoformat(through_date)
     params=urlencode({"period1":int(datetime.combine(start,time.min,UTC).timestamp()),"period2":int(datetime.combine(end,time.max,UTC).timestamp()),"interval":"1d","events":"history"})
     url=f"https://query1.finance.yahoo.com/v8/finance/chart/{quote(symbol,safe='')}?{params}"
@@ -46,12 +47,21 @@ def acquire_yahoo(database_path:str|Path,*,asset:str,asset_class:str,from_date:s
     if not ordered:
         # A valid route can occasionally yield an incomplete chart response
         # while Yahoo is refreshing its daily aggregate.  This is provider
-        # evidence to retry, not a local programming fault that blocks a lane.
-        raise AcquisitionError("INVALID_RESPONSE", "Yahoo returned no valid unambiguous D1 observations")
+        # evidence to retry, not malformed evidence.  Use the shared D1
+        # not-ready classification so the Scheduler applies its deliberate
+        # five-to-ten-minute publication backoff instead of hot-looping every
+        # thirty seconds and consuming a worker slot on every wake.
+        raise AcquisitionError(
+            "PROVIDER_D1_NOT_READY",
+            "Yahoo returned no completed unambiguous D1 observations yet",
+        )
     batch=StagingBatch(bars=ordered,rejections=all_rejections,source_rows=len(timestamps),duplicate_identical=identical,duplicate_conflicting=conflicting)
+    if progress:progress("ingesting")
     ingestion=ingest_staged_batch(database_path,batch=batch,evidence=RawEvidence(raw_id,checksum,body,"YAHOO_FINANCE_CHART_D1_V1",url,"application/json",received_at),run_kind="provider_acquisition",merge_mode=merge_mode,outcome_facts={"asset":asset,"timeframe":"D1","provider":"YAHOO_FINANCE","provider_contract":"YAHOO_FINANCE_CHART_D1_V1","provider_symbol":symbol,"mapping_state":"CONFIRMED_BY_VALID_EVIDENCE","mapping_class":mapping_class or "EXACT_REPRESENTATION","from_date":from_date,"through_date":through_date,"merge_mode":merge_mode,"checksum":checksum},preserve_rejected_evidence=bool(all_rejections))
+    if progress:progress("validating")
+    validation=persist_committed_lane_validation(database_path,asset=asset,timeframe="D1",through_date=through_date,canonical_inserts=ingestion.inserted,canonical_corrections=ingestion.corrected)
     warnings=(f"{len(all_rejections)} row-local Yahoo observation(s) quarantined; valid observations were preserved.",) if all_rejections else ()
-    return {**ingestion.as_dict(),"provider_id":"YAHOO_FINANCE","provider_contract":"YAHOO_FINANCE_CHART_D1_V1","provider_symbol":symbol,"asset":asset,"timeframe":"D1","from_date":from_date,"through_date":through_date,"actual_range":f"{ordered[0].source_timestamp_text} → {ordered[-1].source_timestamp_text}","received":len(timestamps),"warnings":warnings}
+    return {**ingestion.as_dict(),"provider_id":"YAHOO_FINANCE","provider_contract":"YAHOO_FINANCE_CHART_D1_V1","provider_symbol":symbol,"asset":asset,"timeframe":"D1","from_date":from_date,"through_date":through_date,"actual_range":f"{ordered[0].source_timestamp_text} → {ordered[-1].source_timestamp_text}","received":len(timestamps),"validation_calendar_id":validation.as_dict().get("calendar_id"),"warnings":warnings}
 
 def _fetch(url:str)->bytes:
     response=urlopen(Request(url,headers={"User-Agent":"Fragarach-II/1","Connection":"close"}),timeout=30)

@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from fragarach_ii.freshness import authority_revision_for_lane
 from fragarach_ii.lane_commissioning import ensure_commissioned_lane
@@ -79,6 +80,38 @@ class Spec045SyntheticRepositoryTests(unittest.TestCase):
             [{key: row[key] for key in ("timestamp", "open", "high", "low", "close", "volume")} for row in after],
         )
 
+    def test_automatic_policy_registers_non_stock_m15_without_symbol_config(self) -> None:
+        registry = Path(self.temporary.name) / "automatic.json"
+        payload = json.loads(Path("config/synthetic/synthetic_registry.v1.json").read_text())
+        payload["registrations"] = [
+            item for item in payload["registrations"]
+            if item["target_timeframe"] != "M15"
+        ]
+        registry.write_text(json.dumps(payload))
+
+        repository = self.repository(registry)
+        repository.rebuild(generated_at=self.generated)
+
+        product = repository.product("AUDUSD:M15")
+        self.assertEqual(product["status"], "Available")
+        self.assertEqual(product["immediate_source_timeframe"], "M5")
+        self.assertIn("com.raymorgan.echo.service", product["authorised_consumers"])
+
+    def test_automatic_policy_excludes_stock_asset_classes(self) -> None:
+        registry = Path(self.temporary.name) / "stocks-excluded.json"
+        payload = json.loads(Path("config/synthetic/synthetic_registry.v1.json").read_text())
+        payload["registrations"] = []
+        registry.write_text(json.dumps(payload))
+
+        repository = self.repository(registry)
+        with patch(
+            "fragarach_ii.synthetic_repository.canonical_market",
+            return_value="STOCKS",
+        ):
+            repository.activate_registry(generate_on_activation=False)
+
+        self.assertEqual(repository.list_products(), [])
+
     def test_missing_component_is_incomplete_and_never_fabricated(self) -> None:
         with registered_writer(self.database) as connection:
             connection.execute("DELETE FROM bars WHERE asset='AUDUSD' AND timeframe='M5' AND open_time_utc=?", (self.start + 300,))
@@ -106,7 +139,7 @@ class Spec045SyntheticRepositoryTests(unittest.TestCase):
         with open_read_only(self.database) as connection:
             real_before = authority_revision_for_lane(connection, symbol="AUDUSD", timeframe="M5")
             table_count = connection.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchone()[0]
-        self.assertEqual(table_count, 10)
+        self.assertEqual(table_count, 12)
         self.assertEqual(before["synthetic_revision"], 1)
         self.assertEqual(before["complete_lineage"][0]["evidence_class"], "REAL")
         with registered_writer(self.database) as connection:
@@ -118,7 +151,7 @@ class Spec045SyntheticRepositoryTests(unittest.TestCase):
         self.assertEqual(refreshed["synthetic_revision"], 2)
         with open_read_only(self.database) as connection:
             real_after = authority_revision_for_lane(connection, symbol="AUDUSD", timeframe="M5")
-            self.assertEqual(connection.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchone()[0], 10)
+            self.assertEqual(connection.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchone()[0], 12)
         self.assertNotEqual(real_before, real_after)
 
     def test_synthetic_to_synthetic_retains_complete_real_lineage(self) -> None:
@@ -134,6 +167,7 @@ class Spec045SyntheticRepositoryTests(unittest.TestCase):
             "missing_component_behaviour": "INCOMPLETE_NO_PUBLICATION",
             "partial_current_period_behaviour": "UNPUBLISHED"
         }]
+        payload["automatic_registrations"] = []
         parent = payload["registrations"][0]
         child = {
             "symbol": "AUDUSD", "target_timeframe": "H2", "evidence_class": "SYNTHETIC",
@@ -171,6 +205,29 @@ class Spec045SyntheticRepositoryTests(unittest.TestCase):
         unavailable = service.get_product(symbol="AUDUSD", timeframe="H3", consumer="SignalBar", evidence_requirement="SYNTHETIC_PERMITTED")
         self.assertEqual(unavailable["status"], "Unavailable")
         self.assertEqual(unavailable["observations"], [])
+
+    def test_echo_apps_and_service_are_authorised_for_synthetic_m15(self) -> None:
+        repository = self.repository()
+        repository.rebuild(generated_at=self.generated)
+        service = SyntheticConsumerService(repository)
+        echo_consumers = {
+            "com.raymorgan.echo",
+            "com.raymorgan.echopulse",
+            "com.raymorgan.echo.service",
+        }
+
+        product = repository.product("AUDUSD:M15")
+        self.assertTrue(echo_consumers.issubset(set(product["authorised_consumers"])))
+        for consumer in sorted(echo_consumers):
+            response = service.get_product(
+                symbol="AUDUSD",
+                timeframe="M15",
+                consumer=consumer,
+                evidence_requirement="SYNTHETIC_PERMITTED",
+            )
+            self.assertEqual(response["status"], "Available")
+            self.assertEqual(response["evidence_class"], "SYNTHETIC")
+            self.assertTrue(response["observations"])
 
     def test_repository_delete_and_rebuild_does_not_change_canonical(self) -> None:
         repository = self.repository()

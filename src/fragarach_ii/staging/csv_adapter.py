@@ -32,6 +32,8 @@ PROVENANCE_FIELDS = frozenset({
 })
 HEADER_ALIASES = {"time": "timestamp", "timestamp_utc": "timestamp"}
 _SLASH_D1_DATE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})$")
+_MT4_DATE = re.compile(r"^(\d{4})\.(\d{2})\.(\d{2})$")
+_MT4_TIME = re.compile(r"^(\d{2}):(\d{2})$")
 
 
 def stage_csv_bytes(
@@ -53,30 +55,40 @@ def stage_csv_bytes(
         return _file_rejection("INVALID_UTF8", str(error))
 
     try:
-        reader = csv.DictReader(io.StringIO(text, newline=""), strict=True)
-        if reader.fieldnames is None:
-            return _file_rejection("MISSING_HEADER", "CSV header row is required")
-        physical_headers = [header.strip().lower() for header in reader.fieldnames]
-        normalized_headers = [HEADER_ALIASES.get(header, header) for header in physical_headers]
-        if any(not header for header in normalized_headers):
-            return _file_rejection("INVALID_HEADER", "CSV contains an empty header")
-        if len(set(normalized_headers)) != len(normalized_headers):
-            return _file_rejection("DUPLICATE_HEADER", "CSV logical headers must be unique")
-        missing = sorted(REQUIRED_FIELDS - set(normalized_headers))
-        if missing:
-            return _file_rejection(
-                "MISSING_COLUMNS", f"required columns missing: {', '.join(missing)}"
+        physical_reader = csv.reader(io.StringIO(text, newline=""), strict=True)
+        first_physical_row = next(physical_reader, None)
+        if first_physical_row is not None and _is_mt4_history_row(first_physical_row):
+            physical_rows = [first_physical_row, *physical_reader]
+            rows = [
+                _mt4_history_fields(row, timeframe=timeframe)
+                for row in physical_rows
+            ]
+            first_source_row = 1
+        else:
+            reader = csv.DictReader(io.StringIO(text, newline=""), strict=True)
+            if reader.fieldnames is None:
+                return _file_rejection("MISSING_HEADER", "CSV header row is required")
+            physical_headers = [header.strip().lower() for header in reader.fieldnames]
+            normalized_headers = [HEADER_ALIASES.get(header, header) for header in physical_headers]
+            if any(not header for header in normalized_headers):
+                return _file_rejection("INVALID_HEADER", "CSV contains an empty header")
+            if len(set(normalized_headers)) != len(normalized_headers):
+                return _file_rejection("DUPLICATE_HEADER", "CSV logical headers must be unique")
+            missing = sorted(REQUIRED_FIELDS - set(normalized_headers))
+            if missing:
+                return _file_rejection(
+                    "MISSING_COLUMNS", f"required columns missing: {', '.join(missing)}"
+                )
+            unsupported = sorted(
+                set(normalized_headers) - REQUIRED_FIELDS - OPTIONAL_FIELDS - PROVENANCE_FIELDS
             )
-        unsupported = sorted(
-            set(normalized_headers) - REQUIRED_FIELDS - OPTIONAL_FIELDS - PROVENANCE_FIELDS
-        )
-        if unsupported:
-            return _file_rejection(
-                "UNSUPPORTED_COLUMNS", f"unsupported columns: {', '.join(unsupported)}"
-            )
-        reader.fieldnames = normalized_headers
-
-        rows = list(reader)
+            if unsupported:
+                return _file_rejection(
+                    "UNSUPPORTED_COLUMNS", f"unsupported columns: {', '.join(unsupported)}"
+                )
+            reader.fieldnames = normalized_headers
+            rows = list(reader)
+            first_source_row = 2
         effective_d1_date_format = _resolve_d1_date_format(
             rows,
             timeframe=timeframe,
@@ -85,7 +97,7 @@ def stage_csv_bytes(
         bars = []
         rejections: list[StagingRejection] = []
         source_rows = 0
-        for source_row_number, fields in enumerate(rows, start=2):
+        for source_row_number, fields in enumerate(rows, start=first_source_row):
             source_rows += 1
             if None in fields:
                 rejections.append(
@@ -170,6 +182,41 @@ def stage_csv_bytes(
         duplicate_identical=identical,
         duplicate_conflicting=conflicting,
     )
+
+
+def _is_mt4_history_row(row: list[str]) -> bool:
+    return (
+        len(row) == 7
+        and _MT4_DATE.fullmatch(row[0].strip()) is not None
+        and _MT4_TIME.fullmatch(row[1].strip()) is not None
+    )
+
+
+def _mt4_history_fields(
+    row: list[str], *, timeframe: str | None
+) -> dict[str | None, str | list[str]]:
+    if len(row) != 7:
+        return {None: row}
+    date_text, time_text, open_value, high_value, low_value, close_value, volume = row
+    date_match = _MT4_DATE.fullmatch(date_text.strip())
+    time_match = _MT4_TIME.fullmatch(time_text.strip())
+    if date_match is None or time_match is None:
+        timestamp = f"{date_text.strip()}T{time_text.strip()}"
+    else:
+        date_value = f"{date_match.group(1)}-{date_match.group(2)}-{date_match.group(3)}"
+        timestamp = (
+            date_value
+            if (timeframe or "").strip().upper() == "D1" and time_match.groups() == ("00", "00")
+            else f"{date_value}T{time_match.group(1)}:{time_match.group(2)}:00"
+        )
+    return {
+        "timestamp": timestamp,
+        "open": open_value,
+        "high": high_value,
+        "low": low_value,
+        "close": close_value,
+        "volume": volume,
+    }
 
 
 def _resolve_d1_date_format(

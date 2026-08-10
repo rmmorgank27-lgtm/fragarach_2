@@ -188,6 +188,49 @@ class CsvStagingTests(unittest.TestCase):
         self.assertEqual(reviewed.bars[0].timestamp,int(datetime(2026,7,10,9,tzinfo=UTC).timestamp()))
         self.assertEqual(reviewed.bars[0].source_timezone_interpretation,"REVIEWED_SOURCE_TIMEZONE:Etc/GMT-3:OFFSET=+03:00")
 
+    def test_headerless_mt4_history_uses_exact_source_rows_and_reviewed_broker_timezone(self) -> None:
+        batch = self.stage(
+            "2025.09.09,18:55,1.11136,1.11141,1.11130,1.11132,164\r\n"
+            "2026.01.09,12:00,1.10000,1.10100,1.09900,1.10050,200\r\n",
+            timeframe="M5",
+            asset_class="FX",
+            source_timezone="Europe/Athens",
+            received_at="2026-07-29T00:00:00+00:00",
+        )
+        self.assertEqual(batch.rejections, ())
+        self.assertEqual([bar.source_row_number for bar in batch.bars], [1, 2])
+        self.assertEqual(
+            [datetime.fromtimestamp(bar.timestamp, UTC).isoformat() for bar in batch.bars],
+            ["2025-09-09T15:55:00+00:00", "2026-01-09T10:00:00+00:00"],
+        )
+        self.assertEqual(
+            [bar.source_timezone_interpretation for bar in batch.bars],
+            [
+                "REVIEWED_SOURCE_TIMEZONE:Europe/Athens:OFFSET=+03:00",
+                "REVIEWED_SOURCE_TIMEZONE:Europe/Athens:OFFSET=+02:00",
+            ],
+        )
+
+    def test_headerless_mt4_history_never_guesses_timezone(self) -> None:
+        batch = self.stage(
+            "2025.09.09,18:55,1.11136,1.11141,1.11130,1.11132,164\r\n",
+            timeframe="M5",
+            asset_class="FX",
+            received_at="2026-07-29T00:00:00+00:00",
+        )
+        self.assertEqual([(item.source_row_number, item.code) for item in batch.rejections], [(1, "MISSING_TIMEZONE")])
+
+    def test_headerless_mt4_daily_history_is_a_calendar_date(self) -> None:
+        batch = self.stage(
+            "2026.07.24,00:00,0.69672,0.70012,0.69593,0.69809,181051\r\n",
+            timeframe="D1",
+            d1_latest_closed_date=date(2026, 7, 28),
+        )
+        self.assertEqual(batch.rejections, ())
+        self.assertEqual(batch.bars[0].source_row_number, 1)
+        self.assertEqual(batch.bars[0].source_timestamp_text, "2026-07-24")
+        self.assertEqual(batch.bars[0].source_timezone_interpretation, "D1_DATE_AT_UTC_MIDNIGHT")
+
     def test_intraday_quarantine_runs_after_utc_conversion(self) -> None:
         batch=self.stage(
             "timestamp,open,high,low,close\n"

@@ -17,6 +17,51 @@
       "partial_current_period_behaviour": "UNPUBLISHED"
     },
     {
+      "rule_id": "METALS_M5_TO_M15_SESSION_V1",
+      "version": 1,
+      "source_timeframe": "M5",
+      "target_timeframe": "M15",
+      "calendar": "METALS_24X5_NEW_YORK_ROLLOVER_V1",
+      "session_anchor": "17:00",
+      "interval_closure": "LEFT_CLOSED_RIGHT_OPEN",
+      "timezone": "America/New_York",
+      "required_component_count": 3,
+      "ohlc_calculation": "FIRST_OPEN_MAX_HIGH_MIN_LOW_LAST_CLOSE",
+      "volume_handling": "SUM_IF_ALL_PRESENT_ELSE_NULL",
+      "missing_component_behaviour": "INCOMPLETE_NO_PUBLICATION",
+      "partial_current_period_behaviour": "UNPUBLISHED"
+    },
+    {
+      "rule_id": "CRYPTO_M5_TO_M15_UTC_V1",
+      "version": 1,
+      "source_timeframe": "M5",
+      "target_timeframe": "M15",
+      "calendar": "CRYPTO_24X7_UTC_V1",
+      "session_anchor": "00:00",
+      "interval_closure": "LEFT_CLOSED_RIGHT_OPEN",
+      "timezone": "UTC",
+      "required_component_count": 3,
+      "ohlc_calculation": "FIRST_OPEN_MAX_HIGH_MIN_LOW_LAST_CLOSE",
+      "volume_handling": "SUM_IF_ALL_PRESENT_ELSE_NULL",
+      "missing_component_behaviour": "INCOMPLETE_NO_PUBLICATION",
+      "partial_current_period_behaviour": "UNPUBLISHED"
+    },
+    {
+      "rule_id": "ENERGY_M5_TO_M15_SESSION_V1",
+      "version": 1,
+      "source_timeframe": "M5",
+      "target_timeframe": "M15",
+      "calendar": "ENERGY_REFERENCE_24X5_NEW_YORK_ROLLOVER_V1",
+      "session_anchor": "17:00",
+      "interval_closure": "LEFT_CLOSED_RIGHT_OPEN",
+      "timezone": "America/New_York",
+      "required_component_count": 3,
+      "ohlc_calculation": "FIRST_OPEN_MAX_HIGH_MIN_LOW_LAST_CLOSE",
+      "volume_handling": "SUM_IF_ALL_PRESENT_ELSE_NULL",
+      "missing_component_behaviour": "INCOMPLETE_NO_PUBLICATION",
+      "partial_current_period_behaviour": "UNPUBLISHED"
+    },
+    {
       "rule_id": "FX_M30_TO_H2_SESSION_V1",
       "version": 1,
       "source_timeframe": "M30",
@@ -47,6 +92,28 @@
       "partial_current_period_behaviour": "UNPUBLISHED"
     }
   ],
+  "automatic_registrations": [
+    {
+      "policy_id": "ALL_ACTIVE_NON_STOCK_M5_TO_M15_V1",
+      "source_timeframe": "M5",
+      "target_timeframe": "M15",
+      "excluded_markets": ["STOCKS"],
+      "asset_class_rules": {
+        "FX": "FX_M5_TO_M15_SESSION_V1",
+        "METALS": "METALS_M5_TO_M15_SESSION_V1",
+        "CRYPTO": "CRYPTO_M5_TO_M15_UTC_V1",
+        "ENERGY": "ENERGY_M5_TO_M15_SESSION_V1"
+      },
+      "authorised_consumers": [
+        "SignalBar",
+        "MorphixFC",
+        "com.raymorgan.echo",
+        "com.raymorgan.echopulse",
+        "com.raymorgan.echo.service"
+      ],
+      "status": "ACTIVE"
+    }
+  ],
   "registrations": [
     {
       "symbol": "AUDUSD",
@@ -61,7 +128,13 @@
       "aggregation_rule_version": 1,
       "calendar_authority": "FX_24X5_NEW_YORK_ROLLOVER_V1",
       "session_alignment": "17:00 America/New_York",
-      "authorised_consumers": ["SignalBar", "MorphixFC"],
+      "authorised_consumers": [
+        "SignalBar",
+        "MorphixFC",
+        "com.raymorgan.echo",
+        "com.raymorgan.echopulse",
+        "com.raymorgan.echo.service"
+      ],
       "status": "ACTIVE"
     },
     {

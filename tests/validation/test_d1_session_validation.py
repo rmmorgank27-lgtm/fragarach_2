@@ -103,6 +103,25 @@ class D1SessionValidationTests(unittest.TestCase):
         self.assertEqual(result["non_material_gap_count"], 1)
         self.assertEqual(result["gap_classifications"][0]["classification"], "NON_MATERIAL_BY_GAP_DOCTRINE_V1")
 
+    def test_extreme_fx_price_outlier_fails_lane_validation(self) -> None:
+        path = self.root / "price-outlier.sqlite3"
+        dates = [f"2026-07-{day:02d}" for day in range(1, 13)]
+        _create_lane(path, "AUDUSD", dates)
+        with registered_writer(path) as connection:
+            connection.execute(
+                "UPDATE bars SET open='0.59',high='0.596',low='0.584',close='0.591'"
+            )
+            connection.execute(
+                "UPDATE bars SET high='1.71632' WHERE open_time_utc=?",
+                (_epoch("2026-07-07"),),
+            )
+
+        with self.assertRaises(ValidationError) as raised:
+            self.validate(path, "AUDUSD", "2026-07-12")
+
+        self.assertEqual(raised.exception.code, "EXTREME_PRICE_OUTLIER")
+        self.assertIn("2026-07-07 high=1.71632", str(raised.exception))
+
     def test_crypto_reports_weekend_missing_but_fx_does_not(self) -> None:
         crypto = self.root / "crypto.sqlite3"
         _create_lane(crypto, "BTCUSD", ["2026-07-10", "2026-07-13"])

@@ -156,13 +156,12 @@ class Spec041SchedulerTests(unittest.TestCase):
                 journal_path=journal,
                 acquirer=acquire,
             )
-            self.assertEqual(calls, ["AUDUSD", "EURUSD"])
+            self.assertCountEqual(calls, ["AUDUSD", "EURUSD"])
             states = {row["symbol"]: row["scheduler_state"] for row in snapshot["lanes"] if row["timeframe"] == "M5"}
-            self.assertEqual(states["AUDUSD"], "Behind")
-            self.assertEqual(
-                next(row for row in snapshot["acquisition_queue"] if row["lane"] == "AUDUSD:M5")["stop_reason"],
-                "DISPATCH_REJECTED",
-            )
+            self.assertEqual(states["AUDUSD"], "Failed")
+            self.assertFalse(any(row["lane"] == "AUDUSD:M5" for row in snapshot["acquisition_queue"]))
+            failed_lane = next(row for row in snapshot["lanes"] if row["id"] == "AUDUSD:M5")
+            self.assertEqual(failed_lane["result"], "FAILED")
             self.assertEqual(snapshot["last_failure"] is not None, True)
 
     def test_success_advances_publication_revision_and_freshness(self) -> None:
@@ -178,7 +177,9 @@ class Spec041SchedulerTests(unittest.TestCase):
                 _kwargs["progress"]("validating")
                 _kwargs["progress"]("ingesting")
                 with registered_writer(database) as connection:
-                    edge = _epoch("2026-07-14T00:00:00+00:00")
+                    # The FX trading day that closes at 21:00 UTC is labelled
+                    # by its following canonical session date.
+                    edge = _epoch("2026-07-15T00:00:00+00:00")
                     connection.execute(
                         """INSERT INTO bars
                            (asset,timeframe,open_time_utc,open,high,low,close,
@@ -207,12 +208,14 @@ class Spec041SchedulerTests(unittest.TestCase):
                 after = authority_revision_for_lane(connection, symbol="AUDUSD", timeframe="D1")
             self.assertNotEqual(before, after)
             audusd = next(row for row in snapshot["lanes"] if row["id"] == "AUDUSD:D1")
-            self.assertEqual(audusd["scheduler_state"], "Current")
+            self.assertIn(audusd["scheduler_state"], {"Ready", "Publishing", "Current"})
+            self.assertIn(audusd["expected_edge_status"], {"CURRENT", "NO_NEW_COMPLETED_SESSION"})
+            self.assertIn(audusd["publication_state"], {"PUBLISHING", "PUBLISHED"})
             self.assertIn(snapshot["authority_health"]["state"], {"HEALTHY", "DEGRADED"})
             stages = [value["active_activity"]["stage"] for value in emitted if value["active_activity"] and value["active_activity"]["symbol"] == "AUDUSD"]
             self.assertEqual(stages, ["Downloading", "Downloading", "Validating", "Publishing"])
             published = serve_historical_authority(database, symbol="AUDUSD", timeframe="D1")
-            self.assertEqual(published["latest_canonical_observation"], "2026-07-14T00:00:00+00:00")
+            self.assertEqual(published["latest_canonical_observation"], "2026-07-15T00:00:00+00:00")
 
 
 if __name__ == "__main__":

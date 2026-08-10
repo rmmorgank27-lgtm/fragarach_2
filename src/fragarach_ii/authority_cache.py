@@ -58,9 +58,9 @@ def revision_key(
     # SQLite normally commits operational changes to ``<database>-wal`` rather
     # than the main database file.  Keying only on the latter therefore let a
     # process reuse a capability projection made before a subsequent symbol
-    # registration.  Include each SQLite authority file's timestamp and size;
-    # this is inexpensive and invalidates the cache for every committed WAL
-    # mutation without reading or retaining any authority content.
+    # registration. Include the database and WAL timestamp/size; the SHM file
+    # is deliberately excluded because read-only connections update its lock
+    # bookkeeping without changing authority content.
     def file_revision(candidate: Path) -> tuple[int, int] | None:
         try:
             stat = candidate.stat()
@@ -71,7 +71,6 @@ def revision_key(
     database_revision = {
         "database": file_revision(path),
         "wal": file_revision(Path(f"{path}-wal")),
-        "shm": file_revision(Path(f"{path}-shm")),
     }
     return {
         "database": str(path),

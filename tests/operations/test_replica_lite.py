@@ -4,6 +4,7 @@ import json
 import threading
 import urllib.error
 import urllib.request
+from datetime import UTC, datetime, timedelta
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlencode
@@ -497,6 +498,32 @@ def test_selective_pause_retains_lane_resume_and_remove_are_explicit(tmp_path: P
         result = sync_selective(lite, allow_unsigned=True, allow_insecure_transport=True)
         assert result["admitted"] == 1
         assert selective_active_lanes(lite)[0]["symbol"] == "AUDUSD"
+    finally:
+        _stop(server, thread)
+
+
+def test_housekeeping_retries_failed_retained_lane_after_63_minutes(tmp_path: Path) -> None:
+    _, publisher, _, server, thread, lite = _system(tmp_path)
+    try:
+        request_lane(lite, symbol="AUDUSD", timeframe="D1")
+        sync_selective(lite, allow_unsigned=True, allow_insecure_transport=True)
+        request = json.loads(publisher.registry.read_text())["clients"][0]["requests"][0]
+        failed = update_request(
+            publisher, "macbook-pro", request["request_id"],
+            {"state": "FAILED", "error": {"code": "REPORT_FAILED", "error": "timed out"}},
+        )
+        assert failed["state"] == "FAILED"
+        (lite.root / "housekeeping.json").write_text(json.dumps({
+            "contract": "fragarach_lite.housekeeping.v1",
+            "last_run_at_utc": (datetime.now(UTC) - timedelta(minutes=64)).isoformat(),
+        }))
+
+        result = sync_selective(lite, allow_unsigned=True, allow_insecure_transport=True)
+
+        assert result["housekeeping"]["failed_found"] == 1
+        assert result["housekeeping"]["retried"] == ["AUDUSD:D1"]
+        assert result["admitted"] == 1
+        assert result["registry"]["requests"][0]["state"] == "ACTIVE"
     finally:
         _stop(server, thread)
 

@@ -737,6 +737,11 @@ def test_bnbusdt_uses_its_reviewed_binance_global_venue_without_live_io() -> Non
         assert requests[0].startswith("https://api.binance.com/api/v3/klines?")
         assert parse_qs(urlparse(requests[0]).query)["symbol"] == ["BNBUSDT"]
         assert result["inserted"] == 1
+        with open_read_only(database) as connection:
+            summary = json.loads(connection.execute(
+                "SELECT validation_summary FROM lane_state WHERE asset='BNBUSD' AND timeframe='D1'"
+            ).fetchone()[0])
+        assert summary["format"] == "fragarach_ii.lane_validation_summary.v1"
 
 
 def test_binance_history_chunks_admit_once_while_retaining_each_raw_response() -> None:
@@ -775,6 +780,10 @@ def test_binance_history_chunks_admit_once_while_retaining_each_raw_response() -
             assert connection.execute(
                 "SELECT count(*) FROM ingest_runs WHERE kind = 'provider_acquisition'"
             ).fetchone()[0] == 1
+            summary = json.loads(connection.execute(
+                "SELECT validation_summary FROM lane_state WHERE asset='BNBUSD' AND timeframe='H1'"
+            ).fetchone()[0])
+        assert summary["format"] == "fragarach_ii.lane_validation_summary.v2"
 
 
 def test_binance_history_downloads_chunks_concurrently_before_single_admission(monkeypatch) -> None:

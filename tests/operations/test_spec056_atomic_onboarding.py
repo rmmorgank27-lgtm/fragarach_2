@@ -19,6 +19,7 @@ from fragarach_ii.onboarding import register_provider_aware_instrument
 from fragarach_ii.provider_facts import load_provider_facts, provider_facts_path, representation_mapping, save_provider_facts
 from fragarach_ii.providers.instrument_search import candidate_from_dict
 import fragarach_ii.scheduler_service as scheduler_service
+from fragarach_ii.scheduler_state_store import SchedulerStateStore
 from fragarach_ii.storage import RegistrationError, initialize_database, open_read_only, register_instrument
 import fragarach_ii.commands.register_instrument as register_command
 
@@ -448,8 +449,9 @@ def test_asx_cba_registered_without_publication_remains_recoverable_visible(tmp_
     assert catalogue_symbol["histories"][0]["governed"] is False
     assert catalogue_symbol["histories"][0]["bar_count"] == 0
 
-    Path(f"{database}.scheduler.json").write_text(
-        json.dumps({
+    scheduler_path = Path(f"{database}.scheduler.json")
+    SchedulerStateStore(database, scheduler_path).save(
+        {
             "contract": "fragarach_ii.scheduler_journal.v4",
             "lanes": {
                 "ASXCBA:D1": {
@@ -463,8 +465,7 @@ def test_asx_cba_registered_without_publication_remains_recoverable_visible(tmp_
             },
             "manual_requests": [],
             "acquisition_queue": [],
-        }),
-        encoding="utf-8",
+        }
     )
 
     failed_state = estate_truth_state(database)

@@ -13,6 +13,7 @@ from fragarach_ii.ingestion import RawEvidence, ingest_staged_batch
 from fragarach_ii.ingestion.validation import deduplicate_bars, stage_record
 from fragarach_ii.staging import StagingBatch
 
+from .post_ingest_validation import persist_committed_lane_validation
 from .twelve_data import AcquisitionError
 
 
@@ -70,7 +71,12 @@ def acquire_coingecko(
         outcome_facts={"asset": asset, "timeframe": "D1", "provider": "COINGECKO", "provider_contract": "COINGECKO_OHLC_V1", "provider_symbol": provider_symbol, "mapping_state": "APPROVED_CONFIGURATION", "mapping_class": mapping_class or "APPROVED_PROVIDER_ALIAS", "from_date": from_date, "through_date": through_date, "merge_mode": merge_mode, "checksum": checksum},
         preserve_rejected_evidence=True,
     )
-    return {**ingestion.as_dict(), "provider_id": "COINGECKO", "provider_contract": "COINGECKO_OHLC_V1", "provider_symbol": provider_symbol, "asset": asset, "timeframe": "D1", "from_date": from_date, "through_date": through_date, "received": len(rows), "warnings": []}
+    validation = persist_committed_lane_validation(
+        database_path, asset=asset, timeframe="D1", through_date=through_date,
+        canonical_inserts=ingestion.inserted,
+        canonical_corrections=ingestion.corrected,
+    )
+    return {**ingestion.as_dict(), "provider_id": "COINGECKO", "provider_contract": "COINGECKO_OHLC_V1", "provider_symbol": provider_symbol, "asset": asset, "timeframe": "D1", "from_date": from_date, "through_date": through_date, "received": len(rows), "validation_calendar_id": validation.as_dict().get("calendar_id"), "warnings": []}
 
 
 def _fetch(url: str) -> bytes:

@@ -39,12 +39,20 @@ HOT_LANE_PROVIDER_BOUNDARY_LIMIT = 1
 _COMPACT_PROVIDER_ROW_FIELDS = (
     "provider", "eligible", "reason", "rejection_reason", "mapping_class",
     "mapping_status", "provider_symbol", "estimated_request_count", "result",
-    "state", "inserted", "corrected", "publication_job_id",
+    "state", "inserted", "corrected", "publication_job_id", "detail",
 )
 _ARCHIVED_MANUAL_REQUEST_FIELDS = (
     "id", "symbol", "timeframe", "status", "reason", "archive_reason",
     "missing_start", "missing_end", "expected_canonical_edge", "created_at",
     "archived_at", "reconciled_at",
+    # Retain the compact reconciliation decision used by operator history.
+    # Full provider projections remain in the SQLite audit ledger, while
+    # these bounded facts explain why the request left the active queue.
+    "reconciliation_status", "reconciliation_reason",
+    "last_evaluated_provider_fact_revision",
+    "last_evaluated_capability_projection_revision",
+    "original_rejection_reasons", "providers_currently_eligible",
+    "providers_considered", "replacement_queue_identifier",
 )
 
 REQUIRED_EVENTS = (
@@ -157,6 +165,8 @@ def compact_operational_history(journal: dict[str, Any]) -> bool:
                     request.clear()
                     request.update(compact)
                     changed = True
+                if _compact_provider_details(request):
+                    changed = True
             elif _compact_provider_details(request):
                 changed = True
 
@@ -196,16 +206,6 @@ def compact_operational_history(journal: dict[str, Any]) -> bool:
             if _compact_last_operator_result(lane):
                 changed = True
 
-    reconciliation = journal.get("spec047_capability_reconciliation")
-    if isinstance(reconciliation, dict) and isinstance(reconciliation.get("rows"), list):
-        actionable = [
-            row for row in reconciliation["rows"]
-            if isinstance(row, dict) and row.get("required_operator_decision") != "NONE"
-        ]
-        if actionable != reconciliation["rows"]:
-            reconciliation["rows"] = actionable
-            reconciliation["compacted_to_actionable_rows"] = True
-            changed = True
     return changed
 
 
@@ -222,7 +222,12 @@ def compact_hot_history_only(journal: dict[str, Any]) -> bool:
     for key, limit in _hot_history_limits():
         records = journal.get(key)
         if isinstance(records, list) and len(records) > limit:
-            del records[limit:]
+            if key in {"events", "routing_decisions", "archived_operational_work"}:
+                # These projections insert their newest record at index zero.
+                del records[limit:]
+            else:
+                # Execution traces, timings and cycles append chronologically.
+                del records[:-limit]
             changed = True
     return changed
 
@@ -265,7 +270,7 @@ def _compact_provider_details(value: dict[str, Any]) -> bool:
             }
             if isinstance(row, dict) else row
             for row in rows
-        ][:2]
+        ][:4]
         if compact_rows != rows:
             value[key] = compact_rows
             changed = True
@@ -282,7 +287,9 @@ def _compact_last_operator_result(lane: dict[str, Any]) -> bool:
     keep = {
         "contract", "operation_id", "symbol", "timeframe", "work_class", "outcome",
         "reason", "completed_at", "canonical_edge_before", "canonical_edge_after",
-        "expected_edge", "providers_attempted", "published_observations", "provider_results",
+        "expected_edge", "requested_range", "providers_considered", "providers_attempted",
+        "published_observations", "provider_results", "authority_revision",
+        "freshness_result", "manual_request_created", "queue_state",
     }
     compact = {key: value for key, value in result.items() if key in keep}
     if compact == result:

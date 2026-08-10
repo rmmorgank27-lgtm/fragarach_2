@@ -15,6 +15,7 @@ from fragarach_ii.lane_commissioning import resolved_calendar_id
 
 from .gaps import classify_missing_sessions, coverage_summaries
 from .result import ValidationResult
+from .price_outliers import find_extreme_price_outliers
 
 
 VALIDATOR_VERSION = "SPEC-003_D1_VALIDATOR_V1"
@@ -79,6 +80,7 @@ def validate_lane(
                     registry,
                     calendar,
                     observed_at,
+                    asset_class=str(assignment[4]),
                 )
                 cursor = connection.execute(
                     """
@@ -106,6 +108,7 @@ def validate_lane(
             registry,
             calendar,
             observed_at,
+            asset_class=str(assignment[4]),
         )
     finally:
         connection.close()
@@ -119,10 +122,11 @@ def _validate_connection(
     registry: CalendarRegistry,
     calendar,
     observed_at: str,
+    asset_class: str,
 ) -> ValidationResult:
     rows = connection.execute(
         """
-        SELECT open_time_utc FROM bars
+        SELECT open_time_utc,open,high,low,close FROM bars
         WHERE asset = ? AND timeframe = ?
         ORDER BY open_time_utc
         """,
@@ -130,6 +134,14 @@ def _validate_connection(
     ).fetchall()
     if not rows:
         raise ValidationError("LANE_NOT_FOUND", f"no canonical bars for {symbol} {timeframe}")
+    price_outliers = find_extreme_price_outliers(rows) if asset_class == "FX" else ()
+    if price_outliers:
+        finding = price_outliers[0]
+        day = datetime.fromtimestamp(finding.timestamp, UTC).date().isoformat()
+        raise ValidationError(
+            "EXTREME_PRICE_OUTLIER",
+            f"{symbol} {day} {finding.field}={finding.observed} is an extreme local price outlier",
+        )
     dates = [datetime.fromtimestamp(row[0], UTC).date() for row in rows]
     if len(set(dates)) != len(dates):
         raise ValidationError(

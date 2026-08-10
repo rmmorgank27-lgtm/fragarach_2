@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from fragarach_ii.authority_service import serve_historical_authority
+from fragarach_ii.storage import registered_writer
 from fragarach_ii.truth_engine import TRUTH_STATE_CONTRACT, _calculate, truth_state_for_lane, truth_states
 from tests.validation.test_d1_session_validation import _create_lane
 
@@ -101,7 +102,7 @@ class TruthEngineTests(unittest.TestCase):
         self.assertEqual(fresh["explanation"]["weights"]["freshness"], 30)
         self.assertGreater(fresh["explanation"]["weights"]["freshness"], fresh["explanation"]["weights"]["historical_depth"])
 
-    def test_stale_validation_snapshot_does_not_mark_a_current_lane_attention(self) -> None:
+    def test_current_lane_with_stale_validation_is_not_an_operational_attention_item(self) -> None:
         latest_epoch = 1_800_000_000
         validation = {
             "format": "fragarach_ii.lane_validation_summary.v2",
@@ -119,11 +120,39 @@ class TruthEngineTests(unittest.TestCase):
             {"state": "Current", "latest_canonical_observation": datetime.fromtimestamp(latest_epoch + 3_600, UTC).isoformat(), "expected_latest": None, "reason_code": "CURRENT"},
         )
 
+        self.assertLess(state["truth_score"], 90)
         self.assertEqual(state["authority_state"], "GREEN")
         self.assertEqual(state["validation_state"], "STALE")
         self.assertEqual(state["evidence_integrity"]["state"], "Not current")
         self.assertEqual(state["gap_classification"], "HISTORICAL_SNAPSHOT")
         self.assertIn("VALIDATION_SNAPSHOT_STALE", state["explanation"]["limitations"])
+
+    def test_ninety_is_the_healthy_score_threshold(self) -> None:
+        healthy = _state("H1", 365, expected=6_000, present=6_000)
+        self.assertGreaterEqual(healthy["truth_score"], 90)
+        self.assertEqual(healthy["authority_state"], "GREEN")
+
+    def test_extreme_fx_price_outlier_forces_red_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "authority.sqlite3"
+            dates = [f"2026-07-{day:02d}" for day in range(1, 13)]
+            _create_lane(database, "AUDUSD", dates)
+            with registered_writer(database) as connection:
+                connection.execute(
+                    "UPDATE bars SET open='0.59',high='0.596',low='0.584',close='0.591'"
+                )
+                connection.execute(
+                    "UPDATE bars SET high='1.71632' WHERE open_time_utc=strftime('%s','2026-07-07')"
+                )
+
+            state = truth_state_for_lane(
+                database, symbol="AUDUSD", timeframe="D1", as_of=self.AS_OF
+            )
+
+        self.assertEqual(state["authority_state"], "RED")
+        self.assertEqual(state["evidence_integrity"]["state"], "Critical")
+        self.assertEqual(state["price_quality"]["outlier_count"], 1)
+        self.assertIn("EXTREME_PRICE_OUTLIER", state["explanation"]["limitations"])
 
 
 def _state(timeframe: str, span_days: int, *, expected: int, present: int, material: int = 0, latest: bool = True):

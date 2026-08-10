@@ -15,6 +15,7 @@ import os
 import plistlib
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -123,13 +124,20 @@ def utc_now() -> str:
 
 
 def authority_database_identity(database: str | Path) -> str:
+    """Return the stable identity of one configured authority location.
+
+    The Scheduler owns the canonical database *path*.  SQLite maintenance may
+    legitimately replace the file at that path (for example, a compacted
+    authority promoted with ``os.replace``).  Including the current inode in
+    this identity strands the already-installed service in its old support
+    directory while new clients look for a different ownership lock.
+
+    ``resolve`` still collapses relative paths and symlinks, so every spelling
+    of the same configured authority converges without tying service identity
+    to a replaceable filesystem object.
+    """
     path = Path(database).expanduser().resolve()
-    try:
-        stat = path.stat()
-        source = f"{path}|{stat.st_dev}|{stat.st_ino}"
-    except OSError:
-        source = str(path)
-    return hashlib.sha256(source.encode()).hexdigest()
+    return hashlib.sha256(str(path).encode()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -855,7 +863,7 @@ def scheduler_operational_health(
     )
     progress_window = float(progress.get("permitted_progress_window_seconds", 45) or 45)
     stalled = bool(
-        (actionable or active)
+        actionable and not active
         and (progress_age is None or progress_age > progress_window)
     )
     if not process_alive:
@@ -1149,6 +1157,7 @@ class PersistentSchedulerRuntime:
         self._snapshot_lock = threading.Lock()
         self._command_lock = threading.Lock()
         self._heartbeat_stop = threading.Event()
+        self._heartbeat_wake = threading.Event()
         self._monitor_repair_requested = threading.Event()
         self._monitor_lock = threading.Lock()
         self._monitor_generation = str(uuid.uuid4())
@@ -1161,18 +1170,26 @@ class PersistentSchedulerRuntime:
 
         self.paths.prepare()
         self.ownership.acquire()
-        self._state = "RUNNING"
-        # Accept control before doing any estate projection.  A full monitor
-        # snapshot can be slow on a large estate and is never allowed to delay
-        # ready-queue dispatch or the Run Queue Now wake path.
+        # Publish liveness before opening SQLite.  Establishing the first
+        # writable connection may need to parse the authority schema or recover
+        # WAL state; neither operation is allowed to make a live process look
+        # unavailable or prevent a bounded stop/restart command.
         self._refresh_credential()
+        self.server.start()
+        self._heartbeat_thread = threading.Thread(
+            target=self._heartbeat_loop,
+            name="scheduler-heartbeat",
+            daemon=True,
+        )
+        self._heartbeat_thread.start()
+        self._write_current_status()
+        self.ownership.heartbeat("STARTING")
         # Create the tiny durable control journal eagerly so commands and
         # monitor-only service health have a stable authority document without
         # paying for an estate snapshot.
         journal = SchedulerJournal(self.paths.database, self.paths.journal)
         if not self.paths.journal.exists() or journal.migration_pending:
             journal.save()
-        self.server.start()
         # Estate admission repairs only a pre-register legacy estate.  Once
         # the durable register is seeded, new registrations commission their
         # lanes atomically during onboarding, so replaying this migration on
@@ -1181,14 +1198,15 @@ class PersistentSchedulerRuntime:
         from .lane_update_register import LaneUpdateRegister
         register = LaneUpdateRegister(self.paths.database)
         self._publish_bootstrap_register_status(register)
-        if not register.is_seeded():
+        if not self.monitor_only and not register.is_seeded():
             admission_thread = threading.Thread(
                 target=self._run_estate_admission,
                 name="scheduler-estate-admission", daemon=True,
             )
             admission_thread.start()
-        self._heartbeat_thread = threading.Thread(target=self._heartbeat_loop, name="scheduler-heartbeat", daemon=True)
-        self._heartbeat_thread.start()
+        self._state = "RUNNING"
+        self._write_current_status()
+        self.ownership.heartbeat("RUNNING")
         try:
             runner = self.scheduler.run_monitor_only if self.monitor_only else self.scheduler.run_forever
             runner(self._publish)
@@ -1197,6 +1215,7 @@ class PersistentSchedulerRuntime:
             self._write_current_status()
             self.server.stop()
             self._heartbeat_stop.set()
+            self._heartbeat_wake.set()
             if self._heartbeat_thread:
                 self._heartbeat_thread.join(timeout=3)
             self.ownership.release()
@@ -1275,6 +1294,9 @@ class PersistentSchedulerRuntime:
     def _current_status(self, *, live: bool = True) -> dict[str, Any]:
         with self._snapshot_lock:
             value = dict(self._snapshot)
+        value = self._overlay_live_register(value)
+        execution = value.get("execution") or {}
+        active_workers = int(execution.get("active_workers", 0) or 0)
         value.update(
             contract=MONITOR_CONTRACT,
             monitor_contract_version=value.get("monitor_contract_version", 3),
@@ -1289,7 +1311,7 @@ class PersistentSchedulerRuntime:
             heartbeat_time=utc_now(),
             heartbeat_cycle_id=(value.get("execution") or {}).get("cycle_id"),
             heartbeat_cycle_state=(
-                "ACTIVE" if value.get("active_activity")
+                "ACTIVE" if value.get("active_activity") or active_workers
                 else "COMPLETED" if (value.get("execution") or {}).get("completed_at")
                 else "STARTING"
             ),
@@ -1310,26 +1332,109 @@ class PersistentSchedulerRuntime:
         )
         return value
 
+    def _overlay_live_register(self, value: dict[str, Any]) -> dict[str, Any]:
+        """Overlay indexed, in-flight register facts on the last cycle result.
+
+        A time-triggered cycle is published after all of its workers complete.
+        Without this overlay, status reads during the next long provider cycle
+        keep reporting the previous cycle's ``0 active`` result even though the
+        register already owns RUNNING lanes.  These are bounded indexed reads;
+        no Estate projection or historical-bar scan is introduced here.
+        """
+        if value.get("scheduler_mode") != "TIME_TRIGGERED_REGISTER":
+            return value
+        try:
+            from .lane_update_register import LaneUpdateRegister
+
+            observed = datetime.now(UTC)
+            register = LaneUpdateRegister(self.paths.database)
+            summary = {
+                **register.summary(),
+                "due_now_count": register.due_count(at=observed),
+            }
+            dashboard = register.dashboard_rows(limit=24)
+            running_count = int(summary.get("running_count", 0) or 0)
+            execution = dict(value.get("execution") or {})
+            prior_active = int(execution.get("active_workers", 0) or 0)
+            prior_available = int(execution.get("available_workers", 0) or 0)
+            # Each RUNNING register row is an owned in-flight lane.  During
+            # service startup the previous completed snapshot can still carry
+            # the legacy one-worker default, so it must not cap the live fact.
+            capacity = max(1, prior_active + prior_available, running_count)
+            active_workers = running_count
+            execution.update(
+                active_workers=active_workers,
+                available_workers=max(0, capacity - active_workers),
+            )
+            progress = dict(value.get("scheduler_progress") or {})
+            running = next((row for row in dashboard if row.get("state") == "RUNNING"), None)
+            progress.update(
+                actionable_queue_depth=summary["due_now_count"],
+                blocked_queue_depth=int(summary.get("blocked_count", 0) or 0),
+                total_queue_depth=(
+                    int(summary["due_now_count"])
+                    + int(summary.get("blocked_count", 0) or 0)
+                    + running_count
+                ),
+                active_workers=active_workers,
+                available_workers=max(0, capacity - active_workers),
+                current_lane=(
+                    f"{running['asset']}:{running['timeframe']}" if running else None
+                ),
+                current_stage=("ACQUIRING" if running_count else "REGISTER_CATCH_UP" if summary["due_now_count"] else None),
+            )
+            value.update(
+                register=summary,
+                schedule_dashboard=dashboard,
+                blocked_schedule_dashboard=register.blocked_rows(limit=100),
+                next_run=summary.get("next_due_check"),
+                next_due_check=summary.get("next_due_check"),
+                execution=execution,
+                scheduler_progress=progress,
+                dispatch_state={
+                    "next_wake_reason": (
+                        "WORKERS_ACTIVE" if running_count
+                        else "READY_CAPACITY_CATCH_UP" if summary["due_now_count"]
+                        else "REGISTER_NEXT_DUE"
+                    ),
+                    "due_now_count": summary["due_now_count"],
+                },
+            )
+        except (OSError, RuntimeError, ValueError, sqlite3.Error):
+            # The last completed cycle remains a valid bounded fallback while
+            # SQLite is rotating WAL state or the register is being migrated.
+            pass
+        return value
+
     def _write_current_status(self, *, live: bool = True, compact: bool = False) -> dict[str, Any]:
         value = self._current_status(live=live)
         _atomic_json(self.paths.status, _compact_status(value) if compact else value)
         return value
 
     def _heartbeat_loop(self) -> None:
-        while not self._heartbeat_stop.wait(2.0):
+        while True:
+            # Keep enough margin below the six-second liveness contract for
+            # register overlay reads, JSON encoding and filesystem scheduling.
+            # A five-second idle wait left less than one second of tolerance
+            # and made a healthy process appear dead during a busy commit.
+            self._heartbeat_wake.wait(2.0)
+            self._heartbeat_wake.clear()
+            if self._heartbeat_stop.is_set():
+                break
             if self._monitor_repair_requested.is_set():
                 self._rebuild_monitor_transport()
             value = self._write_current_status(compact=True)
             self.ownership.heartbeat(
                 self._state,
                 next_wake=value.get("next_run"),
-                active_task_count=1 if value.get("active_activity") else 0,
+                active_task_count=int((value.get("execution") or {}).get("active_workers", 0) or 0),
                 journal_generation=value.get("authority_revision"),
             )
 
     def request_monitor_repair(self) -> None:
         """Request only a listener rebuild; scheduler ownership is untouched."""
         self._monitor_repair_requested.set()
+        self._heartbeat_wake.set()
 
     def _rebuild_monitor_transport(self) -> None:
         with self._monitor_lock:
@@ -1355,7 +1460,10 @@ class PersistentSchedulerRuntime:
             value = self._current_status()
             value["contract"] = STATUS_CONTRACT
             value["compatibility"] = compatibility(request.get("app_build"))
-            return value
+            # Native app clients use this socket directly.  Preserve the same
+            # complete status contract previously supplied by the short-lived
+            # Python service-status command.
+            return _extend_status_with_mutation(self.paths, value)
         if request.get("contract") != COMMAND_CONTRACT:
             return {"contract": COMMAND_CONTRACT, "result": "incompatible", "reason": "unsupported contract"}
         required = {"command_identifier", "command_type", "issued_time", "app_build", "target_service_generation", "scope", "payload"}
@@ -1458,7 +1566,12 @@ class PersistentSchedulerRuntime:
         if command == "RETRY_NOW":
             return request_retry(self.paths.database, lane_id=payload.get("lane_id"), request_id=payload.get("request_id"), credential=self.credential, **common)
         if command == "RUN_QUEUE_NOW":
-            return request_run_queue(self.paths.database, credential=self.credential, **common)
+            # The daemon wakes immediately after acknowledging the command.
+            # Do not run the legacy full-estate/manual-request reconciliation
+            # on this socket worker: it made a button press take minutes and
+            # raced the scheduler's own journal writer.  The register already
+            # contains the permitted work that Run Queue Now is meant to drain.
+            return {"outcome": "QUEUE_WAKE_REQUESTED", "requested_at": utc_now()}
         if command == "QUEUE_BANDWIDTH":
             return update_queue_bandwidth(self.paths.database, int(payload["percentage"]), **common)
         if command == "SCHEDULER_POLICY":

@@ -14,6 +14,7 @@ from fragarach_ii.ingestion import RawEvidence, ingest_staged_batches
 from fragarach_ii.ingestion.validation import deduplicate_bars, stage_record
 from fragarach_ii.staging import StagingBatch
 
+from .post_ingest_validation import persist_committed_lane_validation
 from .twelve_data import AcquisitionError
 
 
@@ -63,6 +64,7 @@ def acquire_binance(
         mapping_class=mapping_class,
         from_date=from_date,
         through_date=through_date,
+        clock=clock,
     )
 
 
@@ -165,6 +167,7 @@ def admit_binance_chunks(
     mapping_class: str | None = None,
     from_date: str,
     through_date: str,
+    clock=None,
 ) -> dict[str, object]:
     """Commit prepared chunks once, retaining a raw block for every response."""
     if not chunks:
@@ -187,6 +190,15 @@ def admit_binance_chunks(
         },
         preserve_rejected_evidence=True,
     )
+    validation = persist_committed_lane_validation(
+        database_path,
+        asset=asset,
+        timeframe=timeframe,
+        through_date=through_date,
+        clock=clock,
+        canonical_inserts=ingestion.inserted,
+        canonical_corrections=ingestion.corrected,
+    )
     return {
         **ingestion.as_dict(), "provider_id": "BINANCE",
         "provider_contract": "BINANCE_KLINES_V1", "provider_symbol": provider_symbol,
@@ -196,6 +208,7 @@ def admit_binance_chunks(
         "completed_observations_received": sum(len(chunk.batch.bars) for chunk in chunks),
         "incomplete_rows_excluded": sum(chunk.incomplete_rows_excluded for chunk in chunks),
         "chunk_count": len(chunks),
+        "validation_calendar_id": validation.as_dict().get("calendar_id"),
         "warnings": (
             [f"Excluded {sum(chunk.incomplete_rows_excluded for chunk in chunks)} still-open provider candle(s)"]
             if any(chunk.incomplete_rows_excluded for chunk in chunks) else []

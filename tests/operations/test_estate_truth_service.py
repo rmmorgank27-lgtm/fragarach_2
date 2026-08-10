@@ -58,15 +58,36 @@ class EstateTruthServiceTests(unittest.TestCase):
             self.assertEqual(summary["green_count"] + summary["amber_count"] + summary["red_count"], len(state["truth_matrix"]))
             self.assertTrue(summary["aggregation"])
 
-    def test_estate_state_uses_most_material_active_lane(self) -> None:
+    def test_one_critical_lane_does_not_override_a_healthy_estate_score(self) -> None:
         lanes = [
-            {"symbol": "BTCUSD", "truth_state": {"truth_score": 100, "authority_state": "GREEN", "caodt": "2026-07-14T00:00:00+00:00"}},
-            {"symbol": "SOLUSD", "truth_state": {"truth_score": 0, "authority_state": "RED", "caodt": "2026-07-14T00:00:00+00:00"}},
+            {"symbol": f"GREEN{index}", "truth_state": {"truth_score": 100, "authority_state": "GREEN", "caodt": "2026-07-14T00:00:00+00:00"}}
+            for index in range(9)
+        ] + [
+            {"symbol": "RED1", "truth_state": {"truth_score": 0, "authority_state": "RED", "caodt": "2026-07-14T00:00:00+00:00"}},
         ]
         summary = _estate_summary(lanes, self.GENERATED.isoformat(), None)
-        self.assertEqual(summary["overall_truth_score"], 50)
-        self.assertEqual(summary["overall_authority_state"], "RED")
-        self.assertEqual(summary["aggregation"]["authority_state"], "MOST_MATERIAL_ACTIVE_LANE_CONDITION")
+        self.assertEqual(summary["overall_truth_score"], 90)
+        self.assertEqual(summary["overall_authority_state"], "GREEN")
+        self.assertEqual(summary["red_count"], 1)
+        self.assertEqual(summary["aggregation"]["authority_state"], "NO_OPERATIONAL_FINDINGS_THEN_EQUAL_WEIGHT_MEAN_OF_LANE_TRUTH_SCORES")
+
+    def test_low_quality_score_without_operational_findings_is_healthy(self) -> None:
+        lanes = [
+            {"symbol": "AUDCAD", "truth_state": {"truth_score": 88, "authority_state": "GREEN", "caodt": "2026-07-14T00:00:00+00:00"}},
+            {"symbol": "AUDJPY", "truth_state": {"truth_score": 78, "authority_state": "GREEN", "caodt": "2026-07-14T00:00:00+00:00"}},
+        ]
+        summary = _estate_summary(lanes, self.GENERATED.isoformat(), None)
+        self.assertEqual(summary["overall_truth_score"], 83)
+        self.assertEqual(summary["overall_authority_state"], "GREEN")
+
+    def test_estate_state_uses_score_threshold_when_no_lane_is_critical(self) -> None:
+        lanes = [
+            {"symbol": "BTCUSD", "truth_state": {"truth_score": 96, "authority_state": "GREEN", "caodt": "2026-07-14T00:00:00+00:00"}},
+            {"symbol": "SOLUSD", "truth_state": {"truth_score": 88, "authority_state": "AMBER", "caodt": "2026-07-14T00:00:00+00:00"}},
+        ]
+        summary = _estate_summary(lanes, self.GENERATED.isoformat(), None)
+        self.assertEqual(summary["overall_truth_score"], 92)
+        self.assertEqual(summary["overall_authority_state"], "GREEN")
 
     def test_cache_load_and_manual_refresh_match_live_output(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

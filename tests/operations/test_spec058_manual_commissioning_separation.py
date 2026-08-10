@@ -106,7 +106,7 @@ def test_uncommissioned_manual_fetch_publishes_without_scheduler_ownership() -> 
 
         estate = estate_truth_state(database, clock=lambda: NOW)
         state = next(row for row in estate["commissioning_matrix"] if row["id"] == "GBPAUD:H1")
-        assert state["operational_state"] == "Not Commissioned"
+        assert state["operational_state"] == "Not Enabled"
         assert state["commissioned"] is False
         assert next(
             row for row in estate["truth_matrix"]

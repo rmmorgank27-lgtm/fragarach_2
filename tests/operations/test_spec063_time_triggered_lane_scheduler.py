@@ -4,21 +4,31 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
-from fragarach_ii.acquisition_orchestrator import ProviderProfile, RateBudgetController
+from fragarach_ii.acquisition_orchestrator import (
+    ProviderProfile,
+    RateBudgetController,
+    load_provider_profiles,
+)
 from fragarach_ii.lane_commissioning import ensure_commissioned_lane
 from fragarach_ii.lane_update_register import LaneUpdateRegister
 from fragarach_ii.scheduler_service import (
     SchedulerJournal,
+    _authority_change_token,
     _fair_bounded_selection,
     _pending_operator_fetches,
     _release_terminal_operator_fetches,
+    _retry_delay_seconds,
     _time_triggered_runtime_snapshot,
     run_operator_fetch,
     run_due_acquisitions,
 )
-from fragarach_ii.execution_trace import compact_operational_history
+from fragarach_ii.providers.twelve_data import AcquisitionError
+from fragarach_ii.execution_trace import (
+    compact_hot_history_only,
+    compact_operational_history,
+)
 from fragarach_ii.scheduler_daemon import scheduler_operational_health
-from fragarach_ii.storage import open_read_only
+from fragarach_ii.storage import open_read_only, registered_writer
 from tests.operations.test_spec041_scheduler import _add_intraday_bar
 from tests.validation.test_d1_session_validation import _create_lane
 
@@ -97,6 +107,37 @@ def test_compact_runtime_emits_authority_change_token(tmp_path: Path) -> None:
     assert isinstance(token, str)
     assert len(token) == 64
 
+    # Scheduler claims and retry bookkeeping are operational state, not a
+    # canonical Estate change and must not start a full desktop projection.
+    register.claim_due(at=NOW, limit=1)
+    assert _authority_change_token(database) == token
+
+    # A committed ingest advances governed authority and must refresh Estate.
+    _add_intraday_bar(
+        database, "AUDUSD", "M5",
+        "2026-07-14T00:05:00+00:00", "2026-07-14T00:10:00+00:00",
+    )
+    with registered_writer(database) as connection:
+        connection.execute(
+            """INSERT INTO lane_state
+               (asset,timeframe,high_watermark_open_time_utc,state_version,
+                last_ingest_run_id,updated_at_utc)
+               VALUES ('AUDUSD','M5',?,1,NULL,?)""",
+            (int(datetime(2026, 7, 14, 0, 5, tzinfo=UTC).timestamp()),
+             datetime(2026, 7, 14, 0, 6, tzinfo=UTC).isoformat()),
+        )
+    intraday_token = _authority_change_token(database)
+    assert intraday_token != token
+
+    with registered_writer(database) as connection:
+        connection.execute(
+            """UPDATE lane_state
+                  SET state_version=state_version+1,updated_at_utc=?
+                WHERE asset='AUDUSD' AND timeframe='D1'""",
+            (datetime(2026, 7, 14, 0, 11, tzinfo=UTC).isoformat(),),
+        )
+    assert _authority_change_token(database) != intraday_token
+
 
 def test_no_change_completes_a_boundary_once_and_sleeps_to_the_next_one(tmp_path: Path) -> None:
     database = _m5_lane(tmp_path)
@@ -169,6 +210,27 @@ def test_blocked_rows_are_available_as_a_bounded_operator_projection(tmp_path: P
 
     assert [(row["asset"], row["timeframe"]) for row in rows] == [("AUDUSD", "M5")]
     assert rows[0]["last_outcome"] == "AUTHENTICATION_FAILED"
+    assert "credential is missing, invalid, or rejected" in rows[0]["blocker_reason"]
+    assert "Configure and validate" in rows[0]["repair_action"]
+    assert rows[0]["flow_impact"] == "Only this lane is held; scheduled acquisition for all other lanes continues."
+
+
+def test_blocked_lane_does_not_stop_other_due_lanes(tmp_path: Path) -> None:
+    database = _m5_lane(tmp_path)
+    register = LaneUpdateRegister(database)
+    register.audit_estate(at=NOW, reason="TEST")
+    register.block(asset="AUDUSD", timeframe="M5", reason="AUTHENTICATION_FAILED", at=NOW)
+    with register._connection() as connection:
+        connection.execute(
+            """UPDATE lane_update_register
+               SET state='READY', next_check_at_utc=?, retry_not_before_utc=NULL
+               WHERE asset='AUDUSD' AND timeframe='D1'""",
+            (NOW.isoformat(),),
+        )
+
+    due = register.claim_due(at=NOW, limit=10)
+
+    assert [(row["asset"], row["timeframe"]) for row in due] == [("AUDUSD", "D1")]
 
 
 def test_verified_credential_repair_requeues_only_authentication_blocks(tmp_path: Path) -> None:
@@ -365,6 +427,143 @@ def test_credit_window_deferral_retries_instead_of_blocking_a_normal_lane(tmp_pa
     assert snapshot["register"]["blocked_count"] == 0
 
 
+def test_daily_provider_not_ready_retries_after_a_bounded_delay(tmp_path: Path) -> None:
+    database = tmp_path / "authority.sqlite3"
+    journal = tmp_path / "scheduler.json"
+    observed = datetime(2026, 7, 14, 22, 10, tzinfo=UTC)
+    _create_lane(database, "AUDUSD", ["2026-07-10"])
+    register = LaneUpdateRegister(database)
+    register.audit_estate(at=observed, reason="TEST")
+    with register._connection() as connection:
+        connection.execute(
+            """UPDATE lane_update_register
+               SET state='READY',next_expected_boundary_utc=?,next_check_at_utc=?,retry_not_before_utc=NULL
+               WHERE asset='AUDUSD' AND timeframe='D1'""",
+            (observed.isoformat(), observed.isoformat()),
+        )
+    profile = ProviderProfile(
+        provider="TWELVE_DATA", enabled=True,
+        supported_asset_classes=("FX",), supported_timeframes=("D1",),
+        credential_environment=None, entitlement_state="AVAILABLE",
+        request_limit=55, request_window_seconds=60, maximum_rows_per_request=4_000,
+        history_limit_days=None, cost_class=0, priority=1, cooldown_seconds=0,
+        mappings=({
+            "asset":"AUDUSD", "symbol":"AUD/USD", "timeframes":["D1"],
+            "mapping_class":"EXACT_REPRESENTATION", "reviewed_status":"REVIEWED",
+            "authority_source":"TEST",
+        },),
+        rate_policy_verified=True,
+    )
+
+    snapshot = run_due_acquisitions(
+        database, at=observed, credential=None, journal_path=journal,
+        acquirer=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AcquisitionError("PROVIDER_D1_NOT_READY", "daily aggregate still rolling")
+        ),
+        provider_profiles=(profile,), time_triggered=True,
+    )
+
+    row = next(
+        item for item in LaneUpdateRegister(database).rows()
+        if item["asset"] == "AUDUSD" and item["timeframe"] == "D1"
+    )
+    self_state = SchedulerJournal(database, journal).lane("AUDUSD", "D1")
+    assert row["state"] == "RETRY"
+    assert datetime.fromisoformat(row["retry_not_before_utc"]) == observed.replace(minute=15)
+    assert "PROVIDER_D1_NOT_READY" in str(row["last_outcome"])
+    assert self_state["result"] == "WAITING"
+    assert snapshot["register"]["blocked_count"] == 0
+    assert _retry_delay_seconds(2, "PROVIDER_D1_NOT_READY") == 600
+
+
+def test_daily_provider_not_ready_fails_over_to_an_approved_provider(tmp_path: Path) -> None:
+    database = tmp_path / "authority.sqlite3"
+    journal = tmp_path / "scheduler.json"
+    observed = datetime(2026, 7, 14, 22, 10, tzinfo=UTC)
+    _create_lane(database, "AUDUSD", ["2026-07-10"])
+    register = LaneUpdateRegister(database)
+    register.audit_estate(at=observed, reason="TEST")
+    with register._connection() as connection:
+        connection.execute(
+            """UPDATE lane_update_register
+               SET state='READY',next_expected_boundary_utc=?,next_check_at_utc=?,retry_not_before_utc=NULL
+               WHERE asset='AUDUSD' AND timeframe='D1'""",
+            (observed.isoformat(), observed.isoformat()),
+        )
+
+    def profile(provider: str, priority: int, symbol: str) -> ProviderProfile:
+        return ProviderProfile(
+            provider=provider, enabled=True,
+            supported_asset_classes=("FX",), supported_timeframes=("D1",),
+            credential_environment=None, entitlement_state="AVAILABLE",
+            request_limit=55, request_window_seconds=60, maximum_rows_per_request=4_000,
+            history_limit_days=None, cost_class=0, priority=priority, cooldown_seconds=0,
+            mappings=({
+                "asset":"AUDUSD", "symbol":symbol, "timeframes":["D1"],
+                "mapping_class":"EXACT_REPRESENTATION", "reviewed_status":"REVIEWED",
+                "authority_source":"TEST_APPROVED_FALLBACK",
+            },),
+            rate_policy_verified=True,
+        )
+
+    calls: list[str] = []
+    def acquire(_database, **kwargs):
+        provider = str(kwargs["provider"])
+        calls.append(provider)
+        if provider == "TWELVE_DATA":
+            raise AcquisitionError("PROVIDER_D1_NOT_READY", "daily aggregate still rolling")
+        edge = int(datetime(2026, 7, 14, tzinfo=UTC).timestamp())
+        with registered_writer(database) as connection:
+            run_id = connection.execute(
+                "SELECT created_by_ingest_run_id FROM bars WHERE asset='AUDUSD' LIMIT 1"
+            ).fetchone()[0]
+            connection.execute(
+                """INSERT INTO bars(asset,timeframe,open_time_utc,open,high,low,close,
+                                      created_by_ingest_run_id,updated_by_ingest_run_id)
+                   VALUES('AUDUSD','D1',?,'1','2','0','1',?,?)""",
+                (edge, run_id, run_id),
+            )
+            connection.execute(
+                """UPDATE lane_state SET high_watermark_open_time_utc=?,state_version=state_version+1
+                   WHERE asset='AUDUSD' AND timeframe='D1'""",
+                (edge,),
+            )
+        return {"received":1, "staged":1, "inserted":1, "corrected":0, "unchanged":0}
+
+    snapshot = run_due_acquisitions(
+        database, at=observed, credential=None, journal_path=journal,
+        acquirer=acquire,
+        provider_profiles=(
+            profile("TWELVE_DATA", 1, "AUD/USD"),
+            profile("YAHOO_FINANCE", 2, "AUDUSD=X"),
+        ),
+        time_triggered=True,
+    )
+
+    lane = SchedulerJournal(database, journal).lane("AUDUSD", "D1")
+    assert calls == ["TWELVE_DATA", "YAHOO_FINANCE"]
+    assert lane["result"] == "SUCCESS"
+    assert lane["current_provider"] == "YAHOO_FINANCE"
+    assert snapshot["register"]["blocked_count"] == 0
+
+
+def test_live_us_equity_d1_fallback_symbols_have_reviewed_yahoo_routes() -> None:
+    yahoo = next(
+        profile for profile in load_provider_profiles()
+        if profile.provider == "YAHOO_FINANCE"
+    )
+    mappings = {
+        str(mapping.get("asset")): mapping
+        for mapping in yahoo.mappings
+    }
+    for symbol in ("AMZN", "META", "NVDA", "QQQ"):
+        mapping = mappings[symbol]
+        assert mapping["symbol"] == symbol
+        assert mapping["timeframes"] == ["D1"]
+        assert mapping["mapping_class"] == "EXACT_REPRESENTATION"
+        assert mapping["reviewed_status"] == "REVIEWED"
+
+
 def test_empty_intraday_lane_upgrades_an_operator_update_to_initial_history(tmp_path: Path) -> None:
     database = tmp_path / "authority.sqlite3"
     _create_lane(database, "AUDUSD", ["2026-07-13"])
@@ -441,6 +640,61 @@ def test_scheduler_journal_uses_sqlite_state_and_small_compatibility_pointer(tmp
         assert connection.execute("SELECT count(*) FROM scheduler_audit_events").fetchone()[0] >= 2
 
 
+def test_scheduler_audit_save_stages_only_new_immutable_entries(tmp_path: Path) -> None:
+    database = tmp_path / "authority.sqlite3"
+    path = tmp_path / "scheduler.json"
+    journal = SchedulerJournal(database, path)
+    journal.append_event({"id": "first", "timestamp": NOW.isoformat(), "event": "FIRST"})
+    journal.save()
+    with open_read_only(database) as connection:
+        first_count = connection.execute("SELECT count(*) FROM scheduler_audit_events").fetchone()[0]
+
+    # The second control-state save has an overlapping hot tail but no new
+    # immutable event.  It must not inflate the audit ledger.
+    journal.save()
+    with open_read_only(database) as connection:
+        assert connection.execute("SELECT count(*) FROM scheduler_audit_events").fetchone()[0] == first_count
+
+    journal.append_event({"id": "second", "timestamp": NOW.isoformat(), "event": "SECOND"})
+    journal.save()
+    with open_read_only(database) as connection:
+        assert connection.execute("SELECT count(*) FROM scheduler_audit_events").fetchone()[0] == first_count + 1
+
+
+def test_scheduler_audit_cache_is_shared_by_fresh_store_facades(tmp_path: Path) -> None:
+    database = tmp_path / "authority.sqlite3"
+    path = tmp_path / "scheduler.json"
+    first = SchedulerJournal(database, path)
+    first.append_event({"id": "first", "timestamp": NOW.isoformat(), "event": "FIRST"})
+    first.save()
+
+    second = SchedulerJournal(database, path)
+    assert second.store._known_audit_event_ids is first.store._known_audit_event_ids
+    second.save()
+
+    with open_read_only(database) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM scheduler_audit_events"
+        ).fetchone()[0] == 1
+
+
+def test_hot_history_compaction_keeps_the_newest_record_for_each_ordering() -> None:
+    journal = {
+        "events": [{"id": value} for value in range(25, 0, -1)],
+        "routing_decisions": [{"id": value} for value in range(3, 0, -1)],
+        "execution_trace_events": [{"id": value} for value in range(25)],
+        "operation_timing_records": [{"id": value} for value in range(25)],
+        "scheduler_cycles": [{"id": value} for value in range(15)],
+    }
+
+    assert compact_hot_history_only(journal) is True
+    assert [value["id"] for value in journal["events"]] == list(range(25, 5, -1))
+    assert [value["id"] for value in journal["routing_decisions"]] == [3]
+    assert [value["id"] for value in journal["execution_trace_events"]] == list(range(5, 25))
+    assert [value["id"] for value in journal["operation_timing_records"]] == list(range(5, 25))
+    assert [value["id"] for value in journal["scheduler_cycles"]] == list(range(5, 15))
+
+
 def test_legacy_scheduler_history_moves_to_sqlite_audit_before_compaction(tmp_path: Path) -> None:
     database = tmp_path / "authority.sqlite3"
     path = tmp_path / "scheduler.json"
@@ -498,5 +752,6 @@ def test_hot_journal_compacts_completed_boundary_history() -> None:
     assert journal["archived_operational_work"][0].get("payload") is None
     assert journal["manual_requests"][0] == {
         "id": "request-1", "symbol": "BTCUSD", "timeframe": "M5", "status": "Archived", "reason": "COMPLETE",
+        "providers_considered": [{"provider": "BINANCE"}],
     }
     assert lane["providers_considered"] == [{"provider": "BINANCE", "eligible": True}]

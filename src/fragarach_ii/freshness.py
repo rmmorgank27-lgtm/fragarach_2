@@ -176,6 +176,37 @@ def authority_revision_for_lane(
     return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def provider_route_revision_for_lane(
+    connection: sqlite3.Connection, *, symbol: str, timeframe: str,
+) -> str:
+    """Fingerprint only the approved provider route for a lane.
+
+    This intentionally excludes publication state.  A new canonical bar must
+    never look like a provider-route change to the scheduler register.
+    """
+    symbol = symbol.strip().upper()
+    _ = timeframe.strip().upper()  # The approved route is registered at D1.
+    registration = connection.execute(
+        """
+        SELECT asset,provider_id,provider_contract,provider_symbol,provider_exchange,
+               provider_country,provider_instrument_type,provider_identity_key,
+               registration_status
+          FROM instrument_registrations WHERE asset=? AND timeframe='D1'
+        """,
+        (symbol,),
+    ).fetchone()
+    payload = {
+        # The normalized registration row is the route authority.  Authority
+        # event identifiers are provenance for that row, not routing inputs;
+        # including them made an equivalent registration republication look
+        # like a material route change during the weekly audit.
+        "provider_route_revision_version": 2,
+        "registration_route": list(registration) if registration else None,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _assess_d1(
     *,
     symbol: str,

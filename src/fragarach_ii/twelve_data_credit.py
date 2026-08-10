@@ -156,6 +156,11 @@ class TwelveDataCreditAuthority:
                 "remaining": request_count,
                 "reserved_at": now.isoformat(),
                 "dispatch_at": dispatch_at.isoformat(),
+                # A reservation can legitimately wait behind another request's
+                # provider I/O and canonical admission.  Retain it while the
+                # owning scheduler process is alive instead of mistaking a
+                # long provider-slot wait for an abandoned reservation.
+                "owner_pid": os.getpid(),
             }
             state["reservations"].append(reservation)
             state["credits_reserved"] = int(state["credits_reserved"]) + request_count
@@ -332,7 +337,12 @@ class TwelveDataCreditAuthority:
                 except (TypeError, ValueError):
                     continue
                 reserved_at = self._datetime(item.get("reserved_at"))
-                if remaining <= 0 or reserved_at is None or now - reserved_at > max_age:
+                owner_pid = _positive_int(item.get("owner_pid"))
+                abandoned = (
+                    now - reserved_at > max_age
+                    and not _process_is_alive(owner_pid)
+                ) if reserved_at is not None else True
+                if remaining <= 0 or reserved_at is None or abandoned:
                     continue
                 carried_item = dict(item)
                 dispatch_at = self._datetime(carried_item.get("dispatch_at")) or now
@@ -460,6 +470,32 @@ class TwelveDataCreditAuthority:
             except (TypeError, ValueError):
                 return None
             return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+
+
+def _positive_int(value: object) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _process_is_alive(process_id: int | None) -> bool:
+    """Whether a reservation owner still exists on this host.
+
+    Permission denial also proves that a process exists.  Missing legacy owner
+    metadata is deliberately treated as dead after the bounded stale interval.
+    """
+
+    if process_id is None:
+        return False
+    try:
+        os.kill(process_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def authority_for_credential(

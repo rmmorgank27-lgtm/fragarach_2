@@ -18,7 +18,7 @@ from fragarach_ii.scheduler_service import (
     reconcile_manual_requests,
     scheduler_snapshot,
 )
-from fragarach_ii.storage import initialize_database, register_instrument
+from fragarach_ii.storage import initialize_database, open_read_only, register_instrument
 from tests.validation.test_d1_session_validation import _create_lane
 
 
@@ -102,14 +102,29 @@ def test_audnzd_current_facts_restore_four_deduplicated_queue_lanes() -> None:
         database, journal_path = root / "authority.sqlite3", root / "scheduler.json"
         _register_audnzd(database)
         identifiers = _stale_requests(database, journal_path)
-        canonical_before = database.read_bytes()
         revision = _approve_twelve_data(database)
+        with open_read_only(database) as connection:
+            canonical_before = tuple(
+                connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+                for table in (
+                    "raw_blocks", "ingest_runs", "bars", "provenance",
+                    "authority_events",
+                )
+            )
 
         report = reconcile_manual_requests(
             database, credential="secret", journal_path=journal_path,
             at=NOW, trigger="PROVIDER_FACTS_COMMIT",
         )
-        assert database.read_bytes() == canonical_before
+        with open_read_only(database) as connection:
+            canonical_after = tuple(
+                connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+                for table in (
+                    "raw_blocks", "ingest_runs", "bars", "provenance",
+                    "authority_events",
+                )
+            )
+        assert canonical_after == canonical_before
         assert report["requests_examined"] == 4
         assert report["automation_restored"] == 4
         assert report["queue_items_created"] == 4

@@ -27,6 +27,7 @@ from .replica_lite import (
     sync_selective,
     utc_now,
 )
+from .history_range_contract import HISTORY_RANGE_CONTRACT_VERSION
 
 
 DEFAULT_LITE_PORT = 9463
@@ -91,7 +92,12 @@ def _handler(paths: LitePaths, wake_sync: threading.Event | None = None):
             if missing:
                 self._json(
                     HTTPStatus.BAD_REQUEST,
-                    {"code": "MISSING_QUERY_PARAMETER", "parameters": missing},
+                    {
+                        "contract_version": HISTORY_RANGE_CONTRACT_VERSION,
+                        "availability_state": "INVALID",
+                        "code": "MISSING_QUERY_PARAMETER",
+                        "parameters": missing,
+                    },
                 )
                 return
             try:
@@ -102,9 +108,21 @@ def _handler(paths: LitePaths, wake_sync: threading.Event | None = None):
                     start_utc=query["start_utc"][0],
                     end_utc_exclusive=query["end_utc_exclusive"][0],
                     as_of_utc=query["as_of_utc"][0],
+                    consumer=(query.get("consumer") or [None])[0],
+                    evidence_requirement=(
+                        query.get("evidence_requirement") or [None]
+                    )[0],
                 )
             except FragarachLiteError as error:
-                self._json(HTTPStatus.BAD_REQUEST, {"code": error.code, "error": str(error)})
+                self._json(
+                    HTTPStatus.BAD_REQUEST,
+                    {
+                        "contract_version": HISTORY_RANGE_CONTRACT_VERSION,
+                        "availability_state": "INVALID",
+                        "code": error.code,
+                        "error": str(error),
+                    },
+                )
                 return
             self._json(HTTPStatus.OK, result)
 
@@ -226,6 +244,7 @@ def serve(
                         last_sync_outcome=outcome,
                         last_sync_error=None,
                         refresh_generation_completed=refresh_generation,
+                        housekeeping=selective_result.get("housekeeping"),
                     )
                     next_sync = time.monotonic() + max(sync_interval, 1.0)
                 report_status(paths)

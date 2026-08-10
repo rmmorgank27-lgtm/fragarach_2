@@ -49,14 +49,35 @@ def policy_label(value: object) -> str:
     return str(POLICIES[normalize_policy(value)]["label"])
 
 
+def mixed_provider_worker_capacity(profiles) -> int:
+    """Return the independent provider slots available to one dispatch cycle.
+
+    Provider concurrency is enforced again by per-provider semaphores at the
+    actual I/O boundary.  This value sizes only the shared dispatcher; using
+    the largest single provider limit here needlessly prevented, for example,
+    Binance work from running alongside Twelve Data work.
+    """
+    return max(1, sum(
+        max(1, int(profile.concurrency_limit))
+        for profile in profiles
+        if profile.enabled and profile.entitlement_state == "AVAILABLE"
+    ))
+
+
 def time_triggered_pacing(policy: object, *, provider_worker_limit: int) -> dict[str, int | float]:
     """Return bounded, operator-selected pace for register-backed work."""
     settings = POLICIES[normalize_policy(policy)]
     provider_limit = max(1, int(provider_worker_limit))
     configured_cap = settings.get("worker_cap")
     worker_limit = provider_limit if configured_cap is None else min(provider_limit, int(configured_cap))
+    claim_limit = max(1, int(settings["batch"]))
+    if configured_cap is None:
+        # Balanced should be able to occupy each independent provider once;
+        # High retains its larger catch-up batch.  Per-provider semaphores and
+        # rolling rate budgets remain the hard limits after selection.
+        claim_limit = max(claim_limit, worker_limit)
     return {
-        "claim_limit": max(1, int(settings["batch"])),
+        "claim_limit": claim_limit,
         "worker_limit": max(1, worker_limit),
         "catch_up_delay_seconds": float(settings["catch_up_delay_seconds"]),
     }

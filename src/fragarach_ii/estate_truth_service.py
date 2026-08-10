@@ -18,6 +18,7 @@ from .truth_engine import (
     TRUTH_STATE_CONTRACT,
     truth_state_from_persisted_facts,
 )
+from .validation.price_outliers import assess_lane_price_quality
 from .lane_commissioning import commissioned_lane_keys,eligibility_reason,market_policy,resolved_calendar_authority
 from .acquisition_orchestrator import cached_acquisition_capability_projection
 from .commissioning_authority import ALL_TIMEFRAMES,project_required_lanes
@@ -107,17 +108,19 @@ def estate_truth_state(
           r.representation_type,r.calendar_id,r.exchange_name,r.identity_json,r.registration_status
           FROM instrument_registrations r
           WHERE r.timeframe='D1' AND r.registration_status LIKE 'REGISTERED_%'
-            AND NOT EXISTS (
-              SELECT 1 FROM authority_events e
-              WHERE json_extract(e.canonical_payload,'$.body.asset')=r.asset
-                AND (json_extract(e.canonical_payload,'$.body.lifecycle_state') LIKE 'RETIRED%'
-                  OR json_extract(e.canonical_payload,'$.body.lifecycle_state') LIKE 'QUARANTINED%'
-                  OR json_extract(e.canonical_payload,'$.body.lifecycle_state')='PERMANENTLY_REMOVED')
-                AND NOT EXISTS(SELECT 1 FROM authority_events successor WHERE successor.supersedes_event_id=e.authority_event_id)
-            )
           ORDER BY r.asset""").fetchall()
         lane_facts={(r[0],r[1]):r[2] for r in connection.execute("SELECT l.asset,l.timeframe,(SELECT count(*) FROM bars b WHERE b.asset=l.asset AND b.timeframe=l.timeframe) FROM evidence_lanes l").fetchall()}
         commissioned_lanes=commissioned_lane_keys(connection)
+        price_quality_by_lane = {
+            (str(row[0]), str(row[1])): assess_lane_price_quality(
+                connection,
+                symbol=str(row[0]),
+                timeframe=str(row[1]),
+                asset_class=str(row[4]),
+            )
+            for row in rows
+            if str(row[4]) == "FX" and str(row[1]) == "D1"
+        }
     finally:
         connection.close()
 
@@ -164,6 +167,7 @@ def estate_truth_state(
             ledger_bound=bool(row[16]), freshness=dict(freshness_row["freshness"]),
             authority_revision=str(freshness_row["authority_revision"]),
             authority_generated=authority_generated_text,
+            price_quality=price_quality_by_lane.get((str(row[0]), str(row[1]))),
         )
         validation = json.loads(row[10]) if row[10] else None
         gap_counts = _gap_counts(validation)
@@ -666,7 +670,15 @@ def _estate_summary(lanes, generated_at, last_persisted_authority_change, commis
     scores = [lane["truth_state"]["truth_score"] for lane in lanes]
     overall = round(sum(scores) / len(scores)) if scores else None
     counts = {state: sum(lane["truth_state"]["authority_state"] == state for lane in lanes) for state in ("GREEN", "AMBER", "RED")}
-    overall_state = "RED" if counts["RED"] else "AMBER" if counts["AMBER"] else "GREEN" if counts["GREEN"] else "NOT_MEASURED"
+    # A scorecard with no operational work is healthy, regardless of quality
+    # score deductions.  Once a lane is actually behind or unavailable, the
+    # equal-weight score expresses the scale of that active condition.
+    overall_state = (
+        "GREEN" if not counts["AMBER"] and not counts["RED"] else
+        "GREEN" if overall is not None and overall >= 90 else
+        "AMBER" if overall is not None and overall >= 50 else
+        "RED" if overall is not None else "NOT_MEASURED"
+    )
     latest_canonical_observation = max(
         (
             lane["latest_canonical_observation"]
@@ -716,7 +728,7 @@ def _estate_summary(lanes, generated_at, last_persisted_authority_change, commis
         "last_persisted_authority_change": last_persisted_authority_change,
         "aggregation": {
             "truth_score": "EQUAL_WEIGHT_MEAN_OF_LANE_TRUTH_SCORES",
-            "authority_state": "MOST_MATERIAL_ACTIVE_LANE_CONDITION",
+            "authority_state": "NO_OPERATIONAL_FINDINGS_THEN_EQUAL_WEIGHT_MEAN_OF_LANE_TRUTH_SCORES",
             "caodt": "ALIAS_OF_LATEST_CANONICAL_OBSERVATION",
             "generated_at": "SNAPSHOT_CONSTRUCTION_TIMESTAMP",
             "operational_coverage": "COMMISSIONED_REQUIRED_LANES_DIVIDED_BY_REQUIRED_LANES",

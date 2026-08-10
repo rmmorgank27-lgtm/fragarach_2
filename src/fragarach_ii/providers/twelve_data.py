@@ -16,6 +16,9 @@ from fragarach_ii.ingestion import RawEvidence, ingest_staged_batch
 from fragarach_ii.ingestion.pipeline import IngestionResult
 from fragarach_ii.storage import open_read_only, registered_writer, transaction, registration_for_lane, RegistrationError, initialize_database
 from fragarach_ii.validation import validate_lane
+from .post_ingest_validation import persist_committed_lane_validation
+from fragarach_ii.validation.price_outliers import find_extreme_price_outliers
+from fragarach_ii.staging import StagingBatch, StagingRejection
 from fragarach_ii.fx_orientation import validate_direct_mapping
 from fragarach_ii.retirement import is_permanently_removed,is_retired
 from fragarach_ii.credentials import CredentialAuthority, CredentialState
@@ -141,14 +144,9 @@ def acquire_twelve_data(
         initialize_database(database_path)
         registration = registration_for_lane(database_path, normalized_asset, normalized_timeframe)
         asset_class=normalized_asset_class(database_path,normalized_asset,normalized_timeframe)
-        if asset_class == "CRYPTO":
-            provider_timezone = "UTC"
-        elif asset_class == "US_EQUITIES":
-            provider_timezone = "America/New_York"
-        elif normalized_timeframe != "D1":
-            provider_timezone = "America/New_York"
-        else:
-            provider_timezone = config.timezone
+        provider_timezone = _provider_timezone(
+            asset_class, normalized_timeframe, config.timezone
+        )
         config = replace(config, timezone=provider_timezone)
         if provider_symbol_override:
             provider_symbol = provider_symbol_override
@@ -173,7 +171,7 @@ def acquire_twelve_data(
             "RANGE_TOO_LARGE",
             "request exceeds the 4,000-bar reviewed request ceiling",
         )
-    request = _request(config, provider_symbol, start, end, outputsize)
+    request = _request(config, provider_symbol, start, end)
     authority = None if credit_authority_managed else authority_for_credential(
         credential, clock=clock, sleeper=sleeper
     )
@@ -196,6 +194,9 @@ def acquire_twelve_data(
             received_at=received_at,
             timeframe=normalized_timeframe,asset_class=asset_class,observed_at=datetime.fromisoformat(received_at),
             allow_empty=allow_empty,
+        )
+        batch = _quarantine_extreme_price_outliers(
+            database_path, batch=batch, asset_class=asset_class
         )
     except ProviderPayloadError as error:
         if error.code == "AUTHENTICATION_FAILED":
@@ -239,16 +240,37 @@ def acquire_twelve_data(
         },
         preserve_rejected_evidence=True,
     )
+    if batch.source_rows and not batch.bars:
+        rejection_codes = {item.code for item in batch.rejections}
+        if normalized_timeframe == "D1" and rejection_codes == {"OUT_OF_RANGE_OBSERVATION"}:
+            # Daily FX and metals aggregates can roll their label before the
+            # completed session is queryable during a busy provider window.
+            # The immutable packet remains recorded, but it must be routed as
+            # transient so the Scheduler can use an approved fallback or retry
+            # the exact governed boundary after a short delay.
+            raise AcquisitionError(
+                "PROVIDER_D1_NOT_READY",
+                f"{config.provider_id} returned only observations outside "
+                f"the completed D1 window {from_date}..{through_date}",
+                response_body=response.body,
+            )
+        raise AcquisitionError(
+            "NO_USABLE_OBSERVATIONS",
+            f"{config.provider_id} returned no admissible observations",
+            response_body=response.body,
+        )
     validation = None
     if not defer_validation and batch.bars:
         try:
-            validation = validator(
+            validation = persist_committed_lane_validation(
                 database_path,
-                symbol=normalized_asset,
+                asset=normalized_asset,
                 timeframe=normalized_timeframe,
                 through_date=through_date,
-                persist=True,
                 clock=clock,
+                canonical_inserts=ingestion.inserted,
+                canonical_corrections=ingestion.corrected,
+                validator=validator,
             )
         except BaseException as error:
             _clear_validation_summary(database_path, normalized_asset, normalized_timeframe)
@@ -308,27 +330,43 @@ def normalized_asset_class(database_path,asset,timeframe):
     finally:connection.close()
 
 
+def _provider_timezone(asset_class: str | None, timeframe: str, configured: str) -> str:
+    """Return the provider label timezone for the governed market session."""
+    if asset_class == "CRYPTO":
+        return "UTC"
+    if timeframe != "D1" or asset_class == "US_EQUITIES":
+        return "America/New_York"
+    return configured
+
+
 def _request(
     config: ProviderConfig,
     symbol: str,
     start: date,
     end: date,
-    outputsize: int,
+    outputsize: int | None = None,
 ) -> HttpRequest:
-    # A date-only D1 start/end pair for the same day is interpreted as an empty
-    # timestamp range by Twelve Data. Cover the complete requested day for every
-    # interval so the reviewed canonical boundary is actually included.
-    start_bound = f"{start.isoformat()}T00:00:00"
-    end_bound = f"{end.isoformat()}T23:59:59"
     parameters = [
         ("format", "JSON"),
         ("interval", config.interval),
         ("order", config.order),
     ]
-    if config.interval == "1day" and start == end:
-        parameters.append(("outputsize", "5"))
+    if config.interval == "1day":
+        # Date-only end bounds are material here. Twelve Data has been
+        # observed returning the currently forming FX day for both its `date`
+        # selector and an end-of-day timestamp. A date-only end bound plus an
+        # explicit bounded output size returns the requested completed day.
+        if start != end:
+            parameters.append(("start_date", start.isoformat()))
+        parameters.extend((
+            ("end_date", end.isoformat()),
+            ("outputsize", str((end - start).days + 1)),
+        ))
     else:
-        parameters.extend((("start_date", start_bound), ("end_date", end_bound)))
+        parameters.extend((
+            ("start_date", f"{start.isoformat()}T00:00:00"),
+            ("end_date", f"{end.isoformat()}T23:59:59"),
+        ))
     parameters.extend((("symbol", symbol), ("timezone", config.timezone)))
     return HttpRequest(
         host=config.provider_host,
@@ -441,6 +479,15 @@ def _verify_committed(
     *,
     require_validation: bool = True,
 ) -> bool:
+    """Verify the atomic receipt without rescanning immutable provenance.
+
+    ``ingest_runs`` and its per-action counts are committed in the same SQLite
+    transaction as provenance.  Counting provenance by ``ingest_run_id`` was
+    both redundant and unindexed; on the production authority it scanned 5.8
+    million historical events after every packet.  The keyed receipt and raw
+    block lookups prove the same committed transaction while keeping routine
+    boundary admission proportional to the new packet.
+    """
     connection = open_read_only(database_path)
     try:
         raw = connection.execute(
@@ -448,25 +495,95 @@ def _verify_committed(
             (ingestion.raw_block_id,),
         ).fetchone()
         run = connection.execute(
-            "SELECT status,raw_block_id FROM ingest_runs WHERE ingest_run_id=?",
+            "SELECT status,raw_block_id,detail FROM ingest_runs WHERE ingest_run_id=?",
             (ingestion.ingest_run_id,),
         ).fetchone()
-        provenance = connection.execute(
-            "SELECT count(*) FROM provenance WHERE ingest_run_id=?",
-            (ingestion.ingest_run_id,),
-        ).fetchone()[0]
         lane = connection.execute(
             "SELECT validation_summary FROM lane_state WHERE asset=? AND timeframe=?",
             (asset,timeframe),
         ).fetchone()
+        try:
+            receipt = json.loads(run[2]) if run is not None else None
+        except (json.JSONDecodeError, TypeError):
+            receipt = None
+        recorded_actions = (
+            sum(int(receipt.get(key, 0) or 0) for key in (
+                "inserted", "corrected", "unchanged", "conflicts_preserved",
+            ))
+            if isinstance(receipt, dict) else -1
+        )
+        recorded_staged = int(receipt.get("staged", -1)) if isinstance(receipt, dict) else -1
+        committed_actions = (
+            ingestion.inserted + ingestion.corrected + ingestion.unchanged
+            + ingestion.conflicts_preserved
+        )
         return (
             raw == (body, len(body))
-            and run == ("committed", ingestion.raw_block_id)
-            and provenance == staged_count
+            and run is not None
+            and run[:2] == ("committed", ingestion.raw_block_id)
+            and recorded_staged == staged_count
+            and recorded_actions == committed_actions
             and (not require_validation or (lane is not None and lane[0] is not None))
         )
     finally:
         connection.close()
+
+
+def _quarantine_extreme_price_outliers(
+    database_path: str | Path, *, batch: StagingBatch, asset_class: str
+) -> StagingBatch:
+    """Keep statistically implausible FX D1 observations out of authority."""
+
+    if asset_class != "FX" or not batch.bars or batch.bars[0].timeframe != "D1":
+        return batch
+    candidate_timestamps = {bar.timestamp for bar in batch.bars}
+    first, last = min(candidate_timestamps), max(candidate_timestamps)
+    reference: dict[int, tuple[int, str, str, str, str]] = {}
+    if Path(database_path).expanduser().exists():
+        connection = open_read_only(database_path)
+        try:
+            rows = connection.execute(
+                """SELECT open_time_utc,open,high,low,close FROM bars
+                   WHERE asset=? AND timeframe='D1'
+                     AND open_time_utc BETWEEN ? AND ?
+                   ORDER BY open_time_utc""",
+                (batch.bars[0].symbol, first - 60 * 86_400, last + 60 * 86_400),
+            ).fetchall()
+        finally:
+            connection.close()
+        reference.update({int(row[0]): tuple(row) for row in rows})
+    reference.update(
+        {
+            bar.timestamp: (bar.timestamp, bar.open, bar.high, bar.low, bar.close)
+            for bar in batch.bars
+        }
+    )
+    findings = find_extreme_price_outliers(
+        reference.values(), candidate_timestamps=candidate_timestamps
+    )
+    if not findings:
+        return batch
+    by_timestamp = {finding.timestamp: finding for finding in findings}
+    accepted = tuple(bar for bar in batch.bars if bar.timestamp not in by_timestamp)
+    rejected = tuple(
+        StagingRejection(
+            bar.source_row_number,
+            "EXTREME_PRICE_OUTLIER",
+            (
+                f"{by_timestamp[bar.timestamp].field}={by_timestamp[bar.timestamp].observed} "
+                f"is an extreme local price outlier"
+            ),
+        )
+        for bar in batch.bars
+        if bar.timestamp in by_timestamp
+    )
+    return StagingBatch(
+        bars=accepted,
+        rejections=tuple((*batch.rejections, *rejected)),
+        source_rows=batch.source_rows,
+        duplicate_identical=batch.duplicate_identical,
+        duplicate_conflicting=batch.duplicate_conflicting,
+    )
 
 
 def _clear_validation_summary(database_path: str | Path, asset: str, timeframe: str) -> None:

@@ -22,13 +22,27 @@ from fragarach_ii.provider_facts import (
 import fragarach_ii.provider_facts as provider_facts
 from fragarach_ii.providers.http import HttpResponse
 from fragarach_ii.providers.instrument_search import candidate_from_dict
+from fragarach_ii.credentials import CredentialState
 from fragarach_ii.scheduler_integrity import active_universe
-from fragarach_ii.scheduler_service import _repair_twelve_data_credential_health
+from fragarach_ii.scheduler_service import (
+    _repair_twelve_data_credential_health,
+    _twelve_data_credential_is_verified,
+)
 from fragarach_ii.storage import RegistrationCandidate, initialize_database, open_read_only, register_instrument
 
 
 NOW = datetime(2026, 7, 14, 10, 2, tzinfo=UTC)
 PAIRS = ("AUDSGD", "EURUSD", "GBPAUD", "GBPJPY", "USDCAD", "USDCHF")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_provider_fact_requests(monkeypatch):
+    """Provider-fact tests exercise responses, not the shared credit clock."""
+    monkeypatch.setattr(
+        provider_facts,
+        "credited_send",
+        lambda _credential, *, send, **_kwargs: send(),
+    )
 
 
 class FactTransport:
@@ -236,6 +250,27 @@ def test_verified_credential_clears_stale_scheduler_auth_block() -> None:
         save_provider_facts(db, facts)
         state["TWELVE_DATA"]["health"] = "Authentication Blocked"
         assert not _repair_twelve_data_credential_health(db, state, {"TWELVE_DATA": "invalid"})
+
+
+def test_successful_normal_twelve_data_response_is_valid_auth_recovery(monkeypatch) -> None:
+    """A normal successful acquisition must release prior credential blocks."""
+    with tempfile.TemporaryDirectory() as directory:
+        db = Path(directory) / "authority.sqlite3"
+        _register(db, "EURUSD")
+        facts = load_provider_facts(db)
+        facts["credential_state"] = "Configured"
+        save_provider_facts(db, facts)
+
+        class Authority:
+            def resolve(self, _provider):
+                from types import SimpleNamespace
+                return SimpleNamespace(
+                    state=CredentialState.AVAILABLE,
+                    validation_source="Twelve Data HTTP response",
+                )
+
+        monkeypatch.setattr("fragarach_ii.scheduler_service.CredentialAuthority", Authority)
+        assert _twelve_data_credential_is_verified(db, {"TWELVE_DATA": "secret"})
 
 
 def test_cfd_outside_active_registry_is_retired_non_actionable() -> None:

@@ -36,6 +36,7 @@ REQUEST_STATES = frozenset(
 )
 _REQUEST_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 _ARTIFACT_ID = re.compile(r"^lane-[A-Z0-9._-]+-(?:D1|H1|M30|M15|M5)-[0-9a-f]{32}$")
+_REQUEST_EVENT_LIMIT = 128
 _TRANSITIONS = {
     "WAITING_FOR_STUDIO": {"ACCEPTED", "CANCELLED", "REMOVED"},
     "ACCEPTED": {"TRANSFERRING", "PAUSED", "FAILED", "CANCELLED"},
@@ -47,6 +48,13 @@ _TRANSITIONS = {
     "CANCELLED": set(),
     "REMOVED": set(),
 }
+
+
+def _append_request_event(request: dict[str, Any], event: dict[str, Any]) -> None:
+    events = request.setdefault("events", [])
+    events.append(event)
+    if len(events) > _REQUEST_EVENT_LIMIT:
+        del events[:-_REQUEST_EVENT_LIMIT]
 
 
 def artifact_root(paths: ReplicaPaths) -> Path:
@@ -342,9 +350,9 @@ def update_request(paths: ReplicaPaths, client_id: str, request_id: str,
     if current == "FAILED" and state == "ACCEPTED":
         request.update(attempt=int(request.get("attempt") or 0) + 1,
                        transferred_bytes=0, verified_bytes=0, last_error=None)
-    request.setdefault("events", []).append({"state": state, "at_utc": now,
-                                               "transferred_bytes": request["transferred_bytes"],
-                                               "verified_bytes": request["verified_bytes"]})
+    _append_request_event(request, {"state": state, "at_utc": now,
+                                    "transferred_bytes": request["transferred_bytes"],
+                                    "verified_bytes": request["verified_bytes"]})
     row["updated_at_utc"] = now
     _write_registry(paths, registry)
     return request
@@ -384,7 +392,7 @@ def registry_projection(paths: ReplicaPaths, client_id: str) -> dict[str, Any]:
                     transferred_bytes=0, verified_bytes=0,
                     last_update_outcome="UPDATE_AVAILABLE", last_error=None,
                 )
-                request.setdefault("events", []).append({
+                _append_request_event(request, {
                     "state": "ACCEPTED", "at_utc": now, "reason": "STUDIO_LANE_AVAILABLE"
                 })
                 changed = True
@@ -413,7 +421,7 @@ def registry_projection(paths: ReplicaPaths, client_id: str) -> dict[str, Any]:
                     updated_at_utc=now, update_available_at_utc=now,
                     last_update_outcome="UPDATE_AVAILABLE", last_error=None,
                 )
-                request.setdefault("events", []).append({
+                _append_request_event(request, {
                     "state": "ACCEPTED", "at_utc": now, "reason": "LANE_UPDATED"
                 })
             changed = True

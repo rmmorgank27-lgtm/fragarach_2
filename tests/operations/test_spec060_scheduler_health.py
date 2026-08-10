@@ -44,6 +44,22 @@ class Spec060SchedulerHealthTests(unittest.TestCase):
         self.assertEqual(health["monitor_transport"]["state"], "MONITOR_DISCONNECTED")
         self.assertEqual(health["process"]["state"], "ALIVE")
 
+    def test_live_worker_is_progress_even_before_first_stage_timestamp(self) -> None:
+        now = datetime.now(UTC)
+        health = scheduler_operational_health(
+            {"scheduler_progress": {
+                "actionable_queue_depth": 12,
+                "active_workers": 1,
+                "available_workers": 3,
+                "last_meaningful_progress": None,
+                "permitted_progress_window_seconds": 45,
+            }},
+            process_alive=True, heartbeat_time=now.isoformat(),
+            monitor_state="CONNECTED", now=now,
+        )
+        self.assertEqual(health["overall_operational_health"], "HEALTHY")
+        self.assertEqual(health["worker_pool"]["active_workers"], 1)
+
     def test_idle_stalled_and_unavailable_are_distinct(self) -> None:
         idle = self.health(queue=[], events=[])
         self.assertEqual(idle["overall_operational_health"], "IDLE")
@@ -85,6 +101,12 @@ class Spec060SchedulerHealthTests(unittest.TestCase):
             while not paths.socket.exists() and time.monotonic() < deadline:
                 time.sleep(0.02)
             before = send_service_request(paths, {"contract": STATUS_CONTRACT, "request": "ping"})
+            native_status = send_service_request(
+                paths,
+                {"contract": STATUS_CONTRACT, "request": "status", "app_build": "Development"},
+            )
+            self.assertTrue(native_status["acquisition_owner_active"])
+            self.assertIn("recommended_actions", native_status)
             queue_before = json.loads(paths.journal.read_text()).get("acquisition_queue", [])
             runtime.request_monitor_repair()
             after = before

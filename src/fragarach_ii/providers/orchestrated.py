@@ -36,9 +36,8 @@ def acquire_from_provider(
             from_date=from_date, through_date=through_date, merge_mode=merge_mode,
             provider_symbol_override=provider_symbol,
             mapping_class=mapping_class,
+            progress=progress,
         )
-        if progress:
-            progress("validating"); progress("ingesting")
         return result
     if provider == "BINANCE":
         return acquire_binance(

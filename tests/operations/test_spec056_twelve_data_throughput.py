@@ -118,6 +118,20 @@ def test_active_reservation_survives_credit_window_rollover(tmp_path: Path) -> N
     assert state["active_reservations"] == 0
 
 
+def test_live_owner_reservation_survives_old_five_minute_stale_cutoff(tmp_path: Path) -> None:
+    clock = MutableClock(datetime(2026, 7, 15, 0, 0, tzinfo=UTC))
+    credit = authority(tmp_path, clock)
+    reservation = credit.reserve(1, endpoint="time_series")
+    reservation_id = str(reservation["reservation_id"])
+
+    clock.value += timedelta(minutes=6)
+    carried = credit.inspect()
+
+    assert carried["active_reservations"] == 1
+    assert carried["reservations"][0]["owner_pid"] > 0
+    assert credit.dispatch(reservation_id)["dispatched"] == 1
+
+
 def test_actual_429_uses_retry_after_without_marking_provider_unhealthy(tmp_path: Path) -> None:
     clock = MutableClock(datetime(2026, 7, 15, 0, 0, tzinfo=UTC))
     credit = authority(tmp_path, clock)
@@ -282,7 +296,7 @@ def test_credit_state_and_trace_are_secret_redacted(tmp_path: Path) -> None:
 def test_persistent_executor_dispatches_before_any_full_monitor_snapshot(monkeypatch) -> None:
     import fragarach_ii.scheduler_service as scheduler_module
 
-    service = SchedulerService("authority.sqlite3", credential="fixture")
+    service = SchedulerService("authority.sqlite3", credential="fixture", clock=lambda: AT)
     due_calls: list[dict[str, object]] = []
 
     def snapshot(*_args, **_kwargs):

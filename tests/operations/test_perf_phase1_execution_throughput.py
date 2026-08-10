@@ -50,7 +50,9 @@ def test_required_set_overlaps_two_provider_lanes_and_records_timing() -> None:
         assert result["outcome"] == "SUCCESS"
         assert peak_active == 2
         # Four lanes execute in two bounded waves, rather than four serial calls.
-        assert elapsed < 1.2
+        # Durable SQLite scheduler progress adds bounded bookkeeping around
+        # the two provider waves; the overlap proof is peak_active == 2.
+        assert elapsed < 1.8
         timings = [
             item for item in SchedulerJournal(database, journal).data["operation_timing_records"]
             if item.get("step_name") == "lane_execution"

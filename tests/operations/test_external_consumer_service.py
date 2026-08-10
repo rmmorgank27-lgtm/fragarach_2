@@ -6,14 +6,16 @@ import json
 import os
 import tempfile
 import unittest
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
 from fragarach_ii.commands.get_history import main
 from fragarach_ii.external_consumer_service import CATALOG_CONTRACT, CONTRACT, HistoryService
 from fragarach_ii.history_depth import D1_MORPHIX_MIN_OBSERVATIONS
-from fragarach_ii.storage import open_read_only
+from fragarach_ii.storage import open_read_only, registered_writer
+from fragarach_ii.synthetic_repository import SyntheticRepository
+from tests.operations.test_spec045_synthetic_repository import add_intraday
 from tests.validation.test_d1_session_validation import _create_lane
 
 
@@ -66,6 +68,25 @@ class ExternalConsumerServiceTests(unittest.TestCase):
             self.assertEqual(response["bar_count"], 0)
             self.assertEqual(response["bars"], [])
 
+    def test_extreme_fx_outlier_is_never_served_as_green(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "authority.sqlite3"
+            dates = [f"2026-07-{day:02d}" for day in range(1, 13)]
+            _create_lane(database, "AUDUSD", dates)
+            with registered_writer(database) as connection:
+                connection.execute(
+                    "UPDATE bars SET open='0.59',high='0.596',low='0.584',close='0.591'"
+                )
+                connection.execute(
+                    "UPDATE bars SET high='1.71632' WHERE open_time_utc=strftime('%s','2026-07-07')"
+                )
+
+            response = HistoryService(database).get_history("AUDUSD", "D1")
+
+        self.assertEqual(response["status"], "AVAILABLE")
+        self.assertEqual(response["authority"], "RED")
+        self.assertIn("EXTREME_PRICE_OUTLIER", response["reason"])
+
     def test_cli_request_contains_only_symbol_and_timeframe(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "authority.sqlite3"
@@ -95,6 +116,48 @@ class ExternalConsumerServiceTests(unittest.TestCase):
             history = next(row for row in payload["histories"] if row["symbol"] == "AUDUSD")
             self.assertEqual((history["timeframe"], history["bar_count"]), ("D1", 2))
             self.assertEqual(database.read_bytes(), before)
+
+    def test_echo_can_read_authorised_derived_m15_but_real_only_cannot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "authority.sqlite3"
+            _create_lane(database, "AUDUSD", ["2026-07-13"])
+            start = int(datetime(2026, 7, 13, 21, tzinfo=UTC).timestamp())
+            add_intraday(database, "M5", start, 6, 300)
+            add_intraday(database, "M30", start, 2, 1800)
+            add_intraday(database, "H1", start, 1, 3600)
+            repository = SyntheticRepository(database)
+            repository.activate_registry(generate_on_activation=False)
+            repository.generate(
+                "AUDUSD:M15",
+                generated_at=datetime(2026, 7, 13, 22, tzinfo=UTC),
+            )
+            service = HistoryService(database)
+
+            denied = service.get_history("AUDUSD", "M15")
+            allowed = service.get_history(
+                "AUDUSD", "M15", consumer="com.raymorgan.echo",
+                evidence_requirement="SYNTHETIC_PERMITTED",
+            )
+            catalogue = service.list_histories(
+                consumer="com.raymorgan.echo",
+                evidence_requirement="SYNTHETIC_PERMITTED",
+            )
+
+            self.assertEqual(denied["status"], "SYNTHETIC_NOT_PERMITTED")
+            self.assertEqual(
+                (
+                    allowed["status"], allowed["authority"],
+                    allowed["evidence_class"], allowed["bar_count"],
+                ),
+                ("AVAILABLE", "AMBER", "SYNTHETIC", 2),
+            )
+            self.assertEqual(
+                [
+                    row["timeframe"] for row in catalogue["histories"]
+                    if row["symbol"] == "AUDUSD" and row["timeframe"] == "M15"
+                ],
+                ["M15"],
+            )
 
     def test_estate_catalogue_requires_d1_depth_before_morphix_eligibility(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -16,7 +16,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Iterator
 
-from .freshness import assess_lane_freshness, authority_revision_for_lane, normalized_utc
+from .freshness import (
+    assess_lane_freshness, authority_revision_for_lane, normalized_utc,
+    provider_route_revision_for_lane,
+)
 from .operational_schedule import schedule_for_lane
 from .scheduler_integrity import active_universe
 from .storage import open_read_only
@@ -87,7 +90,7 @@ class LaneUpdateRegister:
                     "next_check_at_utc": next_check,
                     "last_successful_bar_utc": _latest_bar(authority, symbol, timeframe),
                     "last_outcome": outcome,
-                    "provider_route_revision": authority_revision_for_lane(
+                    "provider_route_revision": provider_route_revision_for_lane(
                         authority, symbol=symbol, timeframe=timeframe
                     ),
                     "calendar_or_session_revision": _schedule_revision(schedule),
@@ -153,7 +156,7 @@ class LaneUpdateRegister:
                 raise KeyError(f"commissioned evidence lane is unavailable: {symbol}:{interval}")
             schedule = schedule_for_lane(authority, symbol=symbol, timeframe=interval, after=observed)
             latest = _latest_bar(authority, symbol, interval)
-            route_revision = authority_revision_for_lane(
+            route_revision = provider_route_revision_for_lane(
                 authority, symbol=symbol, timeframe=interval,
             )
 
@@ -362,6 +365,70 @@ class LaneUpdateRegister:
                 raise
         return int(cursor.rowcount)
 
+    def refresh_provider_route_revisions(
+        self, *, at: datetime | None = None, reason: str = "OPERATOR_REVIEW",
+    ) -> dict[str, object]:
+        """Refresh route fingerprints without changing any lane state.
+
+        This is the bounded repair after an operator has reviewed an audit's
+        route-revision findings.  It deliberately preserves READY, RETRY,
+        BLOCKED, PAUSED, and RUNNING ownership; route metadata is not authority
+        to release or suppress operational work.
+        """
+
+        observed = normalized_utc(at)
+        with self._connection() as connection:
+            lanes = [
+                (str(row[0]), str(row[1]), str(row[2] or ""))
+                for row in connection.execute(
+                    "SELECT asset,timeframe,provider_route_revision FROM lane_update_register"
+                )
+            ]
+        revisions: dict[str, str] = {}
+        with open_read_only(self.database_path) as authority:
+            for asset, _timeframe, _prior in lanes:
+                revisions.setdefault(
+                    asset,
+                    provider_route_revision_for_lane(
+                        authority, symbol=asset, timeframe="D1",
+                    ),
+                )
+        changed = 0
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                for asset, timeframe, prior in lanes:
+                    revision = revisions[asset]
+                    if prior == revision:
+                        continue
+                    connection.execute(
+                        """UPDATE lane_update_register
+                           SET provider_route_revision=?, updated_at_utc=?,
+                               lane_state_version=lane_state_version+1
+                           WHERE asset=? AND timeframe=?""",
+                        (revision, observed.isoformat(), asset, timeframe),
+                    )
+                    changed += 1
+                self._set_meta(
+                    connection, "provider_route_revision_refreshed_at_utc",
+                    observed.isoformat(),
+                )
+                self._set_meta(
+                    connection, "provider_route_revision_refresh_reason",
+                    str(reason).strip() or "OPERATOR_REVIEW",
+                )
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+        return {
+            "contract": REGISTER_CONTRACT,
+            "route_revisions_changed": changed,
+            "lane_states_changed": 0,
+            "refreshed_at_utc": observed.isoformat(),
+            "reason": str(reason).strip() or "OPERATOR_REVIEW",
+        }
+
     def audit_due(self, *, at: datetime | None = None) -> bool:
         """Whether the bounded weekly maintenance audit is due."""
         observed = normalized_utc(at)
@@ -431,11 +498,14 @@ class LaneUpdateRegister:
 
     def block(self, *, asset: str, timeframe: str, reason: str, at: datetime | None = None) -> dict[str, object]:
         observed = normalized_utc(at)
+        reason = str(reason).strip()
+        if not reason:
+            raise ValueError("BLOCK_REASON_REQUIRED")
         self._update(
             asset, timeframe, state="BLOCKED", next_check_at_utc=None,
             last_outcome=reason, retry_not_before_utc=None, updated_at_utc=observed.isoformat(),
         )
-        return {"state": "BLOCKED", "reason": reason}
+        return {"state": "BLOCKED", **_blocker_guidance(reason)}
 
     def pause(self, *, asset: str, timeframe: str, at: datetime | None = None) -> None:
         self._update(asset, timeframe, state="PAUSED", updated_at_utc=normalized_utc(at).isoformat())
@@ -625,7 +695,44 @@ def _parse_utc(value: object) -> datetime | None:
 
 
 def _row_dict(row: sqlite3.Row) -> dict[str, object]:
-    return {str(key): row[key] for key in row.keys()}
+    result = {str(key): row[key] for key in row.keys()}
+    if result.get("state") == "BLOCKED":
+        result.update(_blocker_guidance(result.get("last_outcome")))
+    return result
+
+
+def _blocker_guidance(value: object) -> dict[str, str]:
+    """Make every lane block actionable without widening its scope.
+
+    A register block is deliberately a lane-local safety stop.  The guidance
+    travels with the bounded dashboard row so the native app never has to
+    infer a repair from an opaque scheduler outcome.
+    """
+    reason = str(value or "UNSPECIFIED_BLOCK").strip() or "UNSPECIFIED_BLOCK"
+    normalized = reason.upper()
+    if "CREDENTIAL" in normalized or "AUTHENTICATION" in normalized:
+        detail = "The approved provider credential is missing, invalid, or rejected."
+        repair = "Configure and validate the provider credential; verified lanes are requeued automatically."
+    elif "CALENDAR" in normalized or "SESSION" in normalized or "SCHEDULE" in normalized or "EXPECTED_EDGE" in normalized:
+        detail = "The approved calendar or session policy cannot determine a completed acquisition boundary."
+        repair = "Review Calendar & Session Policy, then run Estate Audit to rebuild this lane's schedule."
+    elif "REGISTRATION" in normalized:
+        detail = "The lane's governing instrument registration is unavailable to the scheduler."
+        repair = "Open the instrument record, restore or re-register the approved identity, then run Estate Audit."
+    elif "MAPPING" in normalized or "PROVIDER" in normalized or "ENTITLEMENT" in normalized:
+        detail = "No approved provider route can currently supply governed evidence for this lane."
+        repair = "Open Provider Facts, repair the reviewed route or entitlement, then retry this lane."
+    elif "LOCAL_PROGRAMMING_ERROR" in normalized or "LOCAL_" in normalized:
+        detail = "The local acquisition executor stopped before it could safely publish evidence."
+        repair = "Open Scheduler Diagnostics, repair or restart the service, then retry this lane."
+    else:
+        detail = "The scheduler stopped this lane because its last acquisition could not be completed safely."
+        repair = "Open Scheduler Diagnostics, review the exact outcome, correct the reported condition, then retry this lane."
+    return {
+        "blocker_reason": f"{reason}: {detail}",
+        "repair_action": repair,
+        "flow_impact": "Only this lane is held; scheduled acquisition for all other lanes continues.",
+    }
 
 
 def _preserved_values(prior: dict[str, object] | None) -> dict[str, object]:

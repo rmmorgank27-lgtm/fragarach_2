@@ -73,9 +73,12 @@ def merge_staged_bars(
 
         prior = tuple(current[1:6])
         if (current[0],*prior) == (bar.close_timestamp,*bar.values):
-            action = "UNCHANGED"
             unchanged += 1
-            supersedes = None
+            # The raw block and committed ingest run preserve the exact
+            # provider observation.  An equal canonical bar is not a new
+            # evidence admission, so it must not inflate immutable per-bar
+            # provenance on every overlapping history response.
+            continue
         elif merge_mode == "preserve":
             action = "CONFLICT_PRESERVED"
             conflicts += 1

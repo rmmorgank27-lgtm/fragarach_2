@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
-import shutil
-import sqlite3
 import tempfile
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -17,34 +17,109 @@ from fragarach_ii.acquisition_orchestrator import (
 )
 from fragarach_ii.estate_truth_service import estate_truth_state
 from fragarach_ii.freshness import assess_lane_freshness
+from fragarach_ii.market_discovery import discover_market
 from fragarach_ii.operational_schedule import schedule_for_lane
+from fragarach_ii.providers.instrument_search import candidate_from_dict
+from fragarach_ii.provider_facts import approve_reviewed_provider_mapping
 from fragarach_ii.scheduler_service import SchedulerJournal, run_operator_fetch
-from fragarach_ii.storage import open_read_only, registered_writer
+from fragarach_ii.storage import (
+    initialize_database,
+    open_read_only,
+    registered_writer,
+    register_instrument,
+)
 
 
-ROOT = Path(__file__).resolve().parents[2]
-RUNTIME = ROOT / "data/runtime/spec002_real_evidence_acceptance.sqlite3"
 NOW = datetime(2026, 7, 15, 2, 0, tzinfo=UTC)
 
 
 def _runtime_fixture(root: Path) -> tuple[Path, Path]:
     database = root / "authority.sqlite3"
-    shutil.copy2(RUNTIME, database)
-    shutil.copy2(Path(f"{RUNTIME}.provider-facts.json"), Path(f"{database}.provider-facts.json"))
-    # The native runtime is intentionally live and may already have converged.
-    # Establish the observed regression boundary in this disposable copy so the
-    # test remains deterministic after a successful production publication.
-    cutoff = int(datetime(2026, 7, 14, tzinfo=UTC).timestamp())
-    with sqlite3.connect(database) as connection:
-        connection.execute("DROP TRIGGER IF EXISTS provenance_no_delete")
-        connection.execute(
-            "DELETE FROM provenance WHERE symbol IN ('DJI','SPY') AND timeframe='D1' AND timestamp>=?",
-            (cutoff,),
-        )
-        connection.execute(
-            "DELETE FROM bars WHERE asset IN ('DJI','SPY') AND timeframe='D1' AND open_time_utc>=?",
-            (cutoff,),
-        )
+    initialize_database(database)
+    for symbol in ("DJI", "SPY", "AUDUSD", "XAUUSD"):
+        market = discover_market(database, symbol)["markets"][0]
+        representation = next((
+            item for item in market["representations"]
+            if item.get("registration_plan") is not None
+        ), None)
+        if representation is not None:
+            candidate = candidate_from_dict(json.loads(base64.urlsafe_b64decode(
+                representation["registration_plan"]["candidate"]
+            )))
+            if symbol in {"DJI", "SPY"}:
+                candidate = replace(
+                    candidate,
+                    provider_id=None,
+                    provider_contract=None,
+                    provider_symbol=None,
+                    provider_instrument_type=None,
+                )
+            register_instrument(
+                database, candidate, registered_at_utc="2026-07-13T00:00:00+00:00"
+            )
+            if symbol in {"DJI", "SPY"}:
+                approve_reviewed_provider_mapping(
+                    database,
+                    canonical_symbol=symbol,
+                    provider="YAHOO_FINANCE",
+                    provider_symbol="^DJI" if symbol == "DJI" else "SPY",
+                    timeframe="D1",
+                    asset_class=candidate.asset_class,
+                    representation_type=candidate.representation_type,
+                    provider_instrument_type="Index" if symbol == "DJI" else "ETF",
+                    decided_at=NOW,
+                )
+        payload = f"synthetic spec-059 history:{symbol}".encode()
+        raw_id, run_id = f"raw-spec059-{symbol}", f"run-spec059-{symbol}"
+        with registered_writer(database) as connection:
+            connection.execute(
+                """INSERT INTO raw_blocks
+                   (raw_block_id,sha256,source_name,source_locator,media_type,
+                    received_at_utc,byte_length,payload)
+                   VALUES(?,?,?,?,?,?,?,?)""",
+                (
+                    raw_id, hashlib.sha256(payload).hexdigest(), "fixture", symbol,
+                    "text/plain", NOW.isoformat(), len(payload), payload,
+                ),
+            )
+            connection.execute(
+                """INSERT INTO ingest_runs
+                   (ingest_run_id,kind,status,started_at_utc,finished_at_utc,raw_block_id,detail)
+                   VALUES(?,'fixture','committed',?,?,?,?)""",
+                (
+                    run_id, NOW.isoformat(), NOW.isoformat(), raw_id,
+                    json.dumps({"asset": symbol, "timeframe": "D1"}),
+                ),
+            )
+            fixture_dates = (
+                ("2026-07-12", "2026-07-13")
+                if symbol in {"DJI", "SPY"}
+                else ("2026-07-13", "2026-07-14")
+            )
+            for index, opened_at in enumerate(fixture_dates, start=1):
+                opened = int(datetime.fromisoformat(f"{opened_at}T00:00:00+00:00").timestamp())
+                connection.execute(
+                    """INSERT INTO bars
+                       (asset,timeframe,open_time_utc,open,high,low,close,
+                        created_by_ingest_run_id,updated_by_ingest_run_id)
+                       VALUES(?,'D1',?,'1','2','0','1',?,?)""",
+                    (symbol, opened, run_id, run_id),
+                )
+                connection.execute(
+                    """INSERT INTO provenance
+                       (provenance_event_id,ingest_run_id,raw_block_id,symbol,timeframe,
+                        timestamp,source_row_number,merge_action,candidate_open,candidate_high,
+                        candidate_low,candidate_close,recorded_at)
+                       VALUES(?,?,?,?,'D1',?,?,'INSERT','1','2','0','1',?)""",
+                    (f"event-spec059-{symbol}-{index}", run_id, raw_id, symbol, opened, index, NOW.isoformat()),
+                )
+            connection.execute(
+                """INSERT INTO lane_state
+                   (asset,timeframe,high_watermark_open_time_utc,state_version,
+                    last_ingest_run_id,updated_at_utc)
+                   VALUES(?,'D1',?,1,?,?)""",
+                (symbol, opened, run_id, NOW.isoformat()),
+            )
     return database, root / "scheduler.json"
 
 
@@ -154,7 +229,8 @@ def test_manual_updates_advance_canonical_edges_and_estate_truth() -> None:
                 database, symbol=symbol, timeframe="D1", credential="fixture",
                 requested_mode="update", requested_start="2026-07-14",
                 requested_end="2026-07-14", reviewed_historical_range=True,
-                journal_path=journal_path, at=NOW, acquirer=_publish,
+                journal_path=journal_path.with_name(f"scheduler-{symbol}.json"),
+                at=NOW, acquirer=_publish,
             )
             assert result["outcome"] == "SUCCESS"
             assert result["canonical_edge_before"] == "2026-07-13T00:00:00+00:00"
