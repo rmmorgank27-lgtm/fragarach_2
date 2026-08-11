@@ -21,6 +21,10 @@ from .writer import WriterLock, WriterLockError
 from .authority_ledger import (AuthorityEventManifest, AuthorityEventResult, AuthorityLedgerError,
     append_authority_event, bootstrap_legacy_authority, canonical_json, inspect_authority,
     prepare_authority_event, reconstruct_authority)
+from .instrument_profiles import (
+    InstrumentProfileError, InstrumentProfileEventCandidate, instrument_profile,
+    record_instrument_profile_event, required_origin_event,
+)
 
 __all__ = [
     "IntegrityReport",
@@ -43,4 +47,6 @@ __all__ = [
     "AuthorityEventManifest", "AuthorityEventResult", "AuthorityLedgerError",
     "append_authority_event", "bootstrap_legacy_authority", "canonical_json",
     "inspect_authority", "prepare_authority_event", "reconstruct_authority",
+    "InstrumentProfileError", "InstrumentProfileEventCandidate", "instrument_profile",
+    "record_instrument_profile_event", "required_origin_event",
 ]

@@ -28,7 +28,7 @@ from .storage import open_read_only
 REGISTRY_CONTRACT = "fragarach_ii.read_only_client_registry.v1"
 STATUS_CONTRACT = "fragarach_ii.read_only_client_status.v1"
 PUBLICATION_CONTRACT = "fragarach.replica_publication.v1"
-REPLICA_DATABASE_CONTRACT = "fragarach.replica_database.v2"
+REPLICA_DATABASE_CONTRACT = "fragarach.replica_database.v3"
 DEFAULT_PUBLISHER_PORT = 9462
 _CLIENT_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{1,63}$")
 _TIMEFRAMES = frozenset({"D1", "H1", "M30", "M15", "M5"})
@@ -324,8 +324,10 @@ def client_control(paths: ReplicaPaths, client: dict[str, Any]) -> dict[str, Any
     manifest = latest_manifest(paths) or {}
     source = open_read_only(paths.database)
     try:
+        from .storage.instrument_profiles import instrument_profile
         registrations = {
-            asset: {"asset_class": asset_class, "instrument_type": instrument_type}
+            asset: {"asset_class": asset_class, "instrument_type": instrument_type,
+                    "profile": instrument_profile(source, asset)}
             for asset, asset_class, instrument_type in
             source.execute(
                 """SELECT asset,asset_class,instrument_type FROM instrument_registrations
@@ -343,7 +345,7 @@ def client_control(paths: ReplicaPaths, client: dict[str, Any]) -> dict[str, Any
             if lane.get("caodt") is not None else None,
             **registrations.get(
                 lane.get("symbol"),
-                {"asset_class": "UNKNOWN", "instrument_type": "UNKNOWN"},
+                {"asset_class": "UNKNOWN", "instrument_type": "UNKNOWN", "profile": None},
             ),
             "state": "AVAILABLE",
         }
@@ -493,7 +495,8 @@ def create_full_snapshot(
               symbol TEXT PRIMARY KEY,aliases_json TEXT NOT NULL,display_name TEXT NOT NULL,
               asset_class TEXT NOT NULL,instrument_type TEXT NOT NULL,
               calendar_id TEXT NOT NULL,calendar_version INTEGER NOT NULL,
-              registration_status TEXT NOT NULL
+              registration_status TEXT NOT NULL,
+              profile_json TEXT NOT NULL CHECK (json_valid(profile_json))
             ) WITHOUT ROWID;
             CREATE TABLE lanes(
               symbol TEXT NOT NULL,timeframe TEXT NOT NULL,first_bar_utc INTEGER,
@@ -509,7 +512,7 @@ def create_full_snapshot(
             """
         )
         symbol_clause, symbol_parameters = _scope_clause(symbol_scope, "asset")
-        registrations = source.execute(
+        registration_rows = source.execute(
             """SELECT asset,aliases_json,display_name,asset_class,instrument_type,calendar_id,
                       calendar_version,registration_status
                FROM instrument_registrations WHERE timeframe='D1'"""
@@ -517,8 +520,14 @@ def create_full_snapshot(
             + " ORDER BY asset",
             symbol_parameters,
         ).fetchall()
+        from .storage.instrument_profiles import instrument_profile
+        registrations = [
+            (*row, json.dumps(instrument_profile(source, str(row[0])),
+                              sort_keys=True, separators=(",", ":")))
+            for row in registration_rows
+        ]
         target.executemany(
-            "INSERT INTO registrations VALUES(?,?,?,?,?,?,?,?)", registrations
+            "INSERT INTO registrations VALUES(?,?,?,?,?,?,?,?,?)", registrations
         )
         timeframe_clause, timeframe_parameters = _scope_clause(timeframe_scope, "timeframe")
         lane_rows = source.execute(

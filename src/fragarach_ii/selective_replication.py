@@ -29,7 +29,7 @@ from .storage import open_read_only
 
 REGISTRY_CONTRACT = "fragarach.selective_registry.v2"
 ARTIFACT_CONTRACT = "fragarach.lane_artifact.v2"
-DATABASE_CONTRACT = "fragarach.lane_database.v3"
+DATABASE_CONTRACT = "fragarach.lane_database.v4"
 REQUEST_STATES = frozenset(
     {"REQUESTED", "WAITING_FOR_STUDIO", "ACCEPTED", "TRANSFERRING", "VERIFYING", "ACTIVE",
      "PAUSED", "FAILED", "CANCELLED", "REMOVED"}
@@ -75,7 +75,9 @@ def _registration(source: sqlite3.Connection, symbol: str) -> tuple[Any, ...]:
     ).fetchone()
     if row is None:
         raise ReplicaControlError("LANE_NOT_AVAILABLE", symbol)
-    return row
+    from .storage.instrument_profiles import instrument_profile
+    return (*row, json.dumps(instrument_profile(source, symbol),
+                             sort_keys=True, separators=(",", ":")))
 
 
 def create_lane_artifact(paths: ReplicaPaths, symbol: str, timeframe: str) -> dict[str, Any]:
@@ -125,7 +127,8 @@ def create_lane_artifact(paths: ReplicaPaths, symbol: str, timeframe: str) -> di
               symbol TEXT PRIMARY KEY,aliases_json TEXT NOT NULL,display_name TEXT NOT NULL,
               asset_class TEXT NOT NULL,instrument_type TEXT NOT NULL,
               calendar_id TEXT NOT NULL,calendar_version INTEGER NOT NULL,
-              registration_status TEXT NOT NULL) WITHOUT ROWID;
+              registration_status TEXT NOT NULL,
+              profile_json TEXT NOT NULL CHECK (json_valid(profile_json))) WITHOUT ROWID;
             CREATE TABLE lanes(
               symbol TEXT NOT NULL,timeframe TEXT NOT NULL,first_bar_utc INTEGER,last_bar_utc INTEGER,
               bar_count INTEGER NOT NULL,data_fingerprint TEXT NOT NULL,
@@ -139,7 +142,7 @@ def create_lane_artifact(paths: ReplicaPaths, symbol: str, timeframe: str) -> di
         first = int(rows[0][0]) if rows else None
         caodt = int(rows[-1][0]) if rows else None
         source_revision = f"sha256:{fingerprint}"
-        target.execute("INSERT INTO registrations VALUES(?,?,?,?,?,?,?,?)", registration)
+        target.execute("INSERT INTO registrations VALUES(?,?,?,?,?,?,?,?,?)", registration)
         target.execute("INSERT INTO lanes VALUES(?,?,?,?,?,?)",
                        (symbol, timeframe, first, caodt, len(rows), fingerprint))
         target.executemany("INSERT INTO bars VALUES(?,?,?,?,?,?,?,?,?)",
@@ -168,6 +171,7 @@ def create_lane_artifact(paths: ReplicaPaths, symbol: str, timeframe: str) -> di
             "symbol": symbol, "timeframe": timeframe,
             "asset_class": registration[3],
             "instrument_type": registration[4],
+            "profile": json.loads(str(registration[8])),
             "source_revision": source_revision, "generated_at_utc": created,
             "first_bar_utc": datetime.fromtimestamp(first, UTC).isoformat() if first is not None else None,
             "caodt": datetime.fromtimestamp(caodt, UTC).isoformat() if caodt is not None else None,
@@ -373,8 +377,10 @@ def registry_projection(paths: ReplicaPaths, client_id: str) -> dict[str, Any]:
     manifest = latest_manifest(paths) or {}
     source = open_read_only(paths.database)
     try:
+        from .storage.instrument_profiles import instrument_profile
         registrations = {
-            asset: {"asset_class": asset_class, "instrument_type": instrument_type}
+            asset: {"asset_class": asset_class, "instrument_type": instrument_type,
+                    "profile": instrument_profile(source, asset)}
             for asset, asset_class, instrument_type in source.execute(
                 """SELECT asset,asset_class,instrument_type FROM instrument_registrations
                    WHERE timeframe='D1'"""
@@ -459,7 +465,7 @@ def registry_projection(paths: ReplicaPaths, client_id: str) -> dict[str, Any]:
                   if lane.get("caodt") is not None else None,
                   **registrations.get(
                       lane.get("symbol"),
-                      {"asset_class": "UNKNOWN", "instrument_type": "UNKNOWN"},
+                      {"asset_class": "UNKNOWN", "instrument_type": "UNKNOWN", "profile": None},
                   ),
                   "state": "STUDIO_AVAILABLE"} for lane in manifest.get("lanes") or []]
     return {"contract": REGISTRY_CONTRACT, "registry_revision": int(registry.get("revision") or 0),

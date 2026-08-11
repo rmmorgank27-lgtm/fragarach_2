@@ -68,10 +68,11 @@ struct LiteLaneStatusCell:View {
             .animation(.easeInOut(duration:0.35),value:visual.progress)
         }
         .buttonStyle(.plain)
-        .help("\(lane.symbol) \(lane.timeframe) · \(lane.assetClass ?? "UNKNOWN") · \(lane.instrumentType ?? "UNKNOWN") · \(visual.state.rawValue) · \(Int(visual.progress * 100))% · click to \(actionLabel)")
+        .help("\(lane.symbol) \(lane.timeframe) · \(lane.assetClass ?? "UNKNOWN") · \(lane.instrumentType ?? "UNKNOWN") · \(origin) · \(visual.state.rawValue) · \(Int(visual.progress * 100))% · click to \(actionLabel)")
     }
 
     private var actionLabel:String {switch visual.state{case .studioOnly:"request";case .local,.requested,.incoming:"pause";case .paused:"resume";case .failed:"retry"}}
+    private var origin:String {guard let event=lane.profile?.origin else{return "origin pending"};return "\(event.eventType.replacingOccurrences(of:"_",with:" ")) \(event.occurredAtUTC)"}
 
     private func short(_ value:String)->String {
         value.replacingOccurrences(of:"+00:00",with:"").replacingOccurrences(of:"T",with:" ")

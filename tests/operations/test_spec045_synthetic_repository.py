@@ -139,7 +139,7 @@ class Spec045SyntheticRepositoryTests(unittest.TestCase):
         with open_read_only(self.database) as connection:
             real_before = authority_revision_for_lane(connection, symbol="AUDUSD", timeframe="M5")
             table_count = connection.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchone()[0]
-        self.assertEqual(table_count, 12)
+        self.assertEqual(table_count, 13)
         self.assertEqual(before["synthetic_revision"], 1)
         self.assertEqual(before["complete_lineage"][0]["evidence_class"], "REAL")
         with registered_writer(self.database) as connection:
@@ -151,7 +151,7 @@ class Spec045SyntheticRepositoryTests(unittest.TestCase):
         self.assertEqual(refreshed["synthetic_revision"], 2)
         with open_read_only(self.database) as connection:
             real_after = authority_revision_for_lane(connection, symbol="AUDUSD", timeframe="M5")
-            self.assertEqual(connection.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchone()[0], 12)
+            self.assertEqual(connection.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchone()[0], 13)
         self.assertNotEqual(real_before, real_after)
 
     def test_synthetic_to_synthetic_retains_complete_real_lineage(self) -> None:

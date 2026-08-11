@@ -71,7 +71,7 @@ class Spec049ASchedulerRecoveryTests(unittest.TestCase):
             integrity = verify_integrity(paths.database)
             self.assertTrue(integrity.ok)
             self.assertEqual(integrity.application_tables, APPLICATION_TABLES)
-            self.assertEqual(len(APPLICATION_TABLES), 12)
+            self.assertEqual(len(APPLICATION_TABLES), 13)
 
     def test_live_acquisition_owner_with_broken_socket_never_launches_second_service(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

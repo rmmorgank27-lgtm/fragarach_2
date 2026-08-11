@@ -116,6 +116,8 @@ def test_lite_admits_exact_snapshot_atomically_and_serves_bounded_history(tmp_pa
         assert audusd["caodt"]
         assert audusd["asset_class"] == "FX"
         assert audusd["instrument_type"] == "FX_SPOT_PAIR"
+        assert audusd["profile"]["history"]["bar_count"] == 2
+        assert audusd["profile"]["extrema"]["high"]["price"] == "2"
         lite.control.write_text(
             json.dumps(
                 {
@@ -348,7 +350,7 @@ def test_active_selective_lane_refreshes_when_authority_lane_changes(tmp_path: P
         _stop(server, thread)
 
 
-def test_active_v2_lane_is_republished_as_v3_without_a_bar_change(tmp_path: Path) -> None:
+def test_active_legacy_lane_is_republished_at_current_contract_without_a_bar_change(tmp_path: Path) -> None:
     _, publisher, _, server, thread, lite = _system(tmp_path)
     try:
         request_lane(lite, symbol="AUDUSD", timeframe="D1")
@@ -364,7 +366,7 @@ def test_active_v2_lane_is_republished_as_v3_without_a_bar_change(tmp_path: Path
 
         assert refreshed["admitted"] == 1
         assert refreshed["registry"]["requests"][0]["database_contract"] == (
-            "fragarach.lane_database.v3"
+            "fragarach.lane_database.v4"
         )
         assert selective_active_lanes(lite)[0]["instrument_type"] == "FX_SPOT_PAIR"
     finally:
@@ -471,6 +473,8 @@ def test_selective_active_lane_keeps_studio_instrument_identity(tmp_path: Path) 
         assert lane["asset_class"] == available["asset_class"]
         assert lane["asset_class"] != "UNKNOWN"
         assert lane["instrument_type"] == available["instrument_type"] == "FX_SPOT_PAIR"
+        assert lane["profile"] == available["profile"]
+        assert lane["profile"]["history"]["bar_count"] == 2
         active = selective_active_lanes(lite)[0]
         assert active["asset_class"] == available["asset_class"]
         assert active["instrument_type"] == available["instrument_type"]

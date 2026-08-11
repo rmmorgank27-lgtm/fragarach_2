@@ -24,7 +24,10 @@ from .provider_facts import (
     resolve_exact_fx_mapping_for_admission,
 )
 from .credentials import CredentialAuthority
-from .storage import RegistrationCandidate, RegistrationError, open_read_only, register_instrument
+from .storage import (
+    RegistrationCandidate, RegistrationError, instrument_profile, open_read_only,
+    register_instrument,
+)
 
 
 def register_provider_aware_instrument(
@@ -183,6 +186,7 @@ def register_provider_aware_instrument(
         "CONFIRM_EXISTING_APPROVED_MAPPING"
     )
     selected_representation = candidate.selected_representation or candidate.local_symbol
+    symbol_profile = instrument_profile(database_path, candidate.asset)
     return {
         "operation_contract": "fragarach_ii.atomic_provider_onboarding.v1",
         "outcome": outcome,
@@ -212,12 +216,16 @@ def register_provider_aware_instrument(
             {"step": 4, "name": "registration added to Estate", "status": "COMPLETE", "event": outcome},
             {"step": 5, "name": "enabled estate lanes auto-commissioned", "status": "COMPLETE", "timeframes": commissioned_timeframes},
             {"step": 6, "name": "initial acquisition queued", "status": "COMPLETE", "timeframes": scheduler_reconciliation.get("queued_timeframes", [])},
+            {"step": 7, "name": "instrument origin research",
+             "status": symbol_profile["origin_status"],
+             "requirement": symbol_profile["origin_requirement"]},
         ],
         "provider_fact_revision": provider_revision,
         "estate_revision": estate_revision,
         "registration_count": registration_count,
         "readback_eligible": True,
         "scheduler_reconciliation": scheduler_reconciliation,
+        "instrument_profile": symbol_profile,
     }
 
 
@@ -256,6 +264,7 @@ def _register_unmapped_fx_for_discovery(
             "queued_timeframes": [],
         }
     scheduler_reconciliation.setdefault("queued_timeframes", [])
+    symbol_profile = instrument_profile(database_path, candidate.asset)
     return {
         "operation_contract": "fragarach_ii.atomic_provider_onboarding.v1",
         "outcome": outcome,
@@ -282,8 +291,12 @@ def _register_unmapped_fx_for_discovery(
             {"step": 2, "name": "registered in Estate", "status": "COMPLETE", "event": outcome},
             {"step": 3, "name": "provider mapping discovery", "status": "PENDING"},
             {"step": 4, "name": "initial acquisition", "status": "WAITING_FOR_PROVIDER_MAPPING"},
+            {"step": 5, "name": "instrument origin research",
+             "status": symbol_profile["origin_status"],
+             "requirement": symbol_profile["origin_requirement"]},
         ],
         "scheduler_reconciliation": scheduler_reconciliation,
+        "instrument_profile": symbol_profile,
     }
 
 

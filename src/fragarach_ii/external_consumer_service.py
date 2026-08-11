@@ -711,7 +711,8 @@ class HistoryService:
             connection.execute("BEGIN")
             registrations = connection.execute(
                 """
-                SELECT asset,asset_class,registration_status,registered_at_utc,provider_id
+                SELECT asset,asset_class,instrument_type,registration_status,
+                       registered_at_utc,provider_id
                 FROM instrument_registrations
                 WHERE timeframe='D1'
                 ORDER BY asset
@@ -790,7 +791,9 @@ class HistoryService:
         lifecycle = _lifecycle_projection(events)
         symbols: list[dict[str, object]] = []
         revision_facts: list[dict[str, object]] = []
-        for asset, asset_class, registration_status, registered_at, provider_id in registrations:
+        from .storage.instrument_profiles import instrument_profile
+
+        for asset, asset_class, instrument_type, registration_status, registered_at, provider_id in registrations:
             symbol = str(asset)
             leaf = lifecycle.get((symbol, "D1")) or lifecycle.get((symbol, None)) or {}
             lifecycle_state = str(leaf.get("lifecycle_state") or "ACTIVE")
@@ -810,11 +813,15 @@ class HistoryService:
                 d1_governed=d1_governed,
             )
             market = _catalogue_market(str(asset_class))
+            profile = instrument_profile(self.database_path, symbol)
             item = {
                 "symbol": symbol,
                 "market": market,
+                "asset_class": str(asset_class),
+                "instrument_type": str(instrument_type),
                 "lifecycle": lifecycle_state if not active else "ACTIVE",
                 "availability": availability,
+                "profile": profile,
                 "histories": [{
                     "timeframe": "D1",
                     "governed": d1_governed,
@@ -822,6 +829,8 @@ class HistoryService:
                     "morphix_eligibility_reason": morphix_reason,
                     "minimum_required_bar_count": D1_MORPHIX_MIN_OBSERVATIONS,
                     "bar_count": bars,
+                    "first_bar": profile["history"]["start_utc"],
+                    "last_bar": profile["history"]["end_utc"],
                 }],
             }
             symbols.append(item)
@@ -831,6 +840,7 @@ class HistoryService:
                 "registered_at": registered_at, "bar_count": bars,
                 "eligible_for_morphix": morphix_ready,
                 "morphix_eligibility_reason": morphix_reason,
+                "profile": profile,
             })
         revision = "sha256:" + hashlib.sha256(
             json.dumps(revision_facts, sort_keys=True, separators=(",", ":")).encode()

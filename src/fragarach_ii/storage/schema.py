@@ -19,6 +19,7 @@ APPLICATION_TABLES = frozenset(
         "authority_events",
         "scheduler_runtime_state",
         "scheduler_audit_events",
+        "instrument_profile_events",
     }
 )
 
@@ -1106,4 +1107,77 @@ MIGRATION_10_STATEMENTS = (
 def migration_10_checksum() -> str:
     return hashlib.sha256(
         "\n-- statement --\n".join(s.strip() for s in MIGRATION_10_STATEMENTS).encode()
+    ).hexdigest()
+
+
+MIGRATION_11_NAME = "Governed instrument profile event authority"
+
+MIGRATION_11_STATEMENTS = (
+    """
+    CREATE TABLE instrument_profile_events (
+        profile_event_id TEXT PRIMARY KEY CHECK (
+            length(profile_event_id) = 64
+            AND profile_event_id NOT GLOB '*[^0-9a-f]*'
+        ),
+        asset TEXT NOT NULL,
+        registration_timeframe TEXT NOT NULL DEFAULT 'D1' CHECK (registration_timeframe = 'D1'),
+        event_type TEXT NOT NULL CHECK (event_type IN (
+            'IPO','DIRECT_LISTING','FIRST_PUBLIC_TRADING','FUND_INCEPTION','INDEX_LAUNCH',
+            'GENESIS_BLOCK','FIRST_BLOCK','MAINNET_LAUNCH','TOKEN_GENERATION',
+            'CONTRACT_LAUNCH','REDENOMINATION','STOCK_SPLIT','CHAIN_MIGRATION',
+            'RELISTING','OTHER'
+        )),
+        is_primary_origin INTEGER NOT NULL CHECK (is_primary_origin IN (0,1)),
+        occurred_at_utc TEXT NOT NULL CHECK (
+            occurred_at_utc = trim(occurred_at_utc)
+            AND julianday(occurred_at_utc) IS NOT NULL
+            AND substr(occurred_at_utc, -6) = '+00:00'
+        ),
+        date_precision TEXT NOT NULL CHECK (date_precision IN ('YEAR','MONTH','DAY','SECOND')),
+        block_height INTEGER CHECK (block_height IS NULL OR block_height >= 0),
+        title TEXT NOT NULL CHECK (length(trim(title)) > 0),
+        source_url TEXT NOT NULL CHECK (source_url GLOB 'https://*'),
+        source_name TEXT NOT NULL CHECK (length(trim(source_name)) > 0),
+        source_retrieved_at_utc TEXT NOT NULL CHECK (
+            source_retrieved_at_utc = trim(source_retrieved_at_utc)
+            AND julianday(source_retrieved_at_utc) IS NOT NULL
+            AND substr(source_retrieved_at_utc, -6) = '+00:00'
+        ),
+        evidence_sha256 TEXT NOT NULL CHECK (
+            length(evidence_sha256) = 64
+            AND evidence_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
+        verification_status TEXT NOT NULL CHECK (verification_status IN (
+            'VERIFIED_PRIMARY_SOURCE','VERIFIED_SECONDARY_SOURCE','NEEDS_REVIEW'
+        )),
+        notes TEXT,
+        supersedes_event_id TEXT REFERENCES instrument_profile_events(profile_event_id)
+            ON UPDATE RESTRICT ON DELETE RESTRICT,
+        recorded_at_utc TEXT NOT NULL CHECK (
+            recorded_at_utc = trim(recorded_at_utc)
+            AND julianday(recorded_at_utc) IS NOT NULL
+            AND substr(recorded_at_utc, -6) = '+00:00'
+        ),
+        FOREIGN KEY (asset,registration_timeframe)
+            REFERENCES instrument_registrations(asset,timeframe)
+            ON UPDATE RESTRICT ON DELETE RESTRICT
+    ) STRICT
+    """,
+    "CREATE INDEX instrument_profile_events_asset_time ON instrument_profile_events(asset,occurred_at_utc,event_type)",
+    """
+    CREATE TRIGGER instrument_profile_events_no_update
+    BEFORE UPDATE ON instrument_profile_events
+    BEGIN SELECT RAISE(ABORT, 'instrument profile events are immutable'); END
+    """,
+    """
+    CREATE TRIGGER instrument_profile_events_no_delete
+    BEFORE DELETE ON instrument_profile_events
+    BEGIN SELECT RAISE(ABORT, 'instrument profile events cannot be deleted'); END
+    """,
+)
+
+
+def migration_11_checksum() -> str:
+    return hashlib.sha256(
+        "\n-- statement --\n".join(s.strip() for s in MIGRATION_11_STATEMENTS).encode()
     ).hexdigest()

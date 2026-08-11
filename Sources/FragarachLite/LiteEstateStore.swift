@@ -43,6 +43,30 @@ struct LiteDiscoveredTimeframe:Codable,Identifiable,Sendable {
     let selectable:Bool
 }
 
+struct LiteProfileEvent:Codable,Hashable,Sendable {
+    let eventType:String
+    let occurredAtUTC:String
+    let datePrecision:String
+    let blockHeight:Int?
+    let title:String
+    let sourceURL:String
+    let sourceName:String
+    let verificationStatus:String
+    enum CodingKeys:String,CodingKey {case title;case eventType="event_type",occurredAtUTC="occurred_at_utc",datePrecision="date_precision",blockHeight="block_height",sourceURL="source_url",sourceName="source_name",verificationStatus="verification_status"}
+}
+struct LiteProfileHistory:Codable,Hashable,Sendable {let basis:String;let startUTC:String?;let endUTC:String?;let barCount:Int;let allAvailableHistoryHeld:Bool?;let completenessStatus:String?;enum CodingKeys:String,CodingKey{case basis;case startUTC="start_utc",endUTC="end_utc",barCount="bar_count",allAvailableHistoryHeld="all_available_history_held",completenessStatus="completeness_status"}}
+struct LiteProfilePricePoint:Codable,Hashable,Sendable {let price:String;let atUTC:String;enum CodingKeys:String,CodingKey{case price;case atUTC="at_utc"}}
+struct LiteProfileExtrema:Codable,Hashable,Sendable {let basis:String;let high:LiteProfilePricePoint?;let low:LiteProfilePricePoint?;let asOfUTC:String?;enum CodingKeys:String,CodingKey{case basis,high,low;case asOfUTC="as_of_utc"}}
+struct LiteInstrumentProfile:Codable,Hashable,Sendable {
+    let originRequirement:String?
+    let originStatus:String
+    let origin:LiteProfileEvent?
+    let history:LiteProfileHistory
+    let extrema:LiteProfileExtrema
+    let milestones:[LiteProfileEvent]
+    enum CodingKeys:String,CodingKey {case origin,history,extrema,milestones;case originRequirement="origin_requirement",originStatus="origin_status"}
+}
+
 struct LiteLane:Codable,Identifiable,Hashable,Sendable {
     var id:String{"\(symbol):\(timeframe)"}
     let symbol:String
@@ -54,12 +78,13 @@ struct LiteLane:Codable,Identifiable,Hashable,Sendable {
     let state:String?
     let assetClass:String?
     let instrumentType:String?
+    let profile:LiteInstrumentProfile?
     let storedBytes:Int?
     let expectedBytes:Int?
     let receivedAtUTC:String?
     let lastUpdateCheckAtUTC:String?
     let lastUpdateOutcome:String?
-    enum CodingKeys:String,CodingKey {case symbol,timeframe,caodt,state;case firstBarUTC="first_bar_utc",barCount="bar_count",dataFingerprint="data_fingerprint",assetClass="asset_class",instrumentType="instrument_type",storedBytes="stored_bytes",expectedBytes="expected_bytes",receivedAtUTC="received_at_utc",lastUpdateCheckAtUTC="last_update_check_at_utc",lastUpdateOutcome="last_update_outcome"}
+    enum CodingKeys:String,CodingKey {case symbol,timeframe,caodt,state,profile;case firstBarUTC="first_bar_utc",barCount="bar_count",dataFingerprint="data_fingerprint",assetClass="asset_class",instrumentType="instrument_type",storedBytes="stored_bytes",expectedBytes="expected_bytes",receivedAtUTC="received_at_utc",lastUpdateCheckAtUTC="last_update_check_at_utc",lastUpdateOutcome="last_update_outcome"}
 }
 
 struct LiteIncomingData:Codable,Identifiable,Hashable,Sendable {

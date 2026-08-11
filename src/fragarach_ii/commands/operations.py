@@ -40,6 +40,7 @@ def _verification(path: Path) -> dict[str, object]:
         "exact_nine_tables": len(report.application_tables) == 9,
         "exact_ten_tables": len(report.application_tables) == 10,
         "exact_twelve_tables": len(report.application_tables) == 12,
+        "exact_thirteen_tables": len(report.application_tables) == 13,
         "foreign_keys_ok": not report.foreign_key_violations,
         "integrity_ok": report.integrity_check == ("ok",),
         "migration_checksums_ok": report.migrations_verified,

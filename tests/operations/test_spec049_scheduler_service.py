@@ -147,7 +147,7 @@ class Spec049SchedulerServiceTests(unittest.TestCase):
             report = verify_integrity(database)
             self.assertTrue(report.ok)
             self.assertEqual(report.application_tables, APPLICATION_TABLES)
-            self.assertEqual(len(APPLICATION_TABLES), 12)
+            self.assertEqual(len(APPLICATION_TABLES), 13)
 
     def test_live_status_overlays_running_register_workers(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
