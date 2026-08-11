@@ -53,12 +53,13 @@ struct LiteLane:Codable,Identifiable,Hashable,Sendable {
     let dataFingerprint:String
     let state:String?
     let assetClass:String?
+    let instrumentType:String?
     let storedBytes:Int?
     let expectedBytes:Int?
     let receivedAtUTC:String?
     let lastUpdateCheckAtUTC:String?
     let lastUpdateOutcome:String?
-    enum CodingKeys:String,CodingKey {case symbol,timeframe,caodt,state;case firstBarUTC="first_bar_utc",barCount="bar_count",dataFingerprint="data_fingerprint",assetClass="asset_class",storedBytes="stored_bytes",expectedBytes="expected_bytes",receivedAtUTC="received_at_utc",lastUpdateCheckAtUTC="last_update_check_at_utc",lastUpdateOutcome="last_update_outcome"}
+    enum CodingKeys:String,CodingKey {case symbol,timeframe,caodt,state;case firstBarUTC="first_bar_utc",barCount="bar_count",dataFingerprint="data_fingerprint",assetClass="asset_class",instrumentType="instrument_type",storedBytes="stored_bytes",expectedBytes="expected_bytes",receivedAtUTC="received_at_utc",lastUpdateCheckAtUTC="last_update_check_at_utc",lastUpdateOutcome="last_update_outcome"}
 }
 
 struct LiteIncomingData:Codable,Identifiable,Hashable,Sendable {

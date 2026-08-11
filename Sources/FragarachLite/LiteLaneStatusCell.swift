@@ -68,7 +68,7 @@ struct LiteLaneStatusCell:View {
             .animation(.easeInOut(duration:0.35),value:visual.progress)
         }
         .buttonStyle(.plain)
-        .help("\(lane.symbol) \(lane.timeframe) · \(visual.state.rawValue) · \(Int(visual.progress * 100))% · click to \(actionLabel)")
+        .help("\(lane.symbol) \(lane.timeframe) · \(lane.assetClass ?? "UNKNOWN") · \(lane.instrumentType ?? "UNKNOWN") · \(visual.state.rawValue) · \(Int(visual.progress * 100))% · click to \(actionLabel)")
     }
 
     private var actionLabel:String {switch visual.state{case .studioOnly:"request";case .local,.requested,.incoming:"pause";case .paused:"resume";case .failed:"retry"}}

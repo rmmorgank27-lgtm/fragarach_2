@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
 import urllib.error
 import urllib.request
@@ -25,6 +26,7 @@ from fragarach_ii.replica_lite import (
     store_client_token,
     sync_lite,
     sync_selective,
+    _verify_replica_database,
 )
 from fragarach_ii.replica_publication import (
     ReplicaPaths,
@@ -112,6 +114,8 @@ def test_lite_admits_exact_snapshot_atomically_and_serves_bounded_history(tmp_pa
         )
         assert audusd["bar_count"] == 2
         assert audusd["caodt"]
+        assert audusd["asset_class"] == "FX"
+        assert audusd["instrument_type"] == "FX_SPOT_PAIR"
         lite.control.write_text(
             json.dumps(
                 {
@@ -431,7 +435,7 @@ def test_pending_request_is_visible_before_studio_acceptance(tmp_path: Path) -> 
         _stop(server, thread)
 
 
-def test_selective_active_lane_keeps_studio_asset_class(tmp_path: Path) -> None:
+def test_selective_active_lane_keeps_studio_instrument_identity(tmp_path: Path) -> None:
     _, _, _, server, thread, lite = _system(tmp_path)
     try:
         request_lane(lite, symbol="AUDUSD", timeframe="D1")
@@ -443,7 +447,37 @@ def test_selective_active_lane_keeps_studio_asset_class(tmp_path: Path) -> None:
         available = next(item for item in catalogue["available_lanes"] if item["symbol"] == "AUDUSD")
         assert lane["asset_class"] == available["asset_class"]
         assert lane["asset_class"] != "UNKNOWN"
-        assert selective_active_lanes(lite)[0]["asset_class"] == available["asset_class"]
+        assert lane["instrument_type"] == available["instrument_type"] == "FX_SPOT_PAIR"
+        active = selective_active_lanes(lite)[0]
+        assert active["asset_class"] == available["asset_class"]
+        assert active["instrument_type"] == available["instrument_type"]
+    finally:
+        _stop(server, thread)
+
+
+def test_legacy_v1_replica_without_instrument_type_remains_readable(tmp_path: Path) -> None:
+    _, _, manifest, server, thread, lite = _system(tmp_path)
+    try:
+        receipt = sync_lite(lite, allow_unsigned=True, allow_insecure_transport=True)
+        replica = Path(receipt["replica_database"])
+        connection = sqlite3.connect(replica)
+        try:
+            connection.execute("ALTER TABLE registrations DROP COLUMN instrument_type")
+            connection.execute(
+                "UPDATE replica_metadata SET value=? WHERE key='contract'",
+                (json.dumps("fragarach.replica_database.v1"),),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        _verify_replica_database(replica, manifest)
+        audusd = next(
+            lane for lane in lane_catalogue(lite)["lanes"]
+            if lane["symbol"] == "AUDUSD" and lane["timeframe"] == "D1"
+        )
+        assert audusd["asset_class"] == "FX"
+        assert audusd["instrument_type"] == "UNKNOWN"
     finally:
         _stop(server, thread)
 

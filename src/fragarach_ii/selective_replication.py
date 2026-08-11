@@ -29,7 +29,7 @@ from .storage import open_read_only
 
 REGISTRY_CONTRACT = "fragarach.selective_registry.v2"
 ARTIFACT_CONTRACT = "fragarach.lane_artifact.v2"
-DATABASE_CONTRACT = "fragarach.lane_database.v2"
+DATABASE_CONTRACT = "fragarach.lane_database.v3"
 REQUEST_STATES = frozenset(
     {"REQUESTED", "WAITING_FOR_STUDIO", "ACCEPTED", "TRANSFERRING", "VERIFYING", "ACTIVE",
      "PAUSED", "FAILED", "CANCELLED", "REMOVED"}
@@ -68,7 +68,7 @@ def _canonical(symbol: str, timeframe: str, row: tuple[Any, ...]) -> bytes:
 
 def _registration(source: sqlite3.Connection, symbol: str) -> tuple[Any, ...]:
     row = source.execute(
-        """SELECT asset,aliases_json,display_name,asset_class,calendar_id,
+        """SELECT asset,aliases_json,display_name,asset_class,instrument_type,calendar_id,
                   calendar_version,registration_status
            FROM instrument_registrations WHERE asset=? AND timeframe='D1'""",
         (symbol,),
@@ -108,7 +108,10 @@ def create_lane_artifact(paths: ReplicaPaths, symbol: str, timeframe: str) -> di
         for row in rows:
             digest.update(_canonical(symbol, timeframe, row))
         fingerprint = digest.hexdigest()
-        artifact_id = f"lane-{symbol}-{timeframe}-{fingerprint[:32]}"
+        artifact_identity = hashlib.sha256(
+            f"{DATABASE_CONTRACT}:{symbol}:{timeframe}:{fingerprint}".encode("utf-8")
+        ).hexdigest()
+        artifact_id = f"lane-{symbol}-{timeframe}-{artifact_identity[:32]}"
         final_dir = work_root / artifact_id
         existing = _read_manifest(final_dir / "manifest.json")
         if existing is not None:
@@ -120,7 +123,8 @@ def create_lane_artifact(paths: ReplicaPaths, symbol: str, timeframe: str) -> di
             CREATE TABLE replica_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL) WITHOUT ROWID;
             CREATE TABLE registrations(
               symbol TEXT PRIMARY KEY,aliases_json TEXT NOT NULL,display_name TEXT NOT NULL,
-              asset_class TEXT NOT NULL,calendar_id TEXT NOT NULL,calendar_version INTEGER NOT NULL,
+              asset_class TEXT NOT NULL,instrument_type TEXT NOT NULL,
+              calendar_id TEXT NOT NULL,calendar_version INTEGER NOT NULL,
               registration_status TEXT NOT NULL) WITHOUT ROWID;
             CREATE TABLE lanes(
               symbol TEXT NOT NULL,timeframe TEXT NOT NULL,first_bar_utc INTEGER,last_bar_utc INTEGER,
@@ -135,7 +139,7 @@ def create_lane_artifact(paths: ReplicaPaths, symbol: str, timeframe: str) -> di
         first = int(rows[0][0]) if rows else None
         caodt = int(rows[-1][0]) if rows else None
         source_revision = f"sha256:{fingerprint}"
-        target.execute("INSERT INTO registrations VALUES(?,?,?,?,?,?,?)", registration)
+        target.execute("INSERT INTO registrations VALUES(?,?,?,?,?,?,?,?)", registration)
         target.execute("INSERT INTO lanes VALUES(?,?,?,?,?,?)",
                        (symbol, timeframe, first, caodt, len(rows), fingerprint))
         target.executemany("INSERT INTO bars VALUES(?,?,?,?,?,?,?,?,?)",
@@ -162,6 +166,7 @@ def create_lane_artifact(paths: ReplicaPaths, symbol: str, timeframe: str) -> di
             "contract": ARTIFACT_CONTRACT, "artifact_id": artifact_id,
             "symbol": symbol, "timeframe": timeframe,
             "asset_class": registration[3],
+            "instrument_type": registration[4],
             "source_revision": source_revision, "generated_at_utc": created,
             "first_bar_utc": datetime.fromtimestamp(first, UTC).isoformat() if first is not None else None,
             "caodt": datetime.fromtimestamp(caodt, UTC).isoformat() if caodt is not None else None,
@@ -246,6 +251,8 @@ def _apply_artifact(request: dict[str, Any], artifact: dict[str, Any],
     request.update(
         artifact_id=artifact["artifact_id"],
         source_revision=artifact["source_revision"],
+        asset_class=artifact.get("asset_class", "UNKNOWN"),
+        instrument_type=artifact.get("instrument_type", "UNKNOWN"),
         first_bar_utc=artifact.get("first_bar_utc"),
         caodt=artifact.get("caodt"),
         bar_count=int(artifact.get("bar_count") or 0),
@@ -364,9 +371,13 @@ def registry_projection(paths: ReplicaPaths, client_id: str) -> dict[str, Any]:
     manifest = latest_manifest(paths) or {}
     source = open_read_only(paths.database)
     try:
-        asset_classes = dict(source.execute(
-            "SELECT asset,asset_class FROM instrument_registrations WHERE timeframe='D1'"
-        ).fetchall())
+        registrations = {
+            asset: {"asset_class": asset_class, "instrument_type": instrument_type}
+            for asset, asset_class, instrument_type in source.execute(
+                """SELECT asset,asset_class,instrument_type FROM instrument_registrations
+                   WHERE timeframe='D1'"""
+            ).fetchall()
+        }
         now = utc_now()
         changed = False
         for request in _requests(row):
@@ -435,7 +446,10 @@ def registry_projection(paths: ReplicaPaths, client_id: str) -> dict[str, Any]:
                   if lane.get("first_bar_utc") is not None else None,
                   "caodt": datetime.fromtimestamp(lane["caodt"], UTC).isoformat()
                   if lane.get("caodt") is not None else None,
-                  "asset_class": asset_classes.get(lane.get("symbol"), "UNKNOWN"),
+                  **registrations.get(
+                      lane.get("symbol"),
+                      {"asset_class": "UNKNOWN", "instrument_type": "UNKNOWN"},
+                  ),
                   "state": "STUDIO_AVAILABLE"} for lane in manifest.get("lanes") or []]
     return {"contract": REGISTRY_CONTRACT, "registry_revision": int(registry.get("revision") or 0),
             "client_id": client_id, "sync_paused": bool(_control(row).get("sync_paused")),

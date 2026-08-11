@@ -28,7 +28,7 @@ from .storage import open_read_only
 REGISTRY_CONTRACT = "fragarach_ii.read_only_client_registry.v1"
 STATUS_CONTRACT = "fragarach_ii.read_only_client_status.v1"
 PUBLICATION_CONTRACT = "fragarach.replica_publication.v1"
-REPLICA_DATABASE_CONTRACT = "fragarach.replica_database.v1"
+REPLICA_DATABASE_CONTRACT = "fragarach.replica_database.v2"
 DEFAULT_PUBLISHER_PORT = 9462
 _CLIENT_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{1,63}$")
 _TIMEFRAMES = frozenset({"D1", "H1", "M30", "M15", "M5"})
@@ -324,11 +324,14 @@ def client_control(paths: ReplicaPaths, client: dict[str, Any]) -> dict[str, Any
     manifest = latest_manifest(paths) or {}
     source = open_read_only(paths.database)
     try:
-        asset_classes = dict(
+        registrations = {
+            asset: {"asset_class": asset_class, "instrument_type": instrument_type}
+            for asset, asset_class, instrument_type in
             source.execute(
-                "SELECT asset,asset_class FROM instrument_registrations WHERE timeframe='D1'"
+                """SELECT asset,asset_class,instrument_type FROM instrument_registrations
+                   WHERE timeframe='D1'"""
             ).fetchall()
-        )
+        }
     finally:
         source.close()
     available_lanes = [
@@ -338,7 +341,10 @@ def client_control(paths: ReplicaPaths, client: dict[str, Any]) -> dict[str, Any
             if lane.get("first_bar_utc") is not None else None,
             "caodt": datetime.fromtimestamp(lane["caodt"], UTC).isoformat()
             if lane.get("caodt") is not None else None,
-            "asset_class": asset_classes.get(lane.get("symbol"), "UNKNOWN"),
+            **registrations.get(
+                lane.get("symbol"),
+                {"asset_class": "UNKNOWN", "instrument_type": "UNKNOWN"},
+            ),
             "state": "AVAILABLE",
         }
         for lane in manifest.get("lanes") or []
@@ -485,7 +491,8 @@ def create_full_snapshot(
             CREATE TABLE replica_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL) WITHOUT ROWID;
             CREATE TABLE registrations(
               symbol TEXT PRIMARY KEY,aliases_json TEXT NOT NULL,display_name TEXT NOT NULL,
-              asset_class TEXT NOT NULL,calendar_id TEXT NOT NULL,calendar_version INTEGER NOT NULL,
+              asset_class TEXT NOT NULL,instrument_type TEXT NOT NULL,
+              calendar_id TEXT NOT NULL,calendar_version INTEGER NOT NULL,
               registration_status TEXT NOT NULL
             ) WITHOUT ROWID;
             CREATE TABLE lanes(
@@ -503,7 +510,7 @@ def create_full_snapshot(
         )
         symbol_clause, symbol_parameters = _scope_clause(symbol_scope, "asset")
         registrations = source.execute(
-            """SELECT asset,aliases_json,display_name,asset_class,calendar_id,
+            """SELECT asset,aliases_json,display_name,asset_class,instrument_type,calendar_id,
                       calendar_version,registration_status
                FROM instrument_registrations WHERE timeframe='D1'"""
             + symbol_clause
@@ -511,7 +518,7 @@ def create_full_snapshot(
             symbol_parameters,
         ).fetchall()
         target.executemany(
-            "INSERT INTO registrations VALUES(?,?,?,?,?,?,?)", registrations
+            "INSERT INTO registrations VALUES(?,?,?,?,?,?,?,?)", registrations
         )
         timeframe_clause, timeframe_parameters = _scope_clause(timeframe_scope, "timeframe")
         lane_rows = source.execute(

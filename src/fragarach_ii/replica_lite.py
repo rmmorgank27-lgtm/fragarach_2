@@ -37,7 +37,10 @@ LITE_RECEIPT_CONTRACT = "fragarach_lite.replica_receipt.v1"
 LITE_HISTORY_CONTRACT = "fragarach_lite.market_history.v1"
 LITE_CATALOGUE_CONTRACT = "fragarach_lite.catalogue.v1"
 PUBLICATION_CONTRACT = "fragarach.replica_publication.v1"
-REPLICA_DATABASE_CONTRACT = "fragarach.replica_database.v1"
+REPLICA_DATABASE_CONTRACT = "fragarach.replica_database.v2"
+LEGACY_REPLICA_DATABASE_CONTRACT = "fragarach.replica_database.v1"
+LANE_DATABASE_CONTRACT = "fragarach.lane_database.v3"
+LEGACY_LANE_DATABASE_CONTRACT = "fragarach.lane_database.v2"
 _REVISION = re.compile(r"^sha256:([0-9a-f]{64})$")
 REPLICA_HOUSEKEEPING_INTERVAL_SECONDS = 63 * 60
 REPLICA_HOUSEKEEPING_CONTRACT = "fragarach_lite.housekeeping.v1"
@@ -528,8 +531,13 @@ def _verify_lane_database(path: Path, manifest: dict[str, Any]) -> None:
             raise FragarachLiteError("LANE_DATABASE_INTEGRITY_FAILED", str(manifest["artifact_id"]))
         metadata = {key: json.loads(value) for key, value in
                     connection.execute("SELECT key,value FROM replica_metadata")}
-        expected = {"contract": "fragarach.lane_database.v2",
-                    "artifact_id": manifest["artifact_id"],
+        contract = metadata.get("contract")
+        if contract not in {LANE_DATABASE_CONTRACT, LEGACY_LANE_DATABASE_CONTRACT}:
+            raise FragarachLiteError("INVALID_LANE_DATABASE_CONTRACT", str(contract))
+        columns = _registration_columns(connection)
+        if contract == LANE_DATABASE_CONTRACT and "instrument_type" not in columns:
+            raise FragarachLiteError("INVALID_LANE_DATABASE", "instrument_type is required")
+        expected = {"artifact_id": manifest["artifact_id"],
                     "source_revision": manifest["source_revision"],
                     "symbol": manifest["symbol"], "timeframe": manifest["timeframe"]}
         if any(metadata.get(key) != value for key, value in expected.items()):
@@ -566,26 +574,42 @@ def selective_active_lanes(paths: LitePaths) -> list[dict[str, Any]]:
              and Path(str(item.get("database") or "")).is_file()]
     changed = False
     for item in lanes:
-        if item.get("asset_class") not in {None, "", "UNKNOWN"}:
-            continue
-        asset_class = _lane_database_asset_class(Path(str(item["database"])))
-        if asset_class:
-            item["asset_class"] = asset_class
-            changed = True
+        registration = _lane_database_registration(Path(str(item["database"])))
+        for key in ("asset_class", "instrument_type"):
+            if item.get(key) not in {None, "", "UNKNOWN"}:
+                continue
+            if registration.get(key):
+                item[key] = registration[key]
+                changed = True
     if changed:
         _atomic_json(paths.active_lanes, lanes)
     return lanes
 
 
 def _lane_database_asset_class(database: Path) -> str | None:
+    return _lane_database_registration(database).get("asset_class")
+
+
+def _lane_database_registration(database: Path) -> dict[str, str]:
     connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
     try:
-        row = connection.execute("SELECT asset_class FROM registrations LIMIT 1").fetchone()
-        return str(row[0]) if row and row[0] else None
+        columns = _registration_columns(connection)
+        instrument_type = "instrument_type" if "instrument_type" in columns else "'UNKNOWN'"
+        row = connection.execute(
+            f"SELECT asset_class,{instrument_type} FROM registrations LIMIT 1"
+        ).fetchone()
+        return {
+            "asset_class": str(row[0] or "UNKNOWN"),
+            "instrument_type": str(row[1] or "UNKNOWN"),
+        } if row else {}
     except sqlite3.Error:
-        return None
+        return {}
     finally:
         connection.close()
+
+
+def _registration_columns(connection: sqlite3.Connection) -> set[str]:
+    return {str(row[1]) for row in connection.execute("PRAGMA table_info(registrations)")}
 
 
 def selective_mode(paths: LitePaths) -> bool:
@@ -685,6 +709,8 @@ def sync_selective(paths: LitePaths, *, allow_unsigned: bool = False,
                        "database": str(destination), "source_revision": manifest["source_revision"],
                        "asset_class": manifest.get("asset_class")
                        or _lane_database_asset_class(destination) or "UNKNOWN",
+                       "instrument_type": manifest.get("instrument_type")
+                       or _lane_database_registration(destination).get("instrument_type", "UNKNOWN"),
                        "first_bar_utc": manifest.get("first_bar_utc"),
                        "caodt": manifest["caodt"], "bar_count": manifest["bar_count"],
                        "lane_fingerprint": manifest["lane_fingerprint"],
@@ -821,8 +847,12 @@ def _verify_replica_database(path: Path, manifest: dict[str, Any]) -> None:
             key: json.loads(value)
             for key, value in connection.execute("SELECT key,value FROM replica_metadata")
         }
-        if metadata.get("contract") != REPLICA_DATABASE_CONTRACT:
-            raise FragarachLiteError("INVALID_REPLICA_CONTRACT", str(metadata.get("contract")))
+        contract = metadata.get("contract")
+        if contract not in {REPLICA_DATABASE_CONTRACT, LEGACY_REPLICA_DATABASE_CONTRACT}:
+            raise FragarachLiteError("INVALID_REPLICA_CONTRACT", str(contract))
+        columns = _registration_columns(connection)
+        if contract == REPLICA_DATABASE_CONTRACT and "instrument_type" not in columns:
+            raise FragarachLiteError("INVALID_REPLICA_DATABASE", "instrument_type is required")
         if metadata.get("publication_id") != manifest.get("publication_id"):
             raise FragarachLiteError("PUBLICATION_ID_MISMATCH", str(metadata.get("publication_id")))
         if metadata.get("authority_revision") != manifest.get("authority_revision"):
@@ -953,7 +983,10 @@ def lane_catalogue(paths: LitePaths) -> dict[str, Any]:
                   ).get("last_update_outcome"),
                   "asset_class": item.get("asset_class") or available_by_lane.get(
                       (item["symbol"], item["timeframe"]), {}
-                  ).get("asset_class", "UNKNOWN")} for item in selective]
+                  ).get("asset_class", "UNKNOWN"),
+                  "instrument_type": item.get("instrument_type") or available_by_lane.get(
+                      (item["symbol"], item["timeframe"]), {}
+                  ).get("instrument_type", "UNKNOWN")} for item in selective]
         return {"contract": "fragarach_lite.catalogue.v2", "state": "READY" if selective else "NO_REPLICA",
                 "replication_mode": "SELECTIVE_V2", "lanes": lanes,
                 "source_receipt": None,
@@ -977,9 +1010,14 @@ def lane_catalogue(paths: LitePaths) -> dict[str, Any]:
     database = Path(str(receipt["replica_database"]))
     connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
     try:
+        instrument_type = (
+            "COALESCE(r.instrument_type,'UNKNOWN')"
+            if "instrument_type" in _registration_columns(connection)
+            else "'UNKNOWN'"
+        )
         rows = connection.execute(
-            """SELECT l.symbol,l.timeframe,l.first_bar_utc,l.last_bar_utc,l.bar_count,
-                      l.data_fingerprint,COALESCE(r.asset_class,'UNKNOWN')
+            f"""SELECT l.symbol,l.timeframe,l.first_bar_utc,l.last_bar_utc,l.bar_count,
+                      l.data_fingerprint,COALESCE(r.asset_class,'UNKNOWN'),{instrument_type}
                FROM lanes l LEFT JOIN registrations r ON r.symbol=l.symbol
                ORDER BY l.symbol,l.timeframe"""
         ).fetchall()
@@ -1001,6 +1039,7 @@ def lane_catalogue(paths: LitePaths) -> dict[str, Any]:
             "data_fingerprint": f"sha256:{row[5]}",
             "state": "PAUSED" if (row[0], row[1]) in paused else "AVAILABLE",
             "asset_class": row[6],
+            "instrument_type": row[7],
         }
         for row in rows
     ]
