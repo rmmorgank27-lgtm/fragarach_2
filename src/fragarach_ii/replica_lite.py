@@ -534,6 +534,8 @@ def _verify_lane_database(path: Path, manifest: dict[str, Any]) -> None:
         contract = metadata.get("contract")
         if contract not in {LANE_DATABASE_CONTRACT, LEGACY_LANE_DATABASE_CONTRACT}:
             raise FragarachLiteError("INVALID_LANE_DATABASE_CONTRACT", str(contract))
+        if manifest.get("database_contract") not in {None, contract}:
+            raise FragarachLiteError("LANE_METADATA_MISMATCH", str(manifest["artifact_id"]))
         columns = _registration_columns(connection)
         if contract == LANE_DATABASE_CONTRACT and "instrument_type" not in columns:
             raise FragarachLiteError("INVALID_LANE_DATABASE", "instrument_type is required")

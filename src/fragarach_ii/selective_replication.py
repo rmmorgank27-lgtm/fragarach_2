@@ -164,6 +164,7 @@ def create_lane_artifact(paths: ReplicaPaths, symbol: str, timeframe: str) -> di
                     output.write(block)
         manifest = {
             "contract": ARTIFACT_CONTRACT, "artifact_id": artifact_id,
+            "database_contract": DATABASE_CONTRACT,
             "symbol": symbol, "timeframe": timeframe,
             "asset_class": registration[3],
             "instrument_type": registration[4],
@@ -250,6 +251,7 @@ def _apply_artifact(request: dict[str, Any], artifact: dict[str, Any],
                     lane_state: dict[str, Any]) -> None:
     request.update(
         artifact_id=artifact["artifact_id"],
+        database_contract=artifact.get("database_contract"),
         source_revision=artifact["source_revision"],
         asset_class=artifact.get("asset_class", "UNKNOWN"),
         instrument_type=artifact.get("instrument_type", "UNKNOWN"),
@@ -416,7 +418,7 @@ def registry_projection(paths: ReplicaPaths, client_id: str) -> dict[str, Any]:
             current_version = lane_state.get("authority_state_version")
             metadata_complete = all(
                 key in request for key in ("first_bar_utc", "bar_count", "database_bytes")
-            )
+            ) and request.get("database_contract") == DATABASE_CONTRACT
             if request.get("authority_state_version") == current_version and metadata_complete:
                 request["last_update_outcome"] = "NO_CHANGE"
                 changed = True

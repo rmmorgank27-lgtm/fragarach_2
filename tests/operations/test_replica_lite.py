@@ -348,6 +348,29 @@ def test_active_selective_lane_refreshes_when_authority_lane_changes(tmp_path: P
         _stop(server, thread)
 
 
+def test_active_v2_lane_is_republished_as_v3_without_a_bar_change(tmp_path: Path) -> None:
+    _, publisher, _, server, thread, lite = _system(tmp_path)
+    try:
+        request_lane(lite, symbol="AUDUSD", timeframe="D1")
+        sync_selective(lite, allow_unsigned=True, allow_insecure_transport=True)
+
+        registry = json.loads(publisher.registry.read_text())
+        request = registry["clients"][0]["requests"][0]
+        request.pop("database_contract")
+        request["artifact_id"] = "lane-AUDUSD-D1-" + "0" * 32
+        publisher.registry.write_text(json.dumps(registry))
+
+        refreshed = sync_selective(lite, allow_unsigned=True, allow_insecure_transport=True)
+
+        assert refreshed["admitted"] == 1
+        assert refreshed["registry"]["requests"][0]["database_contract"] == (
+            "fragarach.lane_database.v3"
+        )
+        assert selective_active_lanes(lite)[0]["instrument_type"] == "FX_SPOT_PAIR"
+    finally:
+        _stop(server, thread)
+
+
 def test_missing_lane_waits_for_studio_then_arrives_automatically(tmp_path: Path) -> None:
     database, _, _, server, thread, lite = _system(tmp_path)
     try:
