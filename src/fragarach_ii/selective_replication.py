@@ -378,10 +378,11 @@ def registry_projection(paths: ReplicaPaths, client_id: str) -> dict[str, Any]:
             for asset, asset_class, instrument_type in source.execute(
                 """SELECT asset,asset_class,instrument_type FROM instrument_registrations
                    WHERE timeframe='D1'"""
-            ).fetchall()
+        ).fetchall()
         }
         now = utc_now()
         changed = False
+        schema_upgrade_scheduled = False
         for request in _requests(row):
             if request.get("state") == "WAITING_FOR_STUDIO":
                 request["last_update_check_at_utc"] = now
@@ -413,6 +414,12 @@ def registry_projection(paths: ReplicaPaths, client_id: str) -> dict[str, Any]:
             if request.get("state") != "ACTIVE":
                 continue
             symbol, timeframe = str(request.get("symbol")), str(request.get("timeframe"))
+            requires_schema_upgrade = request.get("database_contract") != DATABASE_CONTRACT
+            if requires_schema_upgrade and schema_upgrade_scheduled:
+                request["last_update_check_at_utc"] = now
+                request["last_update_outcome"] = "SCHEMA_UPDATE_QUEUED"
+                changed = True
+                continue
             lane_state = _lane_state(source, symbol, timeframe)
             request["last_update_check_at_utc"] = now
             current_version = lane_state.get("authority_state_version")
@@ -424,6 +431,8 @@ def registry_projection(paths: ReplicaPaths, client_id: str) -> dict[str, Any]:
                 changed = True
                 continue
             artifact = create_lane_artifact(paths, symbol, timeframe)
+            if requires_schema_upgrade:
+                schema_upgrade_scheduled = True
             same_artifact = request.get("artifact_id") == artifact.get("artifact_id")
             _apply_artifact(request, artifact, lane_state)
             if same_artifact:
