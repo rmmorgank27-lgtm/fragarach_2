@@ -9,7 +9,12 @@ from unittest.mock import patch
 
 from fragarach_ii.freshness import authority_revision_for_lane
 from fragarach_ii.lane_commissioning import ensure_commissioned_lane
-from fragarach_ii.storage import open_read_only, registered_writer
+from fragarach_ii.storage import (
+    RegistrationCandidate,
+    open_read_only,
+    register_instrument,
+    registered_writer,
+)
 from fragarach_ii.synthetic_repository import (
     SyntheticConsumerService,
     SyntheticRepository,
@@ -112,6 +117,82 @@ class Spec045SyntheticRepositoryTests(unittest.TestCase):
 
         self.assertEqual(repository.list_products(), [])
 
+    def test_automatic_policy_derives_index_cfd_m15_from_complete_m5_triplets(self) -> None:
+        register_instrument(
+            self.database,
+            RegistrationCandidate(
+                asset="NAS100",
+                timeframe="D1",
+                instrument_family="NAS100",
+                local_symbol="NAS100",
+                display_name="Nasdaq-100 Reference CFD",
+                instrument_type="INDEX_CFD",
+                asset_class="BROKER_INDEX_CFDS",
+                representation_type="CFD",
+                trading_currency="USD",
+                exchange_name="MT5_BROKER_FAMILY",
+                provider_id="MT5_BROKER_FAMILY",
+                provider_contract="MT5_BROKER_FAMILY_INDEX_CFD_DATA_V1",
+                provider_symbol="NAS100",
+                provider_instrument_type="INDEX_CFD",
+                selected_representation="NAS100",
+                underlying_reference="NASDAQ_100_REFERENCE_INDEX",
+                contract_or_series="MT5_BROKER_FAMILY_CASH_INDEX_CFD",
+                calendar_id="MT5_BROKER_INDEX_CFD_D1_V1",
+                calendar_version=1,
+                gap_doctrine_id="FRAGARACH_II_D1_GAP_DOCTRINE_V1",
+                gap_doctrine_version=1,
+            ),
+            registered_at_utc=self.generated.isoformat(),
+        )
+        ensure_commissioned_lane(self.database, "NAS100", "M5")
+        start = int(datetime(2026, 7, 13, 1, tzinfo=UTC).timestamp())
+        with registered_writer(self.database) as connection:
+            for index in range(6):
+                opened = start + index * 300
+                base = 20000 + index
+                connection.execute(
+                    """INSERT INTO bars(
+                       asset,timeframe,open_time_utc,close_time_utc,open,high,low,close,volume,
+                       created_by_ingest_run_id,updated_by_ingest_run_id)
+                       VALUES('NAS100','M5',?,?,?,?,?,?,?,'run-1','run-1')""",
+                    (
+                        opened,
+                        opened + 300,
+                        str(base),
+                        str(base + 2),
+                        str(base - 1),
+                        str(base + 1),
+                        str(index + 1),
+                    ),
+                )
+            connection.execute(
+                """INSERT INTO lane_state(
+                   asset,timeframe,high_watermark_open_time_utc,state_version,
+                   last_ingest_run_id,updated_at_utc)
+                   VALUES('NAS100','M5',?,1,'run-1','2026-07-14T02:00:00+00:00')""",
+                (start + 5 * 300,),
+            )
+
+        repository = self.repository()
+        repository.activate_registry(generate_on_activation=False)
+        product = repository.generate("NAS100:M15", generated_at=self.generated)
+
+        self.assertEqual(product["status"], "Available")
+        self.assertEqual(product["observation_count"], 2)
+        self.assertEqual(
+            product["aggregation_rule"],
+            "MT5_BROKER_INDEX_CFD_M5_TO_M15_UTC_V1",
+        )
+        self.assertEqual(
+            product["calendar_authority"],
+            "MT5_BROKER_INDEX_CFD_24X5_UTC_V1",
+        )
+        self.assertEqual(
+            [row["timestamp"] for row in repository.observations("NAS100:M15")],
+            [start, start + 900],
+        )
+
     def test_missing_component_is_incomplete_and_never_fabricated(self) -> None:
         with registered_writer(self.database) as connection:
             connection.execute("DELETE FROM bars WHERE asset='AUDUSD' AND timeframe='M5' AND open_time_utc=?", (self.start + 300,))
@@ -139,7 +220,7 @@ class Spec045SyntheticRepositoryTests(unittest.TestCase):
         with open_read_only(self.database) as connection:
             real_before = authority_revision_for_lane(connection, symbol="AUDUSD", timeframe="M5")
             table_count = connection.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchone()[0]
-        self.assertEqual(table_count, 13)
+        self.assertEqual(table_count, 14)
         self.assertEqual(before["synthetic_revision"], 1)
         self.assertEqual(before["complete_lineage"][0]["evidence_class"], "REAL")
         with registered_writer(self.database) as connection:
@@ -151,7 +232,7 @@ class Spec045SyntheticRepositoryTests(unittest.TestCase):
         self.assertEqual(refreshed["synthetic_revision"], 2)
         with open_read_only(self.database) as connection:
             real_after = authority_revision_for_lane(connection, symbol="AUDUSD", timeframe="M5")
-            self.assertEqual(connection.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchone()[0], 13)
+            self.assertEqual(connection.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchone()[0], 14)
         self.assertNotEqual(real_before, real_after)
 
     def test_synthetic_to_synthetic_retains_complete_real_lineage(self) -> None:

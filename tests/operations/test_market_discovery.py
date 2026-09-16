@@ -25,6 +25,11 @@ class MarketDiscoveryTests(unittest.TestCase):
         self.assertEqual(self.market("Gold")["recommendation"]["symbol"],"XAUUSD")
         self.assertEqual(self.market("AUDJPY")["market_type"],"FOREIGN_EXCHANGE")
         self.assertEqual(self.market("Tesla")["recommendation"]["symbol"],"TSLA")
+    def test_global_prime_oil_symbols_resolve_to_canonical_cfds(self):
+        for query,symbol,underlying in (("WTIUSD","USOIL","West Texas Intermediate Crude Oil"),("XTIUSD","USOIL","West Texas Intermediate Crude Oil"),("XBRUSD","UKOIL","Brent Crude Oil")):
+            market=self.market(query)
+            self.assertEqual(market["recommendation"]["symbol"],symbol)
+            self.assertEqual(market["underlying_market"],underlying)
     def test_provider_discovery_and_recommendation_are_informational(self):
         before=self.db.read_bytes();market=self.market("DIA");mapping=next(p for p in market["provider_discovery"] if p["representation_symbol"]=="DIA")
         self.assertEqual((mapping["provider"],mapping["availability"],mapping["supported_timeframes"],mapping["entitlement"]),("TWELVE_DATA","KNOWN_MAPPING",("D1",),"NOT_MEASURED"));self.assertEqual(before,self.db.read_bytes())

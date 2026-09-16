@@ -201,6 +201,8 @@ func checkEstateHierarchy() throws {
     try check(EstateHierarchyClassifier.subgroupName(market:"Stocks",symbol:"AAPL",assetClass:"US_EQUITIES",exchange:"NASDAQ") == "US","US stock route")
     try check(EstateHierarchyClassifier.subgroupName(market:"Indices",symbol:"XJO",assetClass:"INDICES",exchange:"ASX") == "Australia","Australian index route")
     try check(EstateHierarchyClassifier.subgroupName(market:"Crypto",symbol:"BTCUSD",assetClass:"CRYPTO",exchange:"Digital asset venues") == "All","crypto route")
+    try check(EstateGroupSummary.aggregateAuthorityState(["GOLD"]) == "GOLD","current lane lost its Gold state")
+    try check(EstateGroupSummary.aggregateAuthorityState(["GOLD", "GREEN"]) == "GREEN","within-tolerance lane did not lower estate state to Green")
     try check(EstateGroupSummary.aggregateAuthorityState(["GREEN", "RED"]) == "RED","critical lane hidden by healthy average")
     try check(EstateGroupSummary.aggregateAuthorityState(["GREEN", "AMBER"]) == "AMBER","attention lane hidden by healthy average")
     try check(EstateGroupSummary.aggregateAuthorityState([]) == "NOT_MEASURED","empty group material state")
@@ -838,5 +840,14 @@ try run("SPEC-060 scheduler health and monitor transport remain independent") {
     try check(status.operationalHealth?.currentLane=="AUDUSD:M5" && status.operationalHealth?.workerPool.activeWorkers==1,"progress facts not decoded")
     let repair=ArgumentBuilder.arguments(for:.schedulerServiceAction("repair-monitor"),database:"/authority.sqlite3")
     try check(repair.contains("repair-monitor") && !repair.contains("repair"),"Repair Monitor routed through full service repair")
+}
+try run("MT5 bridge and watchdog status decode independently") {
+    let json="""
+    {"contract":"fragarach_ii.scheduler_service_status.v1","service_state":"RUNNING","installed":true,"live":true,"compatibility":"Compatible","restart_count":0,"automatic_login_start":true,"acquisition_owner_active":true,"recommended_actions":[],"mt5_bridge":{"contract":"fragarach_ii.mt5_bridge_monitor.v1","effective_status":"HEALTHY","freshness_state":"CURRENT","received_at_utc":"2026-09-11T01:00:02Z","reported_at_utc":"2026-09-11T01:00:00Z","age_seconds":2.0,"freshness_budget_seconds":150,"bridge":{"status":"READY","heartbeat_at_utc":"2026-09-11T00:59:59Z","process_started_at_utc":"2026-09-11T00:30:00Z","last_result":"acknowledged","request_id":"request-one","source_route":"registered_standard_data_primary","error":null},"watchdog":{"status":"HEALTHY","checked_at_utc":"2026-09-11T01:00:00Z","reason":"READY","action":"NONE","heartbeat_age_seconds":1.0,"unhealthy_for_seconds":null,"error":null},"recovery":{"last_restart_at_utc":"2026-09-11T00:45:00Z","restart_count_last_hour":1,"total_restart_count":3},"queue":{"pending":0,"completed":2763,"responses":2763,"expired":4},"node_count":2,"healthy_node_count":1,"nodes":[{"node":{"node_id":"tradewinds-mt5-bridge","role":"PRIMARY"},"effective_status":"STALE","freshness_state":"STALE","received_at_utc":"2026-09-11T00:56:00Z","reported_at_utc":"2026-09-11T00:56:00Z","age_seconds":242.0,"bridge":null,"watchdog":null,"recovery":null},{"node":{"node_id":"mt5-same-broker-standby","role":"STANDBY"},"effective_status":"HEALTHY","freshness_state":"CURRENT","received_at_utc":"2026-09-11T01:00:02Z","reported_at_utc":"2026-09-11T01:00:00Z","age_seconds":2.0,"bridge":null,"watchdog":null,"recovery":null}]}}
+    """
+    let status=try JSONDecoder().decode(SchedulerServiceStatus.self,from:Data(json.utf8))
+    try check(status.mt5Bridge?.effectiveStatus=="HEALTHY" && status.mt5Bridge?.watchdog?.status=="HEALTHY","MT5 bridge health not decoded")
+    try check(status.mt5Bridge?.queue.completed==2763 && status.mt5Bridge?.recovery?.totalRestartCount==3,"MT5 bridge queue or recovery facts not decoded")
+    try check(status.mt5Bridge?.nodeCount==2 && status.mt5Bridge?.nodes?.last?.node.role=="STANDBY","MT5 bridge node health not decoded")
 }
 print("OperationsCoreChecks: \(passed) checks passed")

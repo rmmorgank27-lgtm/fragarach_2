@@ -26,8 +26,8 @@ TRUTH_COMPONENT_WEIGHTS = {
     "historical_depth": 25,
     "continuity": 10,
 }
-_TIMEFRAME_SECONDS = {"D1": 86_400, "H1": 3_600, "M30": 1_800, "M5": 300}
-_DEPTH_HORIZON_DAYS = {"D1": 3_652.5, "H1": 1_095.75, "M30": 730.5, "M5": 365.25}
+_TIMEFRAME_SECONDS = {"D1": 86_400, "H1": 3_600, "M30": 1_800, "M15": 900, "M5": 300}
+_DEPTH_HORIZON_DAYS = {"D1": 3_652.5, "H1": 1_095.75, "M30": 730.5, "M15": 365.25, "M5": 365.25}
 
 
 class TruthEngineError(RuntimeError):
@@ -251,7 +251,11 @@ def _calculate(
     )
     provider_summary = {
         "provider": registration[0],
-        "provider_contract": registration[1] if timeframe=="D1" else f"TWELVE_DATA_TIME_SERIES_{timeframe}_V1",
+        "provider_contract": (
+            f"TWELVE_DATA_TIME_SERIES_{timeframe}_V1"
+            if registration[0] == "TWELVE_DATA" and timeframe != "D1"
+            else registration[1]
+        ),
         "provider_symbol": registration[2],
         "confidence": "NOT_MEASURED",
         "score": None,
@@ -288,17 +292,21 @@ def _calculate(
     )
     if truth_score == 100 and any(score < 100 for score in measured.values()):
         truth_score = 99
-    # ``authority_state`` is the operational work signal shown in the Estate
-    # scorecards.  Quality-score deductions (for example history depth or a
-    # legacy validation warning) remain explainable in the score, but must not
-    # be represented as a lane that needs an update when its current edge is
-    # already complete.  Freshness is the governed source of update work.
-    if price_quality_failed or freshness.get("severity") in {"CRITICAL", "UNAVAILABLE"}:
+    # ``authority_state`` is the published lane-status contract. Scheduler
+    # Current/Behind remains the source of recovery work, while the freshness
+    # band tells consumers whether that lag is still within their usable
+    # tolerance. Quality-score deductions remain explainable but do not alter
+    # the lane status. Integrity and unavailable-authority failures are hard
+    # Red overrides.
+    freshness_status = str(freshness.get("lane_status") or "").upper()
+    if price_quality_failed or freshness.get("severity") == "UNAVAILABLE":
         state = "RED"
-    elif freshness.get("state") == "Behind":
-        state = "AMBER"
+    elif freshness_status in {"GOLD", "GREEN", "AMBER", "RED"}:
+        state = freshness_status
     else:
-        state = "GREEN"
+        # Compatibility for a persisted/fixture freshness response created
+        # before the four-band status contract.
+        state = "GOLD" if freshness.get("state") == "Current" else "AMBER"
     limitations = [name.upper() + "_NOT_MEASURED" for name, item in components.items() if item["score"] is None]
     if validation_stale:
         limitations = [item for item in limitations if item not in {"INTEGRITY_NOT_MEASURED", "CONTINUITY_NOT_MEASURED"}]
@@ -328,6 +336,7 @@ def _calculate(
             "state": freshness.get("severity"),
             "label": freshness.get("operational_state", freshness.get("state")),
             "lag": freshness.get("lag"),
+            "lane_status": state,
         },
         "overall_operational_state": (
             "Critical" if state == "RED" else "Attention" if state == "AMBER" else "Healthy"

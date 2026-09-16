@@ -38,6 +38,7 @@ PROVIDERS: dict[str, dict[str, object]] = {
     "YAHOO_FINANCE": {"account": "YAHOO_API_KEY", "required": False},
     "BINANCE": {"account": "BINANCE_API_KEY", "required": False},
     "COINGECKO": {"account": "COINGECKO_API_KEY", "required": False},
+    "COINGECKO_DEX": {"account": "COINGECKO_DEX_API_KEY", "required": False},
 }
 
 

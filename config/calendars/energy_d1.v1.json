@@ -1,0 +1,22 @@
+{
+  "asset_class": "ENERGY",
+  "calculated_closures": ["GOOD_FRIDAY"],
+  "calendar_id": "ENERGY_D1_V1",
+  "calendar_version": 1,
+  "definition_checksum": "7032dbd1f4761033f36a3453f5910739fcc85526576ee2666ce5782f05680f32",
+  "effective_from": "1900-01-01",
+  "effective_to": null,
+  "format": "fragarach_ii.calendar_definition.v1",
+  "overrides": [],
+  "session_close_local": "17:00:00",
+  "session_timezone": "America/New_York",
+  "session_close_owner_day_offset": 0,
+  "acquisition_delay_seconds": 0,
+  "recurring_full_day_closures": [
+    {"day": 1, "month": 1, "reason": "New Year's Day"},
+    {"day": 25, "month": 12, "reason": "Christmas Day"}
+  ],
+  "timeframe": "D1",
+  "timezone_basis": "UTC",
+  "weekdays_expected": [1, 2, 3, 4, 5]
+}

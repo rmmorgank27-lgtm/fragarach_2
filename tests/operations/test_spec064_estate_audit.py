@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from fragarach_ii.estate_audit import (
@@ -83,13 +84,89 @@ def test_route_revision_drift_creates_review_plan_without_blocking_lane(tmp_path
     assert target["state"] == "READY"
 
 
+def test_route_revision_drift_is_reported_once_per_symbol_with_route_facts(tmp_path: Path) -> None:
+    database = _valid_m5_lane(tmp_path)
+    register = LaneUpdateRegister(database)
+    register.audit_estate(at=NOW, reason="TEST_SEED")
+    with register._connection() as connection:
+        connection.execute(
+            "UPDATE lane_update_register SET provider_route_revision='stale' WHERE asset='AUDUSD'"
+        )
+
+    report = run_estate_audit(database, at=NOW)
+    history = audit_history(database, audit_run_id=str(report["audit_run_id"]))
+    route_findings = [
+        finding for finding in history["selected_report"]["findings"]
+        if finding["finding_class"] == "PROVIDER_ROUTE_REVISION_CHANGED"
+    ]
+
+    assert len(route_findings) == 1
+    observed = json.loads(route_findings[0]["observed_facts_json"])
+    expected = json.loads(route_findings[0]["expected_facts_json"])
+    assert observed["affected_lanes"] == ["AUDUSD:D1", "AUDUSD:M5"]
+    assert expected["provider_route"]["registration_route"]["asset"] == "AUDUSD"
+
+
+def test_fingerprint_version_migration_does_not_create_weekly_route_findings(tmp_path: Path) -> None:
+    database = _valid_m5_lane(tmp_path)
+    register = LaneUpdateRegister(database)
+    register.audit_estate(at=NOW, reason="TEST_SEED")
+    register.block(
+        asset="AUDUSD", timeframe="M5", reason="LOCAL_PROGRAMMING_ERROR; fixture", at=NOW, approved=True,
+    )
+    with register._connection() as connection:
+        connection.execute(
+            "UPDATE lane_update_register SET provider_route_revision='legacy-format'"
+        )
+        connection.execute(
+            "UPDATE register_meta SET value='1' WHERE key='provider_route_revision_version'"
+        )
+
+    migrated = LaneUpdateRegister(database)
+    report = run_estate_audit(database, at=NOW)
+    target = next(
+        row for row in migrated.rows()
+        if row["asset"] == "AUDUSD" and row["timeframe"] == "M5"
+    )
+
+    assert report["finding_counts"]["WARNING"] == 0
+    assert target["state"] == "BLOCKED"
+    assert target["last_outcome"].startswith("LOCAL_PROGRAMMING_ERROR")
+
+
+def test_current_running_lane_is_not_reported_as_interrupted(tmp_path: Path) -> None:
+    database = _valid_m5_lane(tmp_path)
+    register = LaneUpdateRegister(database)
+    register.audit_estate(at=NOW, reason="TEST_SEED")
+    register.claim_due(at=NOW, limit=1)
+
+    report = run_estate_audit(database, at=NOW + timedelta(minutes=2))
+
+    assert report["finding_counts"]["REPAIRABLE"] == 0
+
+
+def test_old_running_lane_is_reported_as_interrupted(tmp_path: Path) -> None:
+    database = _valid_m5_lane(tmp_path)
+    register = LaneUpdateRegister(database)
+    register.audit_estate(at=NOW, reason="TEST_SEED")
+    register.claim_due(at=NOW, limit=1)
+
+    report = run_estate_audit(database, at=NOW + timedelta(minutes=16))
+
+    history = audit_history(database, audit_run_id=str(report["audit_run_id"]))
+    assert any(
+        finding["finding_class"] == "STALE_RUNNING_REGISTER_ROW"
+        for finding in history["selected_report"]["findings"]
+    )
+
+
 def test_reviewed_route_revision_refresh_preserves_blocked_lane_state(tmp_path: Path) -> None:
     database = _valid_m5_lane(tmp_path)
     register = LaneUpdateRegister(database)
     register.audit_estate(at=NOW, reason="TEST_SEED")
     register.block(
         asset="AUDUSD", timeframe="M5",
-        reason="LOCAL_PROGRAMMING_ERROR; reviewed repair pending", at=NOW,
+        reason="LOCAL_PROGRAMMING_ERROR; reviewed repair pending", at=NOW, approved=True,
     )
     with register._connection() as connection:
         connection.execute(

@@ -3,10 +3,15 @@ import SwiftUI
 
 struct LanesView:View {
     @EnvironmentObject var store:ConsoleStore; @State private var search=""; @State private var timeframe="All"
+    private let timeframeOrder=["D1","H1","M30","M5"]
+    var timeframeChoices:[String] {
+        let available=Set((store.snapshot?.lanes ?? []).map(\.timeframe))
+        return timeframeOrder.filter(available.contains)
+    }
     var lanes:[LaneRecord] { (store.snapshot?.lanes ?? []).filter{(search.isEmpty || $0.asset.localizedCaseInsensitiveContains(search)) && (timeframe=="All" || $0.timeframe==timeframe)}.sorted{$0.id<$1.id} }
     var selected:LaneRecord? { lanes.first{$0.id==store.selectedLaneID} }
     var body:some View { HSplitView {
-        VStack(alignment:.leading){HStack{Text("Lanes").font(.title);Spacer();Picker("Timeframe",selection:$timeframe){Text("All").tag("All");Text("D1").tag("D1")}.frame(width:130)}
+        VStack(alignment:.leading){HStack{Text("Lanes").font(.title);Spacer();Button("Refresh"){Task{await store.refresh()}}.disabled(store.isRefreshing);Picker("Timeframe",selection:$timeframe){Text("All").tag("All");ForEach(timeframeChoices,id:\.self){Text($0).tag($0)}}.frame(width:130)}
             List(lanes,selection:$store.selectedLaneID){lane in VStack(alignment:.leading,spacing:3){HStack{Text(lane.asset).font(.headline);Text(lane.timeframe).foregroundStyle(.secondary);Spacer();Text(Format.utc(lane.highWatermark)).font(.caption)};if let v=lane.validation{Text("Through \(v.throughDate) · missing \(v.missingExpectedSessionCount) · outside \(v.outsideExpectedSessionCount)").font(.caption).foregroundStyle(.secondary)}else{Text("Not yet validated").font(.caption).foregroundStyle(.secondary)}}.tag(lane.id)}.searchable(text:$search,prompt:"Search asset")
             Text("Last read: \(store.snapshot?.readAt.formatted() ?? "Never")").font(.caption).foregroundStyle(.secondary)
         }.padding().frame(minWidth:430)

@@ -3,141 +3,162 @@ import SwiftUI
 
 struct MarketHistoryView: View {
     @EnvironmentObject var store: ConsoleStore
-    @State private var coverageNoteSelection: CoverageNoteSelection?
-    private let cadenceOrder = ["D1", "H1", "M30", "M5"]
+    @State private var selectedLane: HistorySummaryLane?
 
     private var availableSymbols: [String] {
-        let estateSymbols = Set((store.snapshot?.registrations ?? [])
-            .filter { !$0.retired && $0.timeframe == "D1" }
-            .map(\.asset))
-        return estateSymbols.isEmpty ? [store.marketHistorySymbol] : estateSymbols.sorted()
-    }
-
-    private var timeframes: [String] {
-        let lanes = Set((store.snapshot?.lanes ?? [])
-            .filter { $0.asset == store.marketHistorySymbol }
-            .map(\.timeframe))
-        let active = lanes.isEmpty ? Set(cadenceOrder) : lanes
-        return cadenceOrder.filter(active.contains)
-    }
-
-    private var totalBars: Int { store.marketHistoryResponses.values.reduce(0) { $0 + $1.ohlc.count } }
-    private var latestCAODT: String? {
-        store.marketHistoryResponses.values.compactMap(\.caodt).max()
-    }
-    private var warningCount: Int {
-        store.marketHistoryResponses.values.reduce(0) { $0 + $1.warnings.count }
+        let symbols = Set((store.snapshot?.registrations ?? [])
+            .filter { !$0.retired && $0.timeframe == "D1" }.map(\.asset))
+        return symbols.isEmpty ? [store.marketHistorySymbol] : symbols.sorted()
     }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 Text("Market History").font(.largeTitle).fontWeight(.semibold)
-                Text("Read the governed history for any active estate symbol. This view never starts acquisition or changes evidence.")
+                Text("History held for each timeframe — total coverage and recent bar counts.")
                     .foregroundStyle(.secondary)
-                HStack {
+                HStack(spacing: 14) {
                     Picker("Symbol", selection: $store.marketHistorySymbol) {
                         ForEach(availableSymbols, id: \.self) { Text($0).tag($0) }
-                    }.pickerStyle(.menu).frame(width: 180)
-                    Picker("Window", selection: $store.marketHistoryTradingDays) {
-                        Text("5 Trading Days").tag(5)
-                        Text("21 Trading Days").tag(21)
-                        Text("365 Trading Days").tag(365)
-                    }.pickerStyle(.menu).frame(width: 200)
-                    Button("Refresh History") { Task { await store.requestMarketHistory(timeframes: timeframes) } }
-                        .buttonStyle(.borderedProminent)
-                    Text("\(availableSymbols.count) active symbols · \(timeframes.count) commissioned lanes")
-                        .font(.caption).foregroundStyle(.secondary)
+                    }.pickerStyle(.menu).frame(width: 210)
+                    Button("Refresh History") { Task { await store.requestMarketHistory() } }
+                        .disabled(store.marketHistoryLoading)
+                    if store.marketHistoryLoading { ProgressView().controlSize(.small) }
+                    Spacer()
+                    Label("Read only", systemImage: "lock").font(.caption).foregroundStyle(.secondary)
                 }
-                LazyVGrid(columns: [GridItem(.adaptive(minimum:170), spacing:12)], spacing:12) {
-                    HistoryMetric(title:"Governed bars", value:totalBars.formatted(), detail:"Selected window across active lanes")
-                    HistoryMetric(title:"Latest governed time", value:compactTimestamp(latestCAODT), detail:"Newest returned CAODT")
-                    HistoryMetric(title:"Coverage notes", value:"\(warningCount)", detail:warningCount == 0 ? "No history warnings" : "Select a lane below to review")
+                if let error = store.marketHistoryError {
+                    Text(error).foregroundStyle(.red)
                 }
-                if let error=store.marketHistoryError { Text(error).foregroundStyle(.red) }
-                Grid(alignment:.leading,horizontalSpacing:18,verticalSpacing:0) {
-                    GridRow { header("Lane");header("Availability");header("Governed bars");header("Latest governed time");header("Coverage notes") }
-                    Divider().gridCellColumns(5)
-                    ForEach(timeframes,id:\.self) { timeframe in
-                        let response=store.marketHistoryResponses[timeframe]
-                        GridRow {
-                            Text(timeframe).font(.body.monospaced().bold())
-                            coverageStatusButton(timeframe:timeframe,response:response)
-                            Text("\(response?.ohlc.count ?? 0)").monospacedDigit()
-                            Text(response?.caodt ?? "—").font(.caption.monospaced())
-                            coverageSummaryButton(timeframe:timeframe,response:response)
-                        }.padding(.vertical,9)
-                        Divider().gridCellColumns(5)
+                if let summary = store.marketHistorySummary {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("Trading days held · \(summary.tradingDaysHeld?.formatted() ?? "Unavailable")")
+                            .font(.title3.bold())
+                        Text("Distinct D1 dates held that match the symbol’s calendar. Calendar closures are excluded; shortened sessions count as one full day.")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
-                }
-                .padding(14).background(.quaternary.opacity(0.18),in:RoundedRectangle(cornerRadius:10))
-                .popover(item:$coverageNoteSelection,arrowEdge:.trailing) { selection in
-                    CoverageNotesPopover(selection:selection)
+                    historyTable(summary)
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("Last year = rolling 12 months · Last month = rolling 1 month · Rolling periods end at refresh time.")
+                        Text("Counts use bar opening times in UTC. Weekly and monthly bars are complete periods derived from daily history. M15 uses published M5-derived history. A dash means unavailable; 0 means no bars in that period.")
+                        Text("Last active session is the most recent completed trading session. Current-session counts include closed bars only. Session dates use \(summary.sessions.timezone ?? "an unavailable timezone").")
+                        Text(summary.sessions.note)
+                        Text("Refreshed \(timestamp(summary.observedAtUTC))")
+                    }.font(.caption).foregroundStyle(.secondary)
+                } else if store.marketHistoryLoading {
+                    Text("Reading history totals…").foregroundStyle(.secondary).padding(.vertical, 30)
                 }
                 Divider()
                 EstateAuditHistoryView()
                 DisclosureGroup("Synthetic product maintenance") { syntheticProducts }
-            }.padding().frame(maxWidth:1100,alignment:.leading)
+            }.padding(22).frame(maxWidth: 1100, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
         .task(id: availableSymbols) {
             if !availableSymbols.contains(store.marketHistorySymbol) {
                 store.marketHistorySymbol = availableSymbols.first ?? "AUDUSD"
             }
-            await store.requestMarketHistory(timeframes: timeframes)
+        }
+        .task(id: store.marketHistorySymbol) {
+            selectedLane = nil
+            await store.requestMarketHistory()
         }
         .task { await store.refreshSyntheticProducts() }
-        .onChange(of: store.marketHistorySymbol) { _, _ in
-            Task { await store.requestMarketHistory(timeframes: timeframes) }
+        .popover(item: $selectedLane) { lane in
+            VStack(alignment: .leading, spacing: 12) {
+                Text("\(lane.timeframe) coverage").font(.headline)
+                Text(lane.status.replacingOccurrences(of: "_", with: " ").capitalized)
+                ForEach(lane.warnings, id: \.self) { warning in
+                    Text(warning.replacingOccurrences(of: "_", with: " ").capitalized)
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                ForEach(lane.notes ?? [], id: \.self) { note in
+                    Text(note).font(.caption).foregroundStyle(.secondary)
+                }
+                if lane.derived && lane.timeframe != "M15" { Text("Only complete periods supported by the daily calendar are counted.").font(.caption) }
+            }.padding().frame(width: 350, alignment: .leading)
         }
     }
 
-    private func header(_ text:String)->some View { Text(text).font(.caption.bold()).foregroundStyle(.secondary) }
-    private func color(_ status:String?)->Color { switch status { case "AVAILABLE":.green;case "AVAILABLE_WITH_WARNINGS":.orange;case "TIMEFRAME_NOT_ACTIVE":.secondary;case nil:.secondary;default:.red } }
-    private func presentedStatus(_ status:String?)->String {
-        switch status {
-        case "AVAILABLE": "Available"
-        case "AVAILABLE_WITH_WARNINGS": "Available with notes"
-        case "TIMEFRAME_NOT_ACTIVE": "Not commissioned"
-        case nil: "Loading…"
-        default: status?.replacingOccurrences(of:"_",with:" ").capitalized ?? "Unavailable"
+    private func historyTable(_ summary: HistorySummary) -> some View {
+        ScrollView(.horizontal) {
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 0) {
+                GridRow {
+                    header("Timeframe").frame(width: 76, alignment: .leading)
+                    header("Total bars")
+                    header("Full date range · UTC")
+                    header("Last year").help("From \(timestamp(summary.lastYearStartUTC)) to refresh time")
+                    header("Last month").help("From \(timestamp(summary.lastMonthStartUTC)) to refresh time")
+                    sessionHeader("Last active session", window: summary.sessions.lastActive, fallback: "Unavailable")
+                    sessionHeader("Current session", window: summary.sessions.current,
+                                  fallback: summary.sessions.state == "CLOSED" ? "Market closed" : "Unavailable")
+                    header("Coverage")
+                }.padding(.bottom, 12)
+                Divider().gridCellColumns(8).gridCellUnsizedAxes(.horizontal)
+                ForEach(summary.lanes) { lane in
+                    GridRow {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(lane.timeframe).font(.body.monospaced().bold())
+                            if lane.derived { Text("Derived").font(.caption2).foregroundStyle(.secondary) }
+                        }.frame(width: 76, alignment: .leading)
+                        count(lane.totalBars).fontWeight(.semibold)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(shortTimestamp(lane.firstBarUTC))
+                            Text(shortTimestamp(lane.lastBarUTC)).foregroundStyle(.secondary)
+                        }.font(.caption.monospaced())
+                            .help("First to latest bar opening time (UTC)")
+                        count(lane.lastYearBars)
+                        count(lane.lastMonthBars)
+                        if lane.supportsSessions { count(lane.lastActiveSessionBars) }
+                        else { Text("N/A").foregroundStyle(.secondary) }
+                        if !lane.supportsSessions { Text("N/A").foregroundStyle(.secondary) }
+                        else if summary.sessions.state == "CLOSED" {
+                            Text("Market closed").font(.caption).foregroundStyle(.secondary)
+                        } else { count(lane.currentSessionBars) }
+                        Button { selectedLane = lane } label: {
+                            Label(coverageLabel(lane), systemImage: lane.status == "AVAILABLE" && (lane.notes ?? []).isEmpty ? "checkmark.circle" : "info.circle")
+                                .font(.caption).foregroundStyle(coverageColor(lane))
+                        }.buttonStyle(.plain).help("Show \(lane.timeframe) coverage notes")
+                    }.padding(.vertical, 13)
+                    Divider().gridCellColumns(8).gridCellUnsizedAxes(.horizontal)
+                }
+            }.padding(16)
+        }.background(.quaternary.opacity(0.18), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func sessionHeader(_ title: String, window: HistorySessionWindow?, fallback: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            header(title)
+            Text(window?.date ?? fallback).font(.caption2).foregroundStyle(.secondary)
+        }.fixedSize().help(window.map { "\(timestamp($0.openUTC)) to \(timestamp($0.closeUTC))" } ?? fallback)
+    }
+
+    private func header(_ value: String) -> some View {
+        Text(value).font(.caption.bold()).foregroundStyle(.secondary).fixedSize()
+    }
+    private func count(_ value: Int?) -> some View { Text(value?.formatted() ?? "—").monospacedDigit() }
+    private func shortTimestamp(_ value: String?) -> String {
+        guard let value else { return "—" }
+        return String(value.prefix(16)).replacingOccurrences(of: "T", with: " ")
+    }
+    private func timestamp(_ value: String) -> String { shortTimestamp(value) + " UTC" }
+    private func coverageLabel(_ lane: HistorySummaryLane) -> String {
+        switch lane.status {
+        case "AVAILABLE": (lane.notes ?? []).isEmpty ? "Available" : "Notes"
+        case "AVAILABLE_WITH_WARNINGS": "Notes"
+        case "NO_HISTORY": "No history"
+        case "TIMEFRAME_NOT_ACTIVE": "Not active"
+        default: "Unavailable"
         }
     }
-    private func coverageNotes(_ warnings:[String])->String {
-        guard !warnings.isEmpty else { return "No coverage notes" }
-        let presented = warnings.prefix(3).map {
-            switch $0 {
-            case "HISTORICAL_GAPS_PRESENT": "Observed gaps"
-            case "REQUESTED_WINDOW_HAS_MISSING_HISTORY": "Window incomplete"
-            case "HISTORICAL_AUTHORITY_AMBER": "Review history"
-            default: $0.replacingOccurrences(of:"_",with:" ").capitalized
-            }
-        }
-        return presented.joined(separator:", ")
-    }
-    @ViewBuilder private func coverageStatusButton(timeframe:String,response:MarketHistoryResponse?)->some View {
-        let warnings=response?.warnings ?? []
-        if warnings.isEmpty {
-            Text(presentedStatus(response?.status)).foregroundStyle(color(response?.status))
-        } else {
-            Button { coverageNoteSelection = .init(timeframe:timeframe,response:response) } label: {
-                Label(presentedStatus(response?.status),systemImage:"info.circle")
-                    .foregroundStyle(color(response?.status))
-            }
-            .buttonStyle(.plain)
-            .help("Show \(timeframe) coverage notes")
+    private func coverageColor(_ lane: HistorySummaryLane) -> Color {
+        switch lane.status {
+        case "AVAILABLE": .green
+        case "AVAILABLE_WITH_WARNINGS": .orange
+        case "TIMEFRAME_NOT_ACTIVE", "NO_HISTORY": .secondary
+        default: .red
         }
     }
-    @ViewBuilder private func coverageSummaryButton(timeframe:String,response:MarketHistoryResponse?)->some View {
-        let warnings=response?.warnings ?? []
-        if warnings.isEmpty {
-            Text(coverageNotes(warnings)).font(.caption).foregroundStyle(.secondary)
-        } else {
-            Button(coverageNotes(warnings)) { coverageNoteSelection = .init(timeframe:timeframe,response:response) }
-                .buttonStyle(.plain).font(.caption).foregroundStyle(.secondary)
-                .help("Show \(timeframe) coverage notes")
-        }
-    }
-    private func compactTimestamp(_ value:String?)->String { value?.replacingOccurrences(of:"T",with:" ").replacingOccurrences(of:"+00:00",with:" UTC") ?? "—" }
 
     @ViewBuilder private var syntheticProducts:some View {
         VStack(alignment:.leading,spacing:12) {
@@ -163,60 +184,4 @@ struct MarketHistoryView: View {
     }
     private func syntheticColor(_ status:String)->Color {switch status{case "Available":.green;case "Stale","Incomplete":.orange;default:.red}}
     private func epoch(_ value:Int64?)->String {guard let value else{return "—"};return ISO8601DateFormatter().string(from:Date(timeIntervalSince1970:TimeInterval(value)))}
-}
-
-private struct CoverageNoteSelection: Identifiable {
-    let timeframe:String
-    let response:MarketHistoryResponse?
-    var id:String { timeframe }
-}
-
-private struct CoverageNotesPopover:View {
-    let selection:CoverageNoteSelection
-    @Environment(\.dismiss) private var dismiss
-    private var response:MarketHistoryResponse? { selection.response }
-    private var warnings:[String] { response?.warnings ?? [] }
-    var body:some View {
-        VStack(alignment:.leading,spacing:12) {
-            HStack { Label("\(selection.timeframe) coverage notes",systemImage:"text.magnifyingglass").font(.headline);Spacer();Button("Done"){dismiss()} }
-            Grid(alignment:.leading,horizontalSpacing:12,verticalSpacing:6) {
-                GridRow { Text("Availability").foregroundStyle(.secondary);Text(presentedStatus(response?.status)) }
-                GridRow { Text("Governed bars").foregroundStyle(.secondary);Text("\(response?.ohlc.count ?? 0)") }
-                GridRow { Text("Latest time").foregroundStyle(.secondary);Text(response?.caodt ?? "—").font(.caption.monospaced()) }
-            }
-            Divider()
-            ForEach(warnings,id:\.self) { warning in
-                VStack(alignment:.leading,spacing:3) {
-                    Text(noteTitle(warning)).font(.subheadline.bold())
-                    Text(noteDetail(warning)).font(.caption).foregroundStyle(.secondary)
-                    Text(warning).font(.caption2.monospaced()).foregroundStyle(.tertiary)
-                }
-            }
-        }.padding().frame(width:420,alignment:.leading)
-    }
-    private func presentedStatus(_ status:String?)->String { status?.replacingOccurrences(of:"_",with:" ").capitalized ?? "Loading" }
-    private func noteTitle(_ warning:String)->String { switch warning {
-    case "HISTORICAL_GAPS_PRESENT": "Observed historical gaps"
-    case "REQUESTED_WINDOW_HAS_MISSING_HISTORY": "Selected window is incomplete"
-    case "HISTORICAL_AUTHORITY_AMBER": "History requires review"
-    default: warning.replacingOccurrences(of:"_",with:" ").capitalized
-    } }
-    private func noteDetail(_ warning:String)->String { switch warning {
-    case "HISTORICAL_GAPS_PRESENT": "The governed record contains one or more gaps in the selected timeframe."
-    case "REQUESTED_WINDOW_HAS_MISSING_HISTORY": "Some expected observations in the selected window are not present in the governed record."
-    case "HISTORICAL_AUTHORITY_AMBER": "The evidence is available, but its history authority has an amber review condition."
-    default: "This coverage condition was returned by the governed history service."
-    } }
-}
-
-private struct HistoryMetric: View {
-    let title:String;let value:String;let detail:String
-    var body: some View {
-        VStack(alignment:.leading,spacing:5) {
-            Text(title).font(.caption).foregroundStyle(.secondary)
-            Text(value).font(.title3.bold()).lineLimit(1)
-            Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-        }.padding(12).frame(maxWidth:.infinity,minHeight:80,alignment:.leading)
-            .background(.regularMaterial,in:RoundedRectangle(cornerRadius:10))
-    }
 }

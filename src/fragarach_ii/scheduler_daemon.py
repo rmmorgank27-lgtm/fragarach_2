@@ -40,6 +40,11 @@ JOURNAL_FORMAT_VERSION = 4
 # malformed, so keep a bounded but comfortably larger transport ceiling.
 _SOCKET_LIMIT = 8 * 1024 * 1024
 _SOCKET_CLIENT_TIMEOUT = 10.0
+_WATCHDOG_INTERVAL = 5.0
+_WATCHDOG_PING_TIMEOUT = 1.0
+_WATCHDOG_MONITOR_FAILURE_LIMIT = 3
+_WATCHDOG_REPAIR_FAILURE_LIMIT = 2
+_WATCHDOG_STALL_LIMIT = 12
 MUTATION_CONTRACT = "fragarach_ii.scheduler_service_mutation.v1"
 MUTATION_TYPES = frozenset({
     "INSTALL", "START", "STOP", "RESTART", "UPDATE", "REPAIR", "ENABLE",
@@ -793,6 +798,8 @@ def _extend_status_with_mutation(paths: ServicePaths, status: dict[str, Any]) ->
     elif not status.get("live") and paths.socket.exists():
         status["reconciliation_status"] = "SERVICE_STATE_INCONSISTENT"
     status["recommended_actions"] = _recommended_service_actions(status, visible)
+    from .mt5_bridge_health import bridge_health_status
+    status["mt5_bridge"] = bridge_health_status(paths.database)
     return status
 
 
@@ -856,6 +863,7 @@ def scheduler_operational_health(
     )
     progress = snapshot.get("scheduler_progress") or {}
     actionable = int(progress.get("actionable_queue_depth", 0) or 0)
+    blocked = int(progress.get("blocked_queue_depth", 0) or 0)
     active = int(progress.get("active_workers", 0) or 0)
     progress_time = _parse_timestamp(progress.get("last_meaningful_progress"))
     progress_age = (
@@ -872,6 +880,12 @@ def scheduler_operational_health(
         overall = "DEGRADED"
     elif stalled:
         overall = "STALLED"
+    # A current heartbeat proves only that the process is running.  It must
+    # not conceal lanes which the Scheduler has declared unable to progress.
+    # Keep this below STALLED so an active deadlock remains the more urgent
+    # diagnosis, but never expose a blocked estate as operationally healthy.
+    elif blocked:
+        overall = "DEGRADED"
     elif not actionable and not active:
         overall = "IDLE"
     else:
@@ -911,7 +925,7 @@ def scheduler_operational_health(
         "publication": stage("last_canonical_publication", active_stage="PUBLICATION_COMPLETED"),
         "queue_progress": stage("last_queue_progress"),
         "actionable_queue_depth": actionable,
-        "blocked_queue_depth": int(progress.get("blocked_queue_depth", 0) or 0),
+        "blocked_queue_depth": blocked,
         "total_queue_depth": int(progress.get("total_queue_depth", 0) or 0),
         "oldest_actionable_age_seconds": progress.get("oldest_actionable_age_seconds"),
         "last_meaningful_progress": progress.get("last_meaningful_progress"),
@@ -1041,8 +1055,15 @@ class SchedulerCommandServer:
             connection.close()
         if self.thread is not None:
             self.thread.join(timeout=2)
+        # A failed status projection must not make monitor repair wait two
+        # seconds for every accumulated client.  Close every client first,
+        # then give the whole old worker set one shared bounded drain window.
+        deadline = time.monotonic() + 2.0
         for worker in workers:
-            worker.join(timeout=2)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            worker.join(timeout=remaining)
         self.paths.socket.unlink(missing_ok=True)
 
 
@@ -1162,6 +1183,10 @@ class PersistentSchedulerRuntime:
         self._monitor_lock = threading.Lock()
         self._monitor_generation = str(uuid.uuid4())
         self._heartbeat_thread: threading.Thread | None = None
+        self._watchdog_thread: threading.Thread | None = None
+        self._watchdog_monitor_failures = 0
+        self._watchdog_repair_failures = 0
+        self._watchdog_stall_observations = 0
         self._admission_failure: str | None = None
         self._state = "STARTING"
 
@@ -1182,6 +1207,12 @@ class PersistentSchedulerRuntime:
             daemon=True,
         )
         self._heartbeat_thread.start()
+        self._watchdog_thread = threading.Thread(
+            target=self._watchdog_loop,
+            name="scheduler-watchdog",
+            daemon=True,
+        )
+        self._watchdog_thread.start()
         self._write_current_status()
         self.ownership.heartbeat("STARTING")
         # Create the tiny durable control journal eagerly so commands and
@@ -1209,7 +1240,27 @@ class PersistentSchedulerRuntime:
         self.ownership.heartbeat("RUNNING")
         try:
             runner = self.scheduler.run_monitor_only if self.monitor_only else self.scheduler.run_forever
-            runner(self._publish)
+            while not self.scheduler.stop_event.is_set():
+                try:
+                    self._admission_failure = None
+                    runner(self._publish)
+                    break
+                except BaseException as error:
+                    from .storage import WriterLockError
+                    writer_busy = isinstance(error, WriterLockError)
+                    sqlite_busy = isinstance(error, sqlite3.OperationalError) and "locked" in str(error).lower()
+                    if not (writer_busy or sqlite_busy):
+                        raise
+                    # A short-lived registered writer must defer a cycle, not
+                    # kill liveness and enter launchd's crash/restart loop.
+                    self._admission_failure = f"WRITER_BUSY_RETRYING: {error}"
+                    self._write_current_status()
+                    self.ownership.heartbeat("DEGRADED")
+                    # A stream of bridge notifications must not bypass the
+                    # contention backoff. Otherwise a held writer lock turns
+                    # this recovery path into a full-core retry loop.
+                    self.scheduler.wake_event.clear()
+                    self.scheduler.stop_event.wait(1.0)
         finally:
             self._state = "STOPPING"
             self._write_current_status()
@@ -1218,6 +1269,8 @@ class PersistentSchedulerRuntime:
             self._heartbeat_wake.set()
             if self._heartbeat_thread:
                 self._heartbeat_thread.join(timeout=3)
+            if self._watchdog_thread:
+                self._watchdog_thread.join(timeout=3)
             self.ownership.release()
             self._state = "STOPPED"
             self._write_current_status(live=False)
@@ -1290,6 +1343,7 @@ class PersistentSchedulerRuntime:
         with self._snapshot_lock:
             self._snapshot = value
         _atomic_json(self.paths.status, value)
+        self._publish_system_status(value)
 
     def _current_status(self, *, live: bool = True) -> dict[str, Any]:
         with self._snapshot_lock:
@@ -1409,7 +1463,16 @@ class PersistentSchedulerRuntime:
     def _write_current_status(self, *, live: bool = True, compact: bool = False) -> dict[str, Any]:
         value = self._current_status(live=live)
         _atomic_json(self.paths.status, _compact_status(value) if compact else value)
+        self._publish_system_status(value)
         return value
+
+    def _publish_system_status(self, value: dict[str, Any]) -> None:
+        try:
+            from .system_status import publish_truth_authority_status
+            publish_truth_authority_status(self.paths.database, value)
+        except (OSError, RuntimeError, ValueError, sqlite3.Error):
+            # The common projection must never take down the Truth Authority.
+            pass
 
     def _heartbeat_loop(self) -> None:
         while True:
@@ -1423,13 +1486,116 @@ class PersistentSchedulerRuntime:
                 break
             if self._monitor_repair_requested.is_set():
                 self._rebuild_monitor_transport()
-            value = self._write_current_status(compact=True)
-            self.ownership.heartbeat(
-                self._state,
-                next_wake=value.get("next_run"),
-                active_task_count=int((value.get("execution") or {}).get("active_workers", 0) or 0),
-                journal_generation=value.get("authority_revision"),
+            try:
+                value = self._write_current_status(compact=True)
+                self.ownership.heartbeat(
+                    self._state,
+                    next_wake=value.get("next_run"),
+                    active_task_count=int((value.get("execution") or {}).get("active_workers", 0) or 0),
+                    journal_generation=value.get("authority_revision"),
+                )
+            except OSError:
+                # A full filesystem must make the monitor late/degraded, not
+                # silently kill this independent liveness thread. Retrying on
+                # the next interval avoids a second writer once capacity is
+                # reclaimed.
+                continue
+
+    def _watchdog_loop(self) -> None:
+        """Recover a half-alive service that launchd cannot distinguish.
+
+        launchd restarts a process after a non-successful exit, but it cannot
+        detect a live Python process whose monitor listener or dispatch loop
+        has stopped making progress.  This independent thread probes only the
+        cheap ping contract and uses already-published health evidence; it
+        never scans canonical bar data.
+        """
+
+        while not self._heartbeat_stop.wait(_WATCHDOG_INTERVAL):
+            if self._state != "RUNNING":
+                self._watchdog_monitor_failures = 0
+                self._watchdog_stall_observations = 0
+                continue
+            self._watchdog_tick()
+
+    def _watchdog_tick(self) -> None:
+        if self._monitor_is_responsive():
+            self._watchdog_monitor_failures = 0
+            self._watchdog_repair_failures = 0
+        else:
+            self._watchdog_monitor_failures += 1
+            if self._watchdog_monitor_failures >= _WATCHDOG_MONITOR_FAILURE_LIMIT:
+                self._watchdog_monitor_failures = 0
+                self._watchdog_repair_failures += 1
+                try:
+                    self._rebuild_monitor_transport()
+                except BaseException:
+                    pass
+                if self._watchdog_repair_failures >= _WATCHDOG_REPAIR_FAILURE_LIMIT:
+                    self._terminate_for_recovery("MONITOR_SELF_REPAIR_FAILED")
+
+        if self._published_scheduler_is_stalled():
+            self._watchdog_stall_observations += 1
+            if self._watchdog_stall_observations >= _WATCHDOG_STALL_LIMIT:
+                self._terminate_for_recovery("SCHEDULER_PROGRESS_STALLED")
+        else:
+            self._watchdog_stall_observations = 0
+
+    def _monitor_is_responsive(self) -> bool:
+        try:
+            response = send_service_request(
+                self.paths,
+                {"contract": STATUS_CONTRACT, "request": "ping"},
+                timeout=_WATCHDOG_PING_TIMEOUT,
             )
+            return bool(
+                response.get("result") == "ok"
+                and int(response.get("process_id", 0) or 0) == os.getpid()
+                and response.get("service_generation") == self.generation
+            )
+        except (OSError, ValueError, TimeoutError):
+            return False
+
+    def _published_scheduler_is_stalled(self) -> bool:
+        cached = _read_json(self.paths.status, {})
+        if not isinstance(cached, dict):
+            return False
+        health = cached.get("operational_health") or {}
+        if health.get("overall_operational_health") != "STALLED":
+            return False
+        progress_age = health.get("last_meaningful_progress_age_seconds")
+        progress_window = float(health.get("permitted_progress_window_seconds", 45) or 45)
+        if progress_age is None:
+            # A large first reconciliation can legitimately exceed the
+            # watchdog's one-minute observation count. Give it the same
+            # five-minute evidence window as a later long-running cycle;
+            # heartbeat and monitor responsiveness are checked separately.
+            started = _parse_timestamp(self.started_at)
+            if started is None:
+                return False
+            return (datetime.now(UTC) - started).total_seconds() > max(300.0, progress_window)
+        try:
+            # Do not restart for an ordinary boundary transition.  The health
+            # projection must remain stalled for the observation window and
+            # already be at least five minutes beyond meaningful progress.
+            return float(progress_age) > max(300.0, progress_window)
+        except (TypeError, ValueError):
+            return False
+
+    def _terminate_for_recovery(self, reason: str) -> None:
+        """Exit unsuccessfully so the installed KeepAlive rule restarts us."""
+
+        record_restart(self.paths, reason)
+        cached = _read_json(self.paths.status, {})
+        if isinstance(cached, dict):
+            cached.update(
+                service_state="REPAIR_REQUIRED",
+                live=False,
+                last_exit_reason=reason,
+                generated_at=utc_now(),
+            )
+            _atomic_json(self.paths.status, cached)
+        os._exit(75)
 
     def request_monitor_repair(self) -> None:
         """Request only a listener rebuild; scheduler ownership is untouched."""
@@ -1634,7 +1800,13 @@ def launch_agent_definition(
     repository: str | Path,
     monitor_only: bool = False,
 ) -> dict[str, Any]:
+    # launchd can leave a third-party framework executable in xpcproxy/dyld
+    # initialization after an unclean macOS restart.  Start with Apple's
+    # signed env trampoline and immediately exec the pinned Python runtime;
+    # Fragarach still runs in that exact interpreter, while launch admission
+    # no longer depends on framework initialization inside xpcproxy.
     arguments = [
+        "/usr/bin/env",
         str(Path(python).expanduser().resolve()),
         "-m", "fragarach_ii.commands.scheduler",
         "--database", str(paths.database),
@@ -1645,15 +1817,33 @@ def launch_agent_definition(
     ]
     if monitor_only:
         arguments.append("--monitor-only")
+    environment = {
+        "PYTHONPATH": str(Path(repository).expanduser().resolve() / "src"),
+        "HOME": str(Path.home()),
+        "USER": os.environ.get("USER", "raymorgan"),
+        "LOGNAME": os.environ.get("LOGNAME", os.environ.get("USER", "raymorgan")),
+        # CoreFoundation otherwise calls getpwuid during dyld initialization.
+        # That lookup can remain blocked after a forced reboot, before Python
+        # or the service watchdog has had any opportunity to run.
+        "__CF_USER_TEXT_ENCODING": os.environ.get(
+            "__CF_USER_TEXT_ENCODING", f"0x{os.getuid():X}:0:0"
+        ),
+    }
     return {
         "Label": SERVICE_LABEL,
         "ProgramArguments": arguments,
         "RunAtLoad": True,
+        # RunAtLoad covers login/reboot.  A non-successful watchdog or crash
+        # exit is relaunched automatically; an intentional graceful stop stays
+        # stopped until the operator starts or enables the service again.
         "KeepAlive": {"SuccessfulExit": False},
         "ThrottleInterval": 30,
-        "ProcessType": "Background",
+        # Scheduler availability is operational infrastructure.  Background
+        # classification can starve dyld/import startup for minutes while the
+        # Mac is busy indexing and recovering after an unclean reboot.
+        "ProcessType": "Standard",
         "WorkingDirectory": str(Path(repository).expanduser().resolve()),
-        "EnvironmentVariables": {"PYTHONPATH": str(Path(repository).expanduser().resolve() / "src")},
+        "EnvironmentVariables": environment,
         "StandardOutPath": str(paths.stdout_log),
         "StandardErrorPath": str(paths.stderr_log),
     }
@@ -1752,7 +1942,8 @@ def repair_service(paths: ServicePaths) -> dict[str, Any]:
     except (OSError, ValueError, TypeError):
         definition = {}
     arguments = definition.get("ProgramArguments", []) if isinstance(definition, dict) else []
-    executable = Path(arguments[0]) if arguments else None
+    executable_index = 1 if len(arguments) > 1 and arguments[0] == "/usr/bin/env" else 0
+    executable = Path(arguments[executable_index]) if len(arguments) > executable_index else None
     executable_present = bool(executable and executable.is_file() and os.access(executable, os.X_OK))
     signature_valid = executable_present
     if signature_valid and sys.platform == "darwin":
@@ -1798,7 +1989,8 @@ def service_diagnostics(paths: ServicePaths, *, app_build: str = "Development") 
     except (OSError, ValueError, TypeError):
         definition = {}
     arguments = definition.get("ProgramArguments", []) if isinstance(definition, dict) else []
-    executable = Path(str(arguments[0])) if arguments else None
+    executable_index = 1 if len(arguments) > 1 and arguments[0] == "/usr/bin/env" else 0
+    executable = Path(str(arguments[executable_index])) if len(arguments) > executable_index else None
     executable_present = bool(executable and executable.is_file() and os.access(executable, os.X_OK))
     integrity = executable_present
     if integrity and sys.platform == "darwin":
@@ -1848,6 +2040,11 @@ def service_diagnostics(paths: ServicePaths, *, app_build: str = "Development") 
     installed = paths.launch_agent.exists() and paths.metadata.exists()
     add("LaunchAgent installed", installed, installed, "LAUNCH_AGENT_NOT_INSTALLED", "The per-user LaunchAgent files are incomplete.", "Install or Repair Service")
     add("LaunchAgent enabled", bool(definition.get("RunAtLoad")), bool(definition.get("RunAtLoad")), "LAUNCH_AGENT_DISABLED", "Automatic login start is disabled in the installed definition.", "Enable Service")
+    keep_alive = definition.get("KeepAlive")
+    crash_restart = keep_alive is True or (
+        isinstance(keep_alive, dict) and keep_alive.get("SuccessfulExit") is False
+    )
+    add("Automatic crash recovery", crash_restart, keep_alive, "LAUNCH_AGENT_RESTART_DISABLED", "The installed definition does not restart the Scheduler after a crash or watchdog recovery exit.", "Update or Repair Service")
     add("LaunchAgent load state", owner_active or socket_reachable, "loaded" if owner_active else "not confirmed", "LAUNCH_AGENT_NOT_RUNNING", "No active Scheduler generation was found.", "Start Service")
     add("Service executable present", executable_present, str(executable) if executable else None, "SERVICE_EXECUTABLE_MISSING", "The configured runtime executable is unavailable.", "Repair Service")
     add("Service executable integrity", integrity, "valid" if integrity else "unverified", "SERVICE_EXECUTABLE_INTEGRITY", "Strict executable verification did not pass.", "Update or Repair Service")

@@ -24,6 +24,7 @@ from .validation.intraday_profiles import (
 
 
 DIRECT_TIMEFRAMES = frozenset({"D1", "H1", "M30", "M5"})
+DERIVED_TIMEFRAMES = frozenset({"W1", "MN1"})
 PENDING_DERIVED_TIMEFRAMES = frozenset({"H4", "M15"})
 MARKET_HISTORY_RESPONSE_KEYS = frozenset({"OHLC", "CAODT", "Status", "Warnings"})
 # SBv2 builds a closed-bar chart only when it has this many governed bars.  This
@@ -180,25 +181,28 @@ class MarketHistoryService:
                     "TIMEFRAME_NOT_ACTIVE",
                     ["CONSTRUCTION_AUTHORITY_NOT_COMMISSIONED"],
                 )
-            if requested_timeframe not in DIRECT_TIMEFRAMES:
+            if requested_timeframe not in DIRECT_TIMEFRAMES | DERIVED_TIMEFRAMES:
                 return _response(
                     "TIMEFRAME_NOT_AUTHORISED", ["TIMEFRAME_NOT_AUTHORISED"]
                 )
 
-            policy = market_policy(asset_class, requested_timeframe)
-            if policy == "INTENTIONALLY_DEFERRED":
-                return _response(
-                    "TIMEFRAME_NOT_ACTIVE", ["TIMEFRAME_INTENTIONALLY_DEFERRED"]
-                )
+            derived = requested_timeframe in DERIVED_TIMEFRAMES
+            source_timeframe = "D1" if derived else requested_timeframe
+            if not derived:
+                policy = market_policy(asset_class, requested_timeframe)
+                if policy == "INTENTIONALLY_DEFERRED":
+                    return _response(
+                        "TIMEFRAME_NOT_ACTIVE", ["TIMEFRAME_INTENTIONALLY_DEFERRED"]
+                    )
             lane = connection.execute(
                 "SELECT 1 FROM evidence_lanes WHERE asset=? AND timeframe=?",
-                (canonical_symbol, requested_timeframe),
+                (canonical_symbol, source_timeframe),
             ).fetchone()
             if lane is None:
                 return _response("TIMEFRAME_NOT_ACTIVE", ["TIMEFRAME_NOT_ACTIVE"])
             has_history = connection.execute(
                 "SELECT 1 FROM bars WHERE asset=? AND timeframe=? LIMIT 1",
-                (canonical_symbol, requested_timeframe),
+                (canonical_symbol, source_timeframe),
             ).fetchone()
             if has_history is None:
                 return _response("NO_HISTORY", ["NO_MARKET_HISTORY"])
@@ -209,7 +213,7 @@ class MarketHistoryService:
             truth = truth_state_for_lane(
                 self.database_path,
                 symbol=canonical_symbol,
-                timeframe=requested_timeframe,
+                timeframe=source_timeframe,
             )
         except TruthEngineError as error:
             return _response("NO_HISTORY", [error.code])
@@ -244,10 +248,18 @@ class MarketHistoryService:
 
         profile = (
             None
-            if requested_timeframe == "D1"
+            if requested_timeframe == "D1" or derived
             else profile_for(asset_class, requested_timeframe)
         )
         caodt_owner = _caodt_owner_date(caodt_value, requested_timeframe, profile)
+        if derived:
+            caodt = _latest_derived_caodt(
+                self.database_path,
+                symbol=canonical_symbol,
+                timeframe=requested_timeframe,
+                calendar=calendar,
+                source_caodt_owner=caodt_owner,
+            )
         first_owner, last_owner, expected_days, warnings = _resolve_window(
             window, caodt_owner, calendar
         )
@@ -255,12 +267,28 @@ class MarketHistoryService:
         if first_owner is None or last_owner is None:
             return _response("NO_HISTORY", _stable_warnings(warnings), caodt=caodt)
 
-        lower, upper = _epoch_bounds(
-            first_owner, last_owner, requested_timeframe, profile
-        )
+        if derived:
+            lower, upper = _derived_epoch_bounds(
+                first_owner, last_owner, requested_timeframe
+            )
+        else:
+            lower, upper = _epoch_bounds(
+                first_owner, last_owner, requested_timeframe, profile
+            )
         connection = open_read_only(self.database_path)
         try:
-            if requested_timeframe == "D1":
+            if derived:
+                rows = connection.execute(
+                    """
+                    SELECT open_time_utc,open,high,low,close
+                    FROM bars
+                    WHERE asset=? AND timeframe='D1'
+                      AND open_time_utc>=? AND open_time_utc<?
+                    ORDER BY open_time_utc
+                    """,
+                    (canonical_symbol, lower, upper),
+                ).fetchall()
+            elif requested_timeframe == "D1":
                 rows = connection.execute(
                     """
                     SELECT open_time_utc,open,high,low,close
@@ -292,11 +320,23 @@ class MarketHistoryService:
         finally:
             connection.close()
 
+        if derived:
+            rows, incomplete_periods = _roll_up_d1_rows(
+                rows,
+                timeframe=requested_timeframe,
+                calendar=calendar,
+                caodt_owner=caodt_owner,
+                first_owner=first_owner,
+                last_owner=last_owner,
+            )
+            if incomplete_periods:
+                warnings.append("INCOMPLETE_DERIVED_PERIOD_EXCLUDED")
+
         if not rows:
             warnings.append("NO_HISTORY_IN_REQUESTED_WINDOW")
             return _response("NO_HISTORY", _stable_warnings(warnings), caodt=caodt)
 
-        if _has_missing_history(
+        if not derived and _has_missing_history(
             rows,
             requested_timeframe,
             profile,
@@ -471,6 +511,149 @@ def _last_expected_days(
     return tuple(reversed(values))
 
 
+def _derived_period_bounds(value: date, timeframe: str) -> tuple[date, date]:
+    """Return the canonical UTC civil period containing one D1 owner date."""
+
+    if timeframe == "W1":
+        first = value - timedelta(days=value.isoweekday() - 1)
+        return first, first + timedelta(days=6)
+    if timeframe == "MN1":
+        first = value.replace(day=1)
+        next_month = (
+            first.replace(year=first.year + 1, month=1)
+            if first.month == 12
+            else first.replace(month=first.month + 1)
+        )
+        return first, next_month - timedelta(days=1)
+    raise MarketHistoryServiceError(
+        "TIMEFRAME_NOT_AUTHORISED", f"unsupported D1 rollup timeframe: {timeframe}"
+    )
+
+
+def _next_derived_period(first: date, timeframe: str) -> date:
+    if timeframe == "W1":
+        return first + timedelta(days=7)
+    return (
+        first.replace(year=first.year + 1, month=1)
+        if first.month == 12
+        else first.replace(month=first.month + 1)
+    )
+
+
+def _derived_epoch_bounds(
+    first_owner: date, last_owner: date, timeframe: str
+) -> tuple[int, int]:
+    first, _ = _derived_period_bounds(first_owner, timeframe)
+    _, last = _derived_period_bounds(last_owner, timeframe)
+    lower = datetime.combine(first, time.min, UTC)
+    upper = datetime.combine(last + timedelta(days=1), time.min, UTC)
+    return int(lower.timestamp()), int(upper.timestamp())
+
+
+def _roll_up_d1_rows(
+    rows,
+    *,
+    timeframe: str,
+    calendar: CalendarDefinition,
+    caodt_owner: date,
+    first_owner: date,
+    last_owner: date,
+) -> tuple[list[tuple[object, ...]], int]:
+    """Construct complete W1/MN1 observations from canonical D1 contributors.
+
+    A period is eligible only when every session expected by the instrument's
+    calendar is present and the period has no expected session beyond D1's
+    CAODT. This excludes the still-forming week/month without using wall-clock
+    assumptions and works for both weekday and continuous crypto calendars.
+    """
+
+    by_date = {
+        datetime.fromtimestamp(int(row[0]), UTC).date(): DerivedContributor(
+            int(row[0]), str(row[1]), str(row[2]), str(row[3]), str(row[4])
+        )
+        for row in rows
+    }
+    first_period, _ = _derived_period_bounds(first_owner, timeframe)
+    last_period, _ = _derived_period_bounds(last_owner, timeframe)
+    plans: list[DerivedTargetInterval] = []
+    incomplete = 0
+    period = first_period
+    while period <= last_period:
+        _, period_end = _derived_period_bounds(period, timeframe)
+        expected, _ = expected_session_dates(period, period_end, calendar)
+        contributors = tuple(by_date[value] for value in expected if value in by_date)
+        if (
+            expected
+            and expected[-1] <= caodt_owner
+            and len(contributors) == len(expected)
+        ):
+            plans.append(
+                DerivedTargetInterval(
+                    int(datetime.combine(period, time.min, UTC).timestamp()),
+                    tuple(item.timestamp for item in contributors),
+                    contributors,
+                )
+            )
+        elif expected:
+            incomplete += 1
+        period = _next_derived_period(period, timeframe)
+
+    constructed = construct_bounded_derived_view(tuple(plans))
+    return (
+        [
+            (
+                int(_canonical_datetime(str(item["timestamp"])).timestamp()),
+                item["open"],
+                item["high"],
+                item["low"],
+                item["close"],
+            )
+            for item in constructed
+        ],
+        incomplete,
+    )
+
+
+def _latest_derived_caodt(
+    database_path: Path,
+    *,
+    symbol: str,
+    timeframe: str,
+    calendar: CalendarDefinition,
+    source_caodt_owner: date,
+) -> str | None:
+    """Calculate target CAODT from eligible history, never from source recency."""
+
+    connection = open_read_only(database_path)
+    try:
+        rows = connection.execute(
+            """
+            SELECT open_time_utc,open,high,low,close
+            FROM bars
+            WHERE asset=? AND timeframe='D1' AND open_time_utc<=?
+            ORDER BY open_time_utc
+            """,
+            (
+                symbol,
+                int(datetime.combine(source_caodt_owner, time.min, UTC).timestamp()),
+            ),
+        ).fetchall()
+    finally:
+        connection.close()
+    if not rows:
+        return None
+    first_owner = datetime.fromtimestamp(int(rows[0][0]), UTC).date()
+    constructed, _ = _roll_up_d1_rows(
+        rows,
+        timeframe=timeframe,
+        calendar=calendar,
+        caodt_owner=source_caodt_owner,
+        first_owner=first_owner,
+        last_owner=source_caodt_owner,
+    )
+    return _iso_utc(int(constructed[-1][0])) if constructed else None
+
+
 def _epoch_bounds(
     first: date,
     last: date,
@@ -532,7 +715,7 @@ def _has_missing_history(
 def _truth_warnings(truth: dict[str, object]) -> list[str]:
     state = str(truth.get("authority_state") or "").upper()
     warnings: list[str] = []
-    if state and state != "GREEN":
+    if state and state not in {"GOLD", "GREEN"}:
         warnings.append(f"HISTORICAL_AUTHORITY_{state}")
     gap_summary = truth.get("gap_summary")
     if isinstance(gap_summary, dict) and int(gap_summary.get("total_known_gaps") or 0):

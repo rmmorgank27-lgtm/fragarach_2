@@ -69,15 +69,30 @@ def _canonical(symbol: str, timeframe: str, row: tuple[Any, ...]) -> bytes:
 def _registration(source: sqlite3.Connection, symbol: str) -> tuple[Any, ...]:
     row = source.execute(
         """SELECT asset,aliases_json,display_name,asset_class,instrument_type,calendar_id,
-                  calendar_version,registration_status
+                  calendar_version,registration_status,exchange_name
            FROM instrument_registrations WHERE asset=? AND timeframe='D1'""",
         (symbol,),
     ).fetchone()
     if row is None:
         raise ReplicaControlError("LANE_NOT_AVAILABLE", symbol)
+    from .lane_commissioning import resolved_calendar_id
     from .storage.instrument_profiles import instrument_profile
-    return (*row, json.dumps(instrument_profile(source, symbol),
-                             sort_keys=True, separators=(",", ":")))
+    calendar_id = resolved_calendar_id(
+        asset_class=str(row[3]), calendar_id=str(row[5]),
+        exchange_name=None if row[8] is None else str(row[8]),
+        canonical_symbol=symbol,
+    ) or str(row[5])
+    return (
+        *row[:5], calendar_id, *row[6:8],
+        json.dumps(instrument_profile(source, symbol),
+                   sort_keys=True, separators=(",", ":")),
+    )
+
+
+def _registration_revision(registration: tuple[Any, ...]) -> str:
+    encoded = json.dumps(registration, ensure_ascii=False,
+                         separators=(",", ":")).encode("utf-8")
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
 def create_lane_artifact(paths: ReplicaPaths, symbol: str, timeframe: str) -> dict[str, Any]:
@@ -101,6 +116,7 @@ def create_lane_artifact(paths: ReplicaPaths, symbol: str, timeframe: str) -> di
         if exists is None:
             raise ReplicaControlError("LANE_NOT_AVAILABLE", f"{symbol}:{timeframe}")
         registration = _registration(source, symbol)
+        registration_revision = _registration_revision(registration)
         rows = source.execute(
             """SELECT open_time_utc,close_time_utc,open,high,low,close,volume
                FROM bars WHERE asset=? AND timeframe=? ORDER BY open_time_utc""",
@@ -111,7 +127,8 @@ def create_lane_artifact(paths: ReplicaPaths, symbol: str, timeframe: str) -> di
             digest.update(_canonical(symbol, timeframe, row))
         fingerprint = digest.hexdigest()
         artifact_identity = hashlib.sha256(
-            f"{DATABASE_CONTRACT}:{symbol}:{timeframe}:{fingerprint}".encode("utf-8")
+            f"{DATABASE_CONTRACT}:{symbol}:{timeframe}:{fingerprint}:"
+            f"{registration_revision}".encode("utf-8")
         ).hexdigest()
         artifact_id = f"lane-{symbol}-{timeframe}-{artifact_identity[:32]}"
         final_dir = work_root / artifact_id
@@ -171,6 +188,8 @@ def create_lane_artifact(paths: ReplicaPaths, symbol: str, timeframe: str) -> di
             "symbol": symbol, "timeframe": timeframe,
             "asset_class": registration[3],
             "instrument_type": registration[4],
+            "calendar_id": registration[5],
+            "registration_revision": registration_revision,
             "profile": json.loads(str(registration[8])),
             "source_revision": source_revision, "generated_at_utc": created,
             "first_bar_utc": datetime.fromtimestamp(first, UTC).isoformat() if first is not None else None,
@@ -259,6 +278,8 @@ def _apply_artifact(request: dict[str, Any], artifact: dict[str, Any],
         source_revision=artifact["source_revision"],
         asset_class=artifact.get("asset_class", "UNKNOWN"),
         instrument_type=artifact.get("instrument_type", "UNKNOWN"),
+        calendar_id=artifact.get("calendar_id"),
+        registration_revision=artifact.get("registration_revision"),
         first_bar_utc=artifact.get("first_bar_utc"),
         caodt=artifact.get("caodt"),
         bar_count=int(artifact.get("bar_count") or 0),
@@ -378,11 +399,21 @@ def registry_projection(paths: ReplicaPaths, client_id: str) -> dict[str, Any]:
     source = open_read_only(paths.database)
     try:
         from .storage.instrument_profiles import instrument_profile
+        from .lane_commissioning import resolved_calendar_id
         registrations = {
-            asset: {"asset_class": asset_class, "instrument_type": instrument_type,
-                    "profile": instrument_profile(source, asset)}
-            for asset, asset_class, instrument_type in source.execute(
-                """SELECT asset,asset_class,instrument_type FROM instrument_registrations
+            asset: {
+                "asset_class": asset_class,
+                "instrument_type": instrument_type,
+                "profile": instrument_profile(source, asset),
+                "source_calendar_id": calendar_id,
+                "resolved_calendar_id": resolved_calendar_id(
+                    asset_class=asset_class, calendar_id=calendar_id,
+                    exchange_name=exchange_name, canonical_symbol=asset,
+                ) or calendar_id,
+            }
+            for asset, asset_class, instrument_type, calendar_id, exchange_name in source.execute(
+                """SELECT asset,asset_class,instrument_type,calendar_id,exchange_name
+                   FROM instrument_registrations
                    WHERE timeframe='D1'"""
         ).fetchall()
         }
@@ -429,10 +460,16 @@ def registry_projection(paths: ReplicaPaths, client_id: str) -> dict[str, Any]:
             lane_state = _lane_state(source, symbol, timeframe)
             request["last_update_check_at_utc"] = now
             current_version = lane_state.get("authority_state_version")
+            registration = registrations.get(symbol) or {}
+            needs_calendar_materialisation = (
+                registration.get("source_calendar_id") == "REGISTRY_D1_V1"
+                and request.get("calendar_id") != registration.get("resolved_calendar_id")
+            )
             metadata_complete = all(
                 key in request for key in ("first_bar_utc", "bar_count", "database_bytes")
             ) and request.get("database_contract") == DATABASE_CONTRACT
-            if request.get("authority_state_version") == current_version and metadata_complete:
+            if (request.get("authority_state_version") == current_version
+                    and metadata_complete and not needs_calendar_materialisation):
                 request["last_update_outcome"] = "NO_CHANGE"
                 changed = True
                 continue

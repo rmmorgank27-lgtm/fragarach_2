@@ -39,6 +39,24 @@ struct OverviewView: View {
                         Label("Loading complete Estate Truth in the background.",systemImage:"arrow.triangle.2.circlepath").font(.caption).foregroundStyle(.secondary)
                     }
                 }
+                if let bridge=store.schedulerServiceStatus?.mt5Bridge {
+                    HStack(spacing:12) {
+                        SchedulerMetricCard(
+                            title:"MT5 Bridge",
+                            value:bridge.effectiveStatus.replacingOccurrences(of:"_",with:" ").capitalized,
+                            detail:"\(bridge.healthyNodeCount ?? (bridge.effectiveStatus == "HEALTHY" ? 1:0)) of \(bridge.nodeCount ?? 1) nodes healthy · \(bridgeAge(bridge))",
+                            state:bridge.effectiveStatus,
+                            action:{store.section = .scheduler}
+                        )
+                        SchedulerMetricCard(
+                            title:"MT5 Queue",
+                            value:"\(bridge.queue.pending) pending",
+                            detail:"\(bridge.queue.completed) completed · \(bridge.queue.expired) expired",
+                            state:bridge.queue.pending == 0 ? "CURRENT":"WAITING",
+                            action:{store.section = .scheduler}
+                        )
+                    }
+                }
                 if let estate=store.estateTruth { TruthEstateSummaryView(summary:estate.estateSummary,lanes:estate.truthMatrix,scheduler:store.schedulerSnapshot,onSelect:store.showEstateFindings) }
                 else if let error=store.estateTruthError { ContentUnavailableView("Authority unavailable",systemImage:"exclamationmark.triangle",description:Text(error)) }
                 HStack {
@@ -47,5 +65,12 @@ struct OverviewView: View {
                 }
             }.padding().frame(maxWidth:1100,alignment:.leading)
         }
+    }
+
+    private func bridgeAge(_ status:MT5BridgeMonitorStatus)->String {
+        guard let age=status.ageSeconds else{return "awaiting first report"}
+        let seconds=max(0,Int(age))
+        if seconds >= 60{return "report \(seconds/60)m ago"}
+        return "report \(seconds)s ago"
     }
 }

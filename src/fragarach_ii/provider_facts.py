@@ -796,6 +796,19 @@ def approve_reviewed_provider_mapping(
         }
         for value in supported_lanes
     }
+    if isinstance(existing, dict) and all(
+        existing.get(name) == expected for name, expected in (
+            ("canonical_symbol", canonical),
+            ("provider", selected_provider),
+            ("provider_symbol", selected_symbol),
+            ("mapping_class", mapping_class),
+            ("status", "OPERATOR_RESOLVED"),
+        )
+    ):
+        capabilities = {
+            **dict(existing.get("timeframe_capabilities") or {}),
+            **capabilities,
+        }
     mapping = {
         "canonical_symbol": canonical,
         "canonical_base_asset": canonical[:-3] if exact_catalogue_crypto else canonical,
@@ -809,7 +822,11 @@ def approve_reviewed_provider_mapping(
         "provider_asset_class": asset_class,
         "venue_or_market": None,
         "market_category": asset_class,
-        "supported_intervals": [TIMEFRAME_INTERVALS[value] for value in supported_lanes],
+        "supported_intervals": [
+            TIMEFRAME_INTERVALS[value]
+            for value in TIMEFRAME_INTERVALS
+            if value in capabilities
+        ],
         "mapping_classification": "REVIEWED_AUTHORITY",
         "mapping_class": mapping_class,
         "resolution_method": "OPERATOR_REVIEWED_DISCOVER_REPRESENTATION",
@@ -842,7 +859,8 @@ def approve_reviewed_provider_mapping(
     if isinstance(existing, dict):
         same = all(existing.get(name) == mapping.get(name) for name in (
             "canonical_symbol", "provider", "provider_symbol", "mapping_class", "status"
-        )) and bool((existing.get("timeframe_capabilities") or {}).get(lane, {}).get("supported"))
+        )) and bool((existing.get("timeframe_capabilities") or {}).get(lane, {}).get("supported")) \
+            and existing.get("supported_intervals") == mapping.get("supported_intervals")
         if same:
             return dict(existing)
     facts["mappings"][key] = mapping

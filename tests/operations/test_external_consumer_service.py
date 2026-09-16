@@ -38,6 +38,19 @@ class ExternalConsumerServiceTests(unittest.TestCase):
             self.assertEqual(response["CAODT"], response["last_bar"])
             self.assertIsInstance(response["truth_score"], int)
             self.assertIn(response["authority"], {"GREEN", "AMBER", "RED"})
+            self.assertIn(response["lane_status"], {"GOLD", "GREEN", "AMBER", "RED"})
+            self.assertEqual(
+                response["lane_status_contract"]["contract"],
+                "fragarach_ii.lane_status.v1",
+            )
+            self.assertEqual(
+                response["lane_status_contract"]["consumer_guidance"]["safety_days_eligible"],
+                ["GOLD", "GREEN", "AMBER"],
+            )
+            self.assertEqual(
+                response["authority"],
+                "GREEN" if response["lane_status"] == "GOLD" else response["lane_status"],
+            )
 
             with open_read_only(database) as connection:
                 canonical = connection.execute(

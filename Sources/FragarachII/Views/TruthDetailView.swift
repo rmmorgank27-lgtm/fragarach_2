@@ -9,9 +9,9 @@ struct TruthDetailView:View {
     @State private var historyOverview: PriceHistoryOverview?
     var body:some View {
         VStack(alignment:.leading,spacing:16) {
-            HStack(alignment:.firstTextBaseline){VStack(alignment:.leading){Text(lane.symbol).font(.largeTitle);Text(lane.timeframe).foregroundStyle(.secondary);Text(lane.operationalStateLabel ?? lane.truthState.authorityState).font(.headline)};Spacer();VStack(alignment:.trailing){Text("\(lane.truthState.truthScore)").font(.system(size:36,weight:.semibold,design:.rounded));Label(lane.overallOperationalState ?? lane.truthState.authorityState,systemImage:"circle.fill").foregroundStyle(TruthPresentation.color(lane.truthState.authorityState))}}
+            HStack(alignment:.firstTextBaseline){VStack(alignment:.leading){Text(lane.symbol).font(.largeTitle);Text(lane.timeframe).foregroundStyle(.secondary);Text(lane.operationalStateLabel ?? lane.truthState.authorityState).font(.headline)};Spacer();VStack(alignment:.trailing){Text("\(lane.truthState.truthScore)").font(.system(size:36,weight:.semibold,design:.rounded));HStack(spacing:5){TruthStateMark(state:visualState,size:14);Text(lane.freshnessDimension?.label ?? lane.overallOperationalState ?? lane.truthState.authorityState)}.foregroundStyle(TruthPresentation.color(visualState))}}
             HStack{
-                Button("Manage Data"){store.navigate(.acquire,asset:lane.symbol)}.buttonStyle(.borderedProminent)
+                Button("Manage Data"){store.openManageData(symbol:lane.symbol,timeframe:lane.timeframe)}.buttonStyle(.borderedProminent)
                 Button("Price History"){showPriceHistory=true}
                 if lane.timeframe == "M5", lane.freshnessDimension?.label != "Current" {
                     Button("Queue M5 update now",systemImage:"play.fill"){Task{await store.queueLaneUpdate(lane.id)}}
@@ -70,6 +70,7 @@ struct TruthDetailView:View {
         return [("Overall",lane.overallOperationalState ?? lane.truthState.authorityState),("Freshness",lane.freshnessDimension?.label ?? "Not measured"),("Integrity",lane.evidenceIntegrity?.state ?? lane.truthState.validationState),("Lag",lagText),("Acquisition",acquisition),("Eligible providers",providers)]
     }
     private var providerEligible:Bool{lane.acquisitionDimension?.eligibleProviders.isEmpty == false}
+    private var visualState:String { TruthPresentation.visualState(authority:lane.truthState.authorityState,operational:lane.freshnessDimension?.label ?? lane.overallOperationalState) }
     private var registrationText:String {
         guard let value=store.snapshot?.registrations.filter({$0.asset==lane.symbol}).map(\.registeredAt).min(),let date=Self.isoDate(value) else { return "Registered · date unavailable" }
         return "\(Self.dateFormatter.string(from:date)) · \(estateAge(since:date))"

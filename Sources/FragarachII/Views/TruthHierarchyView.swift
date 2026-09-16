@@ -72,11 +72,15 @@ struct EstateScorecard: View {
             }
             Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 7) {
                 GridRow {
-                    metric("Healthy", summary.healthyCount, state: "GREEN")
-                    AttentionCountButton(lanes: summary.attentionLanes)
+                    metric("Gold", summary.goldCount, state: "GOLD")
+                    metric("Green", summary.greenCount, state: "GREEN")
                 }
-                GridRow { metric("Critical", summary.criticalCount, state: "RED"); metric("Symbols", summary.symbolCount) }
-                GridRow { metric("Coverage", summary.coveragePercent); metric("Freshness", summary.freshnessPercent) }
+                GridRow {
+                    AttentionCountButton(lanes: summary.attentionLanes, title: "Truth attention")
+                    metric("Critical", summary.criticalCount, state: "RED")
+                }
+                GridRow { metric("Symbols", summary.symbolCount); metric("Coverage", summary.coveragePercent) }
+                GridRow { metric("Freshness", summary.freshnessPercent); metric("Healthy", summary.healthyCount) }
             }
             HStack { Text("CAODT").foregroundStyle(.secondary); Spacer();Text(TruthPresentation.text(summary.caodt)).lineLimit(1).monospaced() }.font(.caption)
         }
@@ -93,7 +97,7 @@ struct EstateScorecard: View {
 
     private func metric(_ title: String, _ value: Int, state: String? = nil) -> some View {
         HStack(spacing: 5) {
-            if let state { Circle().fill(TruthPresentation.color(state)).frame(width: 7, height: 7) }
+            if let state { TruthStateMark(state: state, size: 10) }
             Text(title).foregroundStyle(.secondary)
             Spacer(minLength: 8)
             Text("\(value)").fontWeight(.semibold).monospacedDigit()
@@ -111,14 +115,15 @@ struct EstateScorecard: View {
 
 struct AttentionCountButton: View {
     let lanes: [EstateTruthLane]
+    var title = "Truth attention"
     var onSelect: ((EstateTruthLane) -> Void)? = nil
     @State private var isPresented = false
 
     var body: some View {
         Button { isPresented = true } label: {
             HStack(spacing: 5) {
-                Circle().fill(TruthPresentation.color("AMBER")).frame(width: 7, height: 7)
-                Text("Attention").foregroundStyle(.secondary)
+                TruthStateMark(state: "AMBER", size: 10)
+                Text(title).foregroundStyle(.secondary)
                 Spacer(minLength: 8)
                 Text("\(lanes.count)").fontWeight(.semibold).monospacedDigit()
             }
@@ -127,7 +132,7 @@ struct AttentionCountButton: View {
         }
         .buttonStyle(.plain)
         .disabled(lanes.isEmpty)
-        .help(lanes.isEmpty ? "No lanes require attention" : "Show what requires attention")
+        .help(lanes.isEmpty ? "No lanes require truth attention" : "Show truth-attention lanes")
         .popover(isPresented: $isPresented, arrowEdge: .bottom) {
             AttentionFindingsPopover(lanes: lanes, onSelect: { lane in
                 isPresented = false
@@ -143,8 +148,8 @@ private struct AttentionFindingsPopover: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Attention details").font(.headline)
-            Text("A lane is shown here when its completed market boundary is behind, but it is not yet critical.")
+            Text("Truth-attention details").font(.headline)
+            Text("These lanes have an Amber truth assessment. The matrix separately shows current operational freshness.")
                 .font(.caption).foregroundStyle(.secondary)
             Divider()
             ScrollView {

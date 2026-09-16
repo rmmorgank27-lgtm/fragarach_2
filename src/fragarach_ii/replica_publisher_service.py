@@ -36,10 +36,28 @@ from .selective_replication import (
 from .market_discovery import discover_market
 from .providers.instrument_search import candidate_from_dict
 from .storage import RegistrationError
+from .mt5_bridge_queue import (
+    MT5BridgeQueueError,
+    authorised_client_id as mt5_authorised_client_id,
+    poll_request as poll_mt5_request,
+    receive_response as receive_mt5_response,
+)
+from .mt5_catalogue import accept_catalogue as accept_mt5_catalogue
+from .mt5_bridge_health import accept_health as accept_mt5_health
+from .mt5_route_manifest import bridge_node
+from .index_cfd_mt5 import IndexCFDAdmissionError
 
 
 SERVICE_CONTRACT = "fragarach_ii.replica_publisher_service.v1"
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def _mt5_node_path(path: str) -> tuple[str, str] | None:
+    parts = path.strip("/").split("/")
+    if len(parts) < 5 or parts[:3] != ["v1", "mt5", "nodes"]:
+        return None
+    node_id = parts[3]
+    return (node_id, "/".join(parts[4:])) if bridge_node(node_id) is not None else None
 
 
 def _handler(paths: ReplicaPaths):
@@ -89,7 +107,7 @@ def _handler(paths: ReplicaPaths):
                 return
             try:
                 self._serve_authorised(parsed, client)
-            except ReplicaControlError as error:
+            except (ReplicaControlError, MT5BridgeQueueError) as error:
                 self._json(HTTPStatus.CONFLICT, {"code": error.code, "error": str(error)})
 
         def do_POST(self) -> None:  # noqa: N802
@@ -104,10 +122,60 @@ def _handler(paths: ReplicaPaths):
                 return
             try:
                 length = int(self.headers.get("Content-Length", "0"))
-                if length < 2 or length > 2_000_000:
+                node_path = _mt5_node_path(parsed.path)
+                maximum = 50_000_000 if (
+                    parsed.path == "/v1/mt5/evidence/responses"
+                    or (node_path is not None and node_path[1] == "evidence/responses")
+                ) else 5_000_000
+                if length < 2 or length > maximum:
                     raise ReplicaControlError("INVALID_CLIENT_REPORT", "report size is invalid")
                 payload = json.loads(self.rfile.read(length))
-                if parsed.path == "/v1/replica/report":
+                if parsed.path == "/v1/mt5/evidence/responses":
+                    if client.get("client_id") != mt5_authorised_client_id():
+                        self._json(HTTPStatus.FORBIDDEN, {"code": "CLIENT_SCOPE_DENIED"})
+                        return
+                    result = receive_mt5_response(paths.support, payload)
+                    # Transport remains non-authoritative, but a durable
+                    # receipt must wake the sole canonical writer promptly.
+                    # Otherwise the Scheduler can remain in an idle wait while
+                    # the bridge inbox accumulates acknowledged responses.
+                    from .commands.register_instrument import _notify_scheduler
+                    _notify_scheduler(str(paths.database))
+                elif node_path is not None and node_path[1] == "evidence/responses":
+                    node_id = node_path[0]
+                    if client.get("client_id") != mt5_authorised_client_id(node_id):
+                        self._json(HTTPStatus.FORBIDDEN, {"code": "CLIENT_SCOPE_DENIED"})
+                        return
+                    result = receive_mt5_response(paths.support, payload, node_id=node_id)
+                    from .commands.register_instrument import _notify_scheduler
+                    _notify_scheduler(str(paths.database))
+                elif parsed.path == "/v1/mt5/catalogue":
+                    if client.get("client_id") != mt5_authorised_client_id():
+                        self._json(HTTPStatus.FORBIDDEN, {"code": "CLIENT_SCOPE_DENIED"})
+                        return
+                    result = accept_mt5_catalogue(paths.support, payload)
+                elif parsed.path == "/v1/mt5/health":
+                    if client.get("client_id") != mt5_authorised_client_id():
+                        self._json(HTTPStatus.FORBIDDEN, {"code": "CLIENT_SCOPE_DENIED"})
+                        return
+                    result = accept_mt5_health(
+                        paths.support, payload, client_id=str(client["client_id"])
+                    )
+                elif node_path is not None and node_path[1] == "catalogue":
+                    node_id = node_path[0]
+                    if client.get("client_id") != mt5_authorised_client_id(node_id):
+                        self._json(HTTPStatus.FORBIDDEN, {"code": "CLIENT_SCOPE_DENIED"})
+                        return
+                    result = accept_mt5_catalogue(paths.support, payload, node_id=node_id)
+                elif node_path is not None and node_path[1] == "health":
+                    node_id = node_path[0]
+                    if client.get("client_id") != mt5_authorised_client_id(node_id):
+                        self._json(HTTPStatus.FORBIDDEN, {"code": "CLIENT_SCOPE_DENIED"})
+                        return
+                    result = accept_mt5_health(
+                        paths.support, payload, client_id=str(client["client_id"])
+                    )
+                elif parsed.path == "/v1/replica/report":
                     record_client_report(paths, client, payload)
                     result = {"state": "RECORDED", "received_at_utc": utc_now()}
                 elif parsed.path == "/v2/replication/requests":
@@ -134,7 +202,8 @@ def _handler(paths: ReplicaPaths):
                     else:
                         self._json(HTTPStatus.NOT_FOUND, {"code": "NOT_FOUND"})
                         return
-            except (ValueError, TypeError, json.JSONDecodeError, ReplicaControlError,
+            except (ValueError, TypeError, json.JSONDecodeError, ReplicaControlError, MT5BridgeQueueError,
+                    IndexCFDAdmissionError,
                     RegistrationError) as error:
                 self._json(
                     HTTPStatus.BAD_REQUEST,
@@ -144,6 +213,32 @@ def _handler(paths: ReplicaPaths):
             self._json(HTTPStatus.OK, result)
 
         def _serve_authorised(self, parsed, client) -> None:
+            node_path = _mt5_node_path(parsed.path)
+            if node_path is not None and node_path[1] == "evidence/requests/next":
+                node_id = node_path[0]
+                if client.get("client_id") != mt5_authorised_client_id(node_id):
+                    self._json(HTTPStatus.FORBIDDEN, {"code": "CLIENT_SCOPE_DENIED"})
+                    return
+                request = poll_mt5_request(paths.support, node_id=node_id)
+                if request is None:
+                    self.send_response(HTTPStatus.NO_CONTENT)
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                else:
+                    self._json(HTTPStatus.OK, request)
+                return
+            if parsed.path == "/v1/mt5/evidence/requests/next":
+                if client.get("client_id") != mt5_authorised_client_id():
+                    self._json(HTTPStatus.FORBIDDEN, {"code": "CLIENT_SCOPE_DENIED"})
+                    return
+                request = poll_mt5_request(paths.support)
+                if request is None:
+                    self.send_response(HTTPStatus.NO_CONTENT)
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                else:
+                    self._json(HTTPStatus.OK, request)
+                return
             if parsed.path == "/v2/replication/registry":
                 self._json(HTTPStatus.OK, registry_projection(paths, str(client["client_id"])))
                 return

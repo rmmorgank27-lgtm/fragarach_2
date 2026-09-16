@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import plistlib
 import socket
 import struct
 import tempfile
@@ -71,7 +72,7 @@ class Spec049ASchedulerRecoveryTests(unittest.TestCase):
             integrity = verify_integrity(paths.database)
             self.assertTrue(integrity.ok)
             self.assertEqual(integrity.application_tables, APPLICATION_TABLES)
-            self.assertEqual(len(APPLICATION_TABLES), 13)
+            self.assertEqual(len(APPLICATION_TABLES), 14)
 
     def test_live_acquisition_owner_with_broken_socket_never_launches_second_service(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -257,6 +258,23 @@ class Spec049ASchedulerRecoveryTests(unittest.TestCase):
                 self.assertNotIn("password", serialized)
             finally:
                 mutation.fail(RuntimeError("test cleanup"))
+
+    def test_diagnostics_require_automatic_crash_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self.paths(Path(directory))
+            paths.launch_agent.write_bytes(plistlib.dumps({
+                "RunAtLoad": True,
+                "KeepAlive": {"SuccessfulExit": False},
+                "ProgramArguments": ["/usr/bin/python3"],
+            }))
+
+            diagnostics = service_diagnostics(paths)
+
+            recovery = next(
+                check for check in diagnostics["checks"]
+                if check["check"] == "Automatic crash recovery"
+            )
+            self.assertTrue(recovery["passed"])
 
     def test_large_monitor_and_disconnected_client_do_not_kill_command_server(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

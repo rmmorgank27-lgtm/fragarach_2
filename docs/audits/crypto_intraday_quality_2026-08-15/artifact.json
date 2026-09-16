@@ -1,0 +1,210 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "Crypto intraday quality: PEPE restored with higher-resolution DEX candles",
+    "description": "Decision report for Gator's 30×30×30 crypto H1/M5 data quality and Fragarach provider routing.",
+    "generatedAt": "2026-08-15T12:35:00+00:00",
+    "sources": [
+      {
+        "id": "fragarach-audit",
+        "label": "Fragarach authority bars and ingest provenance",
+        "query": {
+          "engine": "SQLite + Python 3",
+          "language": "Python/SQL",
+          "sql": "WITH ranked AS (SELECT b.*, row_number() OVER (PARTITION BY b.asset,b.timeframe ORDER BY b.open_time_utc DESC) AS rn FROM bars b JOIN instrument_registrations r ON r.asset=b.asset AND r.timeframe='D1' WHERE r.representation_type='CRYPTO_SPOT_PAIR' AND b.timeframe IN ('H1','M5')) SELECT asset,timeframe,open_time_utc,open,high,low,close,volume FROM ranked WHERE rn<=270 ORDER BY asset,timeframe,open_time_utc;",
+          "query": "PYTHONPATH=src python3 -m fragarach_ii.commands.audit_crypto_intraday --database data/runtime/spec002_real_evidence_acceptance.sqlite3 --window 270",
+          "description": "Read-only chartability audit of every commissioned CRYPTO_SPOT_PAIR H1 and M5 lane.",
+          "executed_at": "2026-08-15T12:07:00+00:00",
+          "tables_used": ["instrument_registrations", "evidence_lanes", "lane_state", "ingest_runs", "bars"],
+          "filters": ["representation_type = CRYPTO_SPOT_PAIR", "timeframe in H1, M5", "latest 270 completed bars per lane"],
+          "metric_definitions": [
+            "Usable: valid OHLC with sufficient price variation for chart review.",
+            "Usable price only: price candles pass, but volume is absent on every audited bar.",
+            "Unusable: price grid, flat-candle rate, geometry, or H1 discontinuity fails the review gate."
+          ]
+        }
+      },
+      {
+        "id": "kevin-capture",
+        "label": "Kevin DEX Screener capture database",
+        "query": {
+          "engine": "SQLite",
+          "language": "SQL",
+          "sql": "SELECT upper(symbol), group_concat(DISTINCT chain_id), count(*), min(captured_at), max(captured_at) FROM token_aggregates WHERE upper(symbol) IN ('ADA','AVAX','BNB','BTC','DOGE','DOT','ETH','HYPE','LINK','PEPE','SOL','SUI','XRP') GROUP BY upper(symbol) ORDER BY upper(symbol);",
+          "description": "Coverage and capture-window check, paired with sqlite_master inspection for OHLC or candle tables.",
+          "executed_at": "2026-08-15T12:05:30+00:00",
+          "tables_used": ["token_aggregates", "pair_snapshots", "capture_runs", "sqlite_master"],
+          "filters": ["13 commissioned Fragarach crypto base symbols"]
+        }
+      },
+      {
+        "id": "route-review",
+        "label": "Binance candidate benchmark and Fragarach correction evidence",
+        "href": "https://api.binance.com/api/v3/klines",
+        "query": {
+          "engine": "Binance public REST + Fragarach SQLite",
+          "language": "HTTP/SQL",
+          "sql": "SELECT json_extract(detail,'$.asset') AS asset,json_extract(detail,'$.timeframe') AS timeframe,json_extract(detail,'$.provider_symbol') AS provider_symbol,json_extract(detail,'$.corrected') AS corrected,finished_at_utc FROM ingest_runs WHERE status='committed' AND json_extract(detail,'$.mapping_class')='APPROVED_EQUIVALENT_REPRESENTATION' AND json_extract(detail,'$.asset') IN ('BTCUSD','ETHUSD','SOLUSD') ORDER BY finished_at_utc DESC;",
+          "query": "GET https://api.binance.com/api/v3/klines?symbol={BTCUSDT|ETHUSDT|SOLUSDT|PEPEUSDT}&interval={5m|1h}&limit={300|1000}",
+          "description": "Bounded candidate quality comparison followed by provenance-preserving Fragarach corrections for approved BTC, ETH, and SOL USDT representations.",
+          "executed_at": "2026-08-15T12:06:14+00:00",
+          "tables_used": ["ingest_runs", "provenance", "bars", "raw_blocks"],
+          "filters": ["BTC, ETH, SOL, PEPE", "H1 and M5", "completed provider candles only"]
+        }
+      },
+      {
+        "id": "pepe-provider-review",
+        "label": "PEPE CoinGecko and CoinMarketCap OHLCV comparison",
+        "href": "https://docs.coingecko.com/reference/pool-ohlcv-contract-address",
+        "query": {
+          "engine": "CoinGecko GeckoTerminal + CoinMarketCap public REST",
+          "language": "HTTP/Python",
+          "sql": "SELECT DISTINCT json_extract(detail,'$.asset') AS asset FROM ingest_runs WHERE status='committed' AND json_extract(detail,'$.provider') IN ('BINANCE','COINGECKO_DEX') AND json_extract(detail,'$.asset') IN ('BTCUSD','ETHUSD','SOLUSD','PEPEUSD') AND finished_at_utc>='2026-08-15T00:00:00+00:00' ORDER BY asset;",
+          "query": "GET CoinGecko GeckoTerminal PEPE/WETH pool OHLCV and CoinMarketCap PEPE token K-line candles for H1 and M5; assess latest 30 and 270 completed intervals",
+          "description": "Bounded provider comparison using valid OHLC geometry, completed-interval continuity, distinct-close ratio, zero-range ratio, and volume coverage.",
+          "executed_at": "2026-08-15T12:26:05+00:00",
+          "filters": ["Ethereum PEPE contract 0x6982508145454ce325ddbe47a25d4ec3d2311933", "H1 and M5", "latest 270 completed intervals", "USD-denominated candles", "empty intervals retained"]
+        }
+      }
+    ],
+    "cards": [
+      {"id": "commissioned", "description": "All commissioned crypto H1 and M5 lanes inspected over the same 270-bar window.", "dataset": "headline", "sourceId": "fragarach-audit", "metrics": [{"label": "Lanes inspected", "field": "lanes_inspected", "format": "number"}]},
+      {"id": "review-safe", "description": "Every crypto H1/M5 lane is now safe for Gator price-structure review; four retain explicit volume caveats.", "dataset": "headline", "sourceId": "fragarach-audit", "metrics": [{"label": "Review-safe lanes", "field": "review_safe_lanes", "format": "number"}]},
+      {"id": "blocked", "description": "No crypto H1/M5 lane remains withheld by the chartability gate.", "dataset": "headline", "sourceId": "fragarach-audit", "metrics": [{"label": "Blocked lanes", "field": "blocked_lanes", "format": "number"}]},
+      {"id": "rerouted", "description": "BTC, ETH, SOL, and PEPE now use the higher-quality reviewed representation selected by their lane audit.", "dataset": "headline", "sourceId": "pepe-provider-review", "metrics": [{"label": "Symbols rerouted", "field": "symbols_rerouted", "format": "number"}]}
+    ],
+    "charts": [
+      {
+        "id": "quality-outcomes",
+        "title": "Crypto H1/M5 lane quality outcomes",
+        "subtitle": "Latest 270 completed bars per lane after all provider corrections",
+        "question": "How many commissioned crypto lanes are safe for structure review?",
+        "rationale": "A categorical bar chart makes the remaining blocked scope immediately visible.",
+        "type": "bar",
+        "dataset": "status_summary",
+        "sourceId": "fragarach-audit",
+        "encodings": {
+          "x": {"field": "status", "type": "nominal", "label": "Quality status"},
+          "y": {"field": "lane_count", "type": "quantitative", "label": "Lane count", "format": "number"},
+          "tooltip": [
+            {"field": "status", "type": "text", "label": "Status"},
+            {"field": "lane_count", "type": "quantitative", "label": "Lanes", "format": "number"},
+            {"field": "interpretation", "type": "text", "label": "Interpretation"}
+          ]
+        },
+        "xAxisTitle": "Quality status",
+        "yAxisTitle": "Lanes",
+        "valueFormat": "number",
+        "layout": "full",
+        "maxRows": 3
+      }
+    ],
+    "tables": [
+      {
+        "id": "exceptions",
+        "title": "Lanes requiring a caveat or block",
+        "subtitle": "The other 22 lanes passed with price and volume",
+        "dataset": "exceptions",
+        "sourceId": "fragarach-audit",
+        "defaultSort": {"field": "status", "direction": "desc"},
+        "density": "dense",
+        "layout": "full",
+        "columns": [
+          {"field": "lane", "label": "Lane", "type": "text"},
+          {"field": "status", "label": "Status", "type": "text"},
+          {"field": "provider_symbol", "label": "Provider symbol", "type": "text"},
+          {"field": "distinct_close_pct", "label": "Distinct closes", "format": "number"},
+          {"field": "zero_range_pct", "label": "Zero-range bars", "format": "number"},
+          {"field": "reason", "label": "Reason", "type": "text"}
+        ]
+      },
+      {
+        "id": "pepe-provider-comparison",
+        "title": "PEPE intraday provider comparison",
+        "subtitle": "Latest 270 completed intervals; continuity-adjusted for skipped DEX buckets",
+        "dataset": "pepe_provider_comparison",
+        "sourceId": "pepe-provider-review",
+        "defaultSort": {"field": "timeframe", "direction": "asc"},
+        "density": "dense",
+        "layout": "full",
+        "columns": [
+          {"field": "provider", "label": "Provider", "type": "text"},
+          {"field": "timeframe", "label": "Lane", "type": "text"},
+          {"field": "status", "label": "Result", "type": "text"},
+          {"field": "distinct_close_pct", "label": "Distinct closes", "format": "number"},
+          {"field": "zero_range_pct", "label": "Zero-range bars", "format": "number"},
+          {"field": "missing_intervals", "label": "Missing intervals", "format": "number"},
+          {"field": "invalid_ohlc", "label": "Invalid OHLC", "format": "number"}
+        ]
+      }
+    ],
+    "blocks": [
+      {"id": "title", "type": "markdown", "body": "# Crypto intraday quality: PEPE restored with higher-resolution DEX candles"},
+      {"id": "executive-summary", "type": "markdown", "sourceId": "fragarach-audit", "body": "## Executive Summary\n\nThe estate-wide audit found provider-data problems rather than an Ariadne matching problem. BTC, ETH, and SOL were repaired with their approved liquid Binance USDT representations. PEPE's Twelve Data and Binance candles were too coarse, but CoinGecko's verified PEPE/WETH pool supplies materially finer, continuous USD-denominated H1 and M5 candles. After correcting 276 H1 and 438 M5 observations, all 26 crypto H1/M5 lanes are safe for Gator price-structure review; HYPE and SUI retain volume-only caveats."},
+      {"id": "headline-strip", "type": "metric-strip", "cardIds": ["commissioned", "review-safe", "blocked", "rerouted"]},
+      {"id": "outcome-heading", "type": "markdown", "sourceId": "fragarach-audit", "body": "## Every commissioned crypto lane now passes the price gate\n\nTwenty-two lanes include usable price and volume. HYPE and SUI contribute four additional price-valid lanes whose absent volume is disclosed rather than confused with bad price candles. No H1/M5 crypto lane remains blocked from Gator."},
+      {"id": "outcome-chart", "type": "chart", "chartId": "quality-outcomes", "layout": "full"},
+      {"id": "kevin-finding", "type": "markdown", "sourceId": "kevin-capture", "body": "## Kevin is an independent validator, not an OHLC provider\n\nKevin has current DEX evidence for four overlapping base symbols—BNB, LINK, PEPE, and SUI—but no candle or OHLC table. Its reference prices, liquidity, dispersion, transactions, and rolling M5/H1 activity are valuable cross-source checks. They cannot reconstruct historical opens, highs, lows, and closes, and should not be routed into Fragarach as if they were exchange candles."},
+      {"id": "route-finding", "type": "markdown", "sourceId": "pepe-provider-review", "body": "## CoinGecko repairs PEPE; CoinMarketCap remains the secondary candidate\n\nCoinGecko's verified PEPE/WETH pool passed both 270-candle tests after retaining empty DEX intervals: H1 had 99.6% distinct closes and 0.4% zero-range candles; M5 had 58.1% distinct closes and 42.2% zero-range candles, with no missing intervals or invalid OHLC. CoinMarketCap also improved M5, but one invalid H1 candle appeared in its longer sample. Fragarach therefore uses CoinGecko for PEPE H1/M5 and keeps CoinMarketCap as comparison evidence rather than production truth."},
+      {"id": "pepe-provider-table", "type": "table", "tableId": "pepe-provider-comparison", "layout": "full"},
+      {"id": "exceptions-table", "type": "table", "tableId": "exceptions", "layout": "full"},
+      {"id": "recommendations", "type": "markdown", "body": "## Recommended next steps\n\n1. Keep the BTC, ETH, and SOL USDT routes and PEPE's CoinGecko DEX route under the automatic Gator quality gate.\n2. Return PEPE H1/M5 to 30×30×30 review, but do not automatically restore the previously quarantined bad-data reviews.\n3. Monitor PEPE M5's empty-candle rate; block it again if half or more of a 270-bar window has no price range.\n4. Use Kevin's reference price and dispersion as a validator where contract identity is verified, not as candle truth.\n5. Decide separately whether Gator needs volume; if it does, treat HYPE and SUI as incomplete until a volume-bearing source is approved."},
+      {"id": "questions", "type": "markdown", "body": "## Further questions\n\n- Does Gator's detection contract consume volume, or is OHLC the complete required input?\n- Should the PEPE CoinGecko pool route receive a paid API credential before it is treated as long-term production infrastructure?\n- Should Kevin's contract-verified reference prices become a standing Fragarach post-ingest reasonableness check for overlapping crypto identities?"},
+      {"id": "caveats", "type": "markdown", "body": "## Caveats and assumptions\n\nThe audit assesses the latest 270 completed bars in the local authority snapshot on August 15, 2026. Price chartability and volume completeness are intentionally separate. CoinGecko's keyless endpoint is suitable for the current low request volume but has lower service guarantees than a paid plan. Empty DEX intervals are retained as previous-close, zero-volume candles to preserve exact H1/M5 continuity. Kevin's same-symbol tokens may represent wrapped or bridged contract identities, so symbol overlap alone is not semantic equivalence."}
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-08-15T12:35:00+00:00",
+    "status": "ready",
+    "datasets": {
+      "headline": [
+        {"lanes_inspected": 26, "review_safe_lanes": 26, "blocked_lanes": 0, "symbols_rerouted": 4}
+      ],
+      "status_summary": [
+        {"status": "Usable", "lane_count": 22, "interpretation": "Price and volume passed"},
+        {"status": "Usable price only", "lane_count": 4, "interpretation": "Price passed; volume unavailable"}
+      ],
+      "exceptions": [
+        {"lane": "HYPEUSD:H1", "status": "Usable price only", "provider_symbol": "HYPE/USDT", "distinct_close_pct": 96.3, "zero_range_pct": 0.0, "reason": "Volume unavailable"},
+        {"lane": "HYPEUSD:M5", "status": "Usable price only", "provider_symbol": "HYPE/USDT", "distinct_close_pct": 86.7, "zero_range_pct": 0.0, "reason": "Volume unavailable"},
+        {"lane": "SUIUSD:H1", "status": "Usable price only", "provider_symbol": "SUI/USD", "distinct_close_pct": 61.9, "zero_range_pct": 0.0, "reason": "Volume unavailable"},
+        {"lane": "SUIUSD:M5", "status": "Usable price only", "provider_symbol": "SUI/USD", "distinct_close_pct": 38.1, "zero_range_pct": 0.0, "reason": "Volume unavailable"}
+      ],
+      "pepe_provider_comparison": [
+        {"provider": "Twelve Data (previous)", "timeframe": "H1", "status": "Unusable", "distinct_close_pct": 20.0, "zero_range_pct": 0.0, "missing_intervals": 0, "invalid_ohlc": 0},
+        {"provider": "Twelve Data (previous)", "timeframe": "M5", "status": "Unusable", "distinct_close_pct": 6.7, "zero_range_pct": 3.3, "missing_intervals": 0, "invalid_ohlc": 0},
+        {"provider": "CoinGecko DEX", "timeframe": "H1", "status": "Usable", "distinct_close_pct": 99.6, "zero_range_pct": 0.4, "missing_intervals": 0, "invalid_ohlc": 0},
+        {"provider": "CoinGecko DEX", "timeframe": "M5", "status": "Usable", "distinct_close_pct": 58.1, "zero_range_pct": 42.2, "missing_intervals": 0, "invalid_ohlc": 0},
+        {"provider": "CoinMarketCap", "timeframe": "H1", "status": "Rejected", "distinct_close_pct": 99.6, "zero_range_pct": 0.4, "missing_intervals": 0, "invalid_ohlc": 1},
+        {"provider": "CoinMarketCap", "timeframe": "M5", "status": "Usable candidate", "distinct_close_pct": 80.4, "zero_range_pct": 20.0, "missing_intervals": 0, "invalid_ohlc": 0}
+      ]
+    }
+  },
+  "sources": [
+    {
+      "id": "fragarach-audit",
+      "label": "Fragarach authority bars and ingest provenance",
+      "query": {"engine": "SQLite + Python 3", "language": "Python/SQL", "sql": "WITH ranked AS (SELECT b.*, row_number() OVER (PARTITION BY b.asset,b.timeframe ORDER BY b.open_time_utc DESC) AS rn FROM bars b JOIN instrument_registrations r ON r.asset=b.asset AND r.timeframe='D1' WHERE r.representation_type='CRYPTO_SPOT_PAIR' AND b.timeframe IN ('H1','M5')) SELECT asset,timeframe,open_time_utc,open,high,low,close,volume FROM ranked WHERE rn<=270 ORDER BY asset,timeframe,open_time_utc;", "query": "PYTHONPATH=src python3 -m fragarach_ii.commands.audit_crypto_intraday --database data/runtime/spec002_real_evidence_acceptance.sqlite3 --window 270", "description": "Read-only chartability audit of every commissioned CRYPTO_SPOT_PAIR H1 and M5 lane.", "executed_at": "2026-08-15T12:07:00+00:00", "tables_used": ["instrument_registrations", "evidence_lanes", "lane_state", "ingest_runs", "bars"], "filters": ["representation_type = CRYPTO_SPOT_PAIR", "timeframe in H1, M5", "latest 270 completed bars per lane"]}
+    },
+    {
+      "id": "kevin-capture",
+      "label": "Kevin DEX Screener capture database",
+      "query": {"engine": "SQLite", "language": "SQL", "sql": "SELECT upper(symbol), group_concat(DISTINCT chain_id), count(*), min(captured_at), max(captured_at) FROM token_aggregates WHERE upper(symbol) IN ('ADA','AVAX','BNB','BTC','DOGE','DOT','ETH','HYPE','LINK','PEPE','SOL','SUI','XRP') GROUP BY upper(symbol) ORDER BY upper(symbol);", "description": "Coverage and capture-window check, paired with sqlite_master inspection for OHLC or candle tables.", "executed_at": "2026-08-15T12:05:30+00:00", "tables_used": ["token_aggregates", "pair_snapshots", "capture_runs", "sqlite_master"]}
+    },
+    {
+      "id": "route-review",
+      "label": "Binance candidate benchmark and Fragarach correction evidence",
+      "href": "https://api.binance.com/api/v3/klines",
+      "query": {"engine": "Binance public REST + Fragarach SQLite", "language": "HTTP/SQL", "sql": "SELECT json_extract(detail,'$.asset') AS asset,json_extract(detail,'$.timeframe') AS timeframe,json_extract(detail,'$.provider_symbol') AS provider_symbol,json_extract(detail,'$.corrected') AS corrected,finished_at_utc FROM ingest_runs WHERE status='committed' AND json_extract(detail,'$.mapping_class')='APPROVED_EQUIVALENT_REPRESENTATION' AND json_extract(detail,'$.asset') IN ('BTCUSD','ETHUSD','SOLUSD') ORDER BY finished_at_utc DESC;", "query": "GET https://api.binance.com/api/v3/klines?symbol={BTCUSDT|ETHUSDT|SOLUSDT|PEPEUSDT}&interval={5m|1h}&limit={300|1000}", "description": "Bounded candidate quality comparison followed by provenance-preserving Fragarach corrections for approved BTC, ETH, and SOL USDT representations.", "executed_at": "2026-08-15T12:06:14+00:00", "tables_used": ["ingest_runs", "provenance", "bars", "raw_blocks"]}
+    },
+    {
+      "id": "pepe-provider-review",
+      "label": "PEPE CoinGecko and CoinMarketCap OHLCV comparison",
+      "href": "https://docs.coingecko.com/reference/pool-ohlcv-contract-address",
+      "query": {"engine": "CoinGecko GeckoTerminal + CoinMarketCap public REST", "language": "HTTP/Python", "sql": "SELECT DISTINCT json_extract(detail,'$.asset') AS asset FROM ingest_runs WHERE status='committed' AND json_extract(detail,'$.provider') IN ('BINANCE','COINGECKO_DEX') AND json_extract(detail,'$.asset') IN ('BTCUSD','ETHUSD','SOLUSD','PEPEUSD') AND finished_at_utc>='2026-08-15T00:00:00+00:00' ORDER BY asset;", "query": "GET CoinGecko GeckoTerminal PEPE/WETH pool OHLCV and CoinMarketCap PEPE token K-line candles for H1 and M5; assess latest 30 and 270 completed intervals", "description": "Bounded provider comparison using valid OHLC geometry, completed-interval continuity, distinct-close ratio, zero-range ratio, and volume coverage.", "executed_at": "2026-08-15T12:26:05+00:00", "tables_used": ["ingest_runs", "bars", "provenance", "raw_blocks"], "filters": ["Ethereum PEPE contract 0x6982508145454ce325ddbe47a25d4ec3d2311933", "H1 and M5", "latest 270 completed intervals", "USD-denominated candles", "empty intervals retained"]}
+    }
+  ]
+}

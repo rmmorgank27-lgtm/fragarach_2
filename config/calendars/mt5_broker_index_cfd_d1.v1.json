@@ -1,0 +1,22 @@
+{
+  "asset_class": "BROKER_INDEX_CFDS",
+  "calculated_closures": [],
+  "calendar_id": "MT5_BROKER_INDEX_CFD_D1_V1",
+  "calendar_version": 1,
+  "definition_checksum": "2f00ac7b962c5506041800f4ccc1bdd6e8af383c6ab85d19595b380227f1675c",
+  "effective_from": "2024-03-19",
+  "effective_to": null,
+  "format": "fragarach_ii.calendar_definition.v1",
+  "overrides": [],
+  "session_close_local": "00:00:00",
+  "session_timezone": "UTC",
+  "session_close_owner_day_offset": 1,
+  "acquisition_delay_seconds": 30,
+  "recurring_full_day_closures": [
+    {"day": 1, "month": 1, "reason": "New Year's Day"},
+    {"day": 25, "month": 12, "reason": "Christmas Day"}
+  ],
+  "timeframe": "D1",
+  "timezone_basis": "UTC",
+  "weekdays_expected": [1, 2, 3, 4, 5]
+}

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from fragarach_ii.acquisition_orchestrator import (
@@ -14,6 +14,8 @@ from fragarach_ii.lane_update_register import LaneUpdateRegister
 from fragarach_ii.scheduler_service import (
     SchedulerJournal,
     _authority_change_token,
+    _credit_window_recovery_required,
+    _credit_window_register_recovery_required,
     _fair_bounded_selection,
     _pending_operator_fetches,
     _release_terminal_operator_fetches,
@@ -56,6 +58,36 @@ def test_due_query_claims_only_the_exact_closed_boundary(tmp_path: Path) -> None
 
     assert [(item["asset"], item["timeframe"]) for item in due] == [("AUDUSD", "M5")]
     assert register.claim_due(at=NOW, limit=10) == []
+
+
+def test_primary_handoff_defers_generic_claim_until_fallback_release(tmp_path: Path) -> None:
+    database = _m5_lane(tmp_path)
+    register = LaneUpdateRegister(database)
+    register.audit_estate(at=NOW, reason="TEST")
+    expires = NOW + timedelta(minutes=30)
+
+    register.defer_provider_handoff(
+        asset="AUDUSD",
+        timeframe="M5",
+        until=expires,
+        reason="MT5_BRIDGE_PRIMARY_PENDING:request-1",
+        at=NOW,
+    )
+
+    assert not any(
+        item["asset"] == "AUDUSD" and item["timeframe"] == "M5"
+        for item in register.claim_due(at=NOW + timedelta(minutes=5), limit=10)
+    )
+    register.release_provider_handoff(
+        asset="AUDUSD",
+        timeframe="M5",
+        reason="MT5_BRIDGE_REQUEST_EXPIRED",
+        at=NOW + timedelta(minutes=6),
+    )
+    assert any(
+        item["asset"] == "AUDUSD" and item["timeframe"] == "M5"
+        for item in register.claim_due(at=NOW + timedelta(minutes=6), limit=10)
+    )
 
 
 def test_daily_priority_zero_is_preserved_and_due_count_is_indexed(tmp_path: Path) -> None:
@@ -111,6 +143,13 @@ def test_compact_runtime_emits_authority_change_token(tmp_path: Path) -> None:
     # canonical Estate change and must not start a full desktop projection.
     register.claim_due(at=NOW, limit=1)
     assert _authority_change_token(database) == token
+
+    register.block(
+        asset="AUDUSD", timeframe="M5",
+        reason="LOCAL_PROGRAMMING_ERROR; fixture", at=NOW, approved=True,
+    )
+    blocked_token = _authority_change_token(database)
+    assert blocked_token != token
 
     # A committed ingest advances governed authority and must refresh Estate.
     _add_intraday_bar(
@@ -204,22 +243,61 @@ def test_blocked_rows_are_available_as_a_bounded_operator_projection(tmp_path: P
     database = _m5_lane(tmp_path)
     register = LaneUpdateRegister(database)
     register.audit_estate(at=NOW, reason="TEST")
-    register.block(asset="AUDUSD", timeframe="M5", reason="AUTHENTICATION_FAILED", at=NOW)
+    register.block(asset="AUDUSD", timeframe="M5", reason="AUTHENTICATION_FAILED", at=NOW, approved=True)
 
     rows = register.blocked_rows(limit=10)
 
     assert [(row["asset"], row["timeframe"]) for row in rows] == [("AUDUSD", "M5")]
-    assert rows[0]["last_outcome"] == "AUTHENTICATION_FAILED"
+    assert rows[0]["last_outcome"] == "AUTHENTICATION_FAILED; OPERATOR_APPROVED_BLOCK"
     assert "credential is missing, invalid, or rejected" in rows[0]["blocker_reason"]
     assert "Configure and validate" in rows[0]["repair_action"]
     assert rows[0]["flow_impact"] == "Only this lane is held; scheduled acquisition for all other lanes continues."
+
+
+def test_unapproved_stop_becomes_a_standard_cadence_provider_cycle(tmp_path: Path) -> None:
+    database = _m5_lane(tmp_path)
+    register = LaneUpdateRegister(database)
+    register.audit_estate(at=NOW, reason="TEST")
+
+    result = register.block(
+        asset="AUDUSD", timeframe="M5", reason="NO_ELIGIBLE_PROVIDER", at=NOW,
+    )
+
+    assert result["state"] == "RETRY"
+    assert result["next_check_at_utc"] == (NOW + timedelta(minutes=5)).isoformat()
+    assert register.blocked_rows(limit=10) == []
+
+
+def test_legacy_dns_programming_block_is_requeued_without_releasing_other_blocks(tmp_path: Path) -> None:
+    database = _m5_lane(tmp_path)
+    register = LaneUpdateRegister(database)
+    register.audit_estate(at=NOW, reason="TEST")
+    register.block(
+        asset="AUDUSD", timeframe="D1",
+        reason=(
+            "LOCAL_PROGRAMMING_ERROR; function=_execute_acquisition; lane=AUDUSD:D1; "
+            "provider=BINANCE; underlying_exception=gaierror: [Errno 8] name unavailable"
+        ),
+        at=NOW, approved=True,
+    )
+    register.block(
+        asset="AUDUSD", timeframe="M5",
+        reason="LOCAL_PROGRAMMING_ERROR; underlying_exception=ValueError: invariant",
+        at=NOW, approved=True,
+    )
+
+    assert register.release_legacy_dns_blocks(at=NOW) == 1
+    rows = {(row["asset"], row["timeframe"]): row for row in register.rows()}
+    assert rows[("AUDUSD", "D1")]["state"] == "RETRY"
+    assert rows[("AUDUSD", "D1")]["next_check_at_utc"] == NOW.isoformat()
+    assert rows[("AUDUSD", "M5")]["state"] == "BLOCKED"
 
 
 def test_blocked_lane_does_not_stop_other_due_lanes(tmp_path: Path) -> None:
     database = _m5_lane(tmp_path)
     register = LaneUpdateRegister(database)
     register.audit_estate(at=NOW, reason="TEST")
-    register.block(asset="AUDUSD", timeframe="M5", reason="AUTHENTICATION_FAILED", at=NOW)
+    register.block(asset="AUDUSD", timeframe="M5", reason="AUTHENTICATION_FAILED", at=NOW, approved=True)
     with register._connection() as connection:
         connection.execute(
             """UPDATE lane_update_register
@@ -237,8 +315,8 @@ def test_verified_credential_repair_requeues_only_authentication_blocks(tmp_path
     database = _m5_lane(tmp_path)
     register = LaneUpdateRegister(database)
     register.audit_estate(at=NOW, reason="TEST")
-    register.block(asset="AUDUSD", timeframe="M5", reason="Waiting for provider credential repair: TWELVE_DATA", at=NOW)
-    register.block(asset="AUDUSD", timeframe="D1", reason="LOCAL_PROGRAMMING_ERROR; provider route requires repair", at=NOW)
+    register.block(asset="AUDUSD", timeframe="M5", reason="Waiting for provider credential repair: TWELVE_DATA", at=NOW, approved=True)
+    register.block(asset="AUDUSD", timeframe="D1", reason="LOCAL_PROGRAMMING_ERROR; provider route requires repair", at=NOW, approved=True)
 
     released = register.release_verified_credential_blocks(at=NOW)
     rows = {(row["asset"], row["timeframe"]): row for row in register.rows()}
@@ -276,6 +354,41 @@ def test_normal_wake_uses_register_not_estate_reconciliation(tmp_path: Path, mon
     assert dashboard == LaneUpdateRegister(database).dashboard_rows(limit=24)
     assert 1 <= len(dashboard) <= 24
     assert {"asset", "timeframe", "state", "next_check_at_utc", "last_outcome"} <= dashboard[0].keys()
+
+
+def test_credit_window_recovery_is_one_time_and_does_not_touch_normal_register_wakes(tmp_path: Path) -> None:
+    database = _m5_lane(tmp_path)
+    journal = SchedulerJournal(database, tmp_path / "scheduler.json")
+    assert not _credit_window_recovery_required(journal)
+
+    journal.data["manual_requests"] = [{
+        "id": "legacy-credit-window", "status": "Required",
+        "providers_considered": [{"provider": "TWELVE_DATA", "reason": "CREDIT_WINDOW"}],
+    }]
+    assert _credit_window_recovery_required(journal)
+
+    journal.data["credit_window_recovery_revision"] = 1
+    assert not _credit_window_recovery_required(journal)
+    journal.data["manual_requests"][0]["reconciliation_status"] = "AUTOMATION_RESTORED"
+    assert _credit_window_register_recovery_required(journal)
+    journal.data["credit_window_register_recovery_revision"] = 1
+    assert not _credit_window_register_recovery_required(journal)
+
+
+def test_automation_recovery_releases_only_named_blocked_lanes(tmp_path: Path) -> None:
+    database = _m5_lane(tmp_path)
+    register = LaneUpdateRegister(database)
+    register.audit_estate(at=NOW, reason="TEST")
+    register.block(asset="AUDUSD", timeframe="M5", reason="NO_ELIGIBLE_PROVIDER", at=NOW, approved=True)
+    register.block(asset="AUDUSD", timeframe="D1", reason="NO_ELIGIBLE_PROVIDER", at=NOW, approved=True)
+
+    released = register.release_automation_restored_blocks([("AUDUSD", "M5")], at=NOW)
+    rows = {(row["asset"], row["timeframe"]): row for row in register.rows()}
+
+    assert released == 1
+    assert rows[("AUDUSD", "M5")]["state"] == "RETRY"
+    assert rows[("AUDUSD", "M5")]["last_outcome"] == "CREDIT_WINDOW_RECOVERY_RETRY_QUEUED"
+    assert rows[("AUDUSD", "D1")]["state"] == "BLOCKED"
 
 
 def test_time_triggered_wake_dispatches_a_pending_operator_fetch(tmp_path: Path) -> None:
@@ -556,7 +669,7 @@ def test_live_us_equity_d1_fallback_symbols_have_reviewed_yahoo_routes() -> None
         str(mapping.get("asset")): mapping
         for mapping in yahoo.mappings
     }
-    for symbol in ("AMZN", "META", "NVDA", "QQQ"):
+    for symbol in ("AMZN", "META", "NVDA", "QQQ", "XOM"):
         mapping = mappings[symbol]
         assert mapping["symbol"] == symbol
         assert mapping["timeframes"] == ["D1"]

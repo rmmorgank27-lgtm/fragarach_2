@@ -24,8 +24,9 @@ struct TruthEstateSummaryView:View {
                 SummaryMetric(title:"Coverage",value:summary.operationalCoveragePercent.map{"\($0)%"} ?? "Not measured",action:{onSelect?("Coverage")})
             }
             HStack(spacing:10) {
-                SummaryMetric(title:"Healthy",value:"\(summary.greenCount)",state:"GREEN",action:{onSelect?("Healthy")})
-                AttentionCountButton(lanes:lanes.filter{$0.truthState.authorityState == "AMBER"},onSelect:onSelectLane)
+                SummaryMetric(title:"Gold",value:"\(summary.goldCount)",state:"GOLD",action:{onSelect?("Gold")})
+                SummaryMetric(title:"Green",value:"\(summary.greenCount)",state:"GREEN",action:{onSelect?("Green")})
+                AttentionCountButton(lanes:lanes.filter{$0.truthState.authorityState == "AMBER"},title:"Truth attention",onSelect:onSelectLane)
                 SummaryMetric(title:"Critical",value:"\(summary.redCount)",state:"RED",action:{onSelect?("Critical")})
                 SummaryMetric(title:"Generated",value:TruthPresentation.text(summary.generatedAt))
             }
@@ -62,7 +63,7 @@ struct SchedulerRecentEventsView:View {
 private struct SummaryMetric:View {
     let title:String;let value:String;var state:String?=nil;var action:(()->Void)?=nil
     var body:some View {
-        let card=VStack(alignment:.leading,spacing:5){Text(title).font(.caption).foregroundStyle(.secondary);HStack{if let state{Circle().fill(TruthPresentation.color(state)).frame(width:8,height:8)};Text(value).font(.headline).lineLimit(1)}}
+        let card=VStack(alignment:.leading,spacing:5){Text(title).font(.caption).foregroundStyle(.secondary);HStack{if let state{TruthStateMark(state:state,size:12)};Text(value).font(.headline).lineLimit(1)}}
             .padding(12).frame(maxWidth:.infinity,alignment:.leading).background(.regularMaterial,in:RoundedRectangle(cornerRadius:10))
         if let action { Button(action:action){card}.buttonStyle(.plain).help("Show the lanes behind this scorecard") } else { card }
     }

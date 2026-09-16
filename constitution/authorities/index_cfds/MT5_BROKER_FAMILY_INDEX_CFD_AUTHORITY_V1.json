@@ -1,0 +1,100 @@
+{
+  "accepted_legacy_registrations": [],
+  "authority_checksum": "2c5dc7e112b1a3ca761efb2bcb467a862e477fe74a3d9b69601c588b72b0da09",
+  "authority_id": "MT5_BROKER_FAMILY_INDEX_CFD_AUTHORITY_V1",
+  "canonical_registration": {
+    "calendar_id": "MT5_BROKER_INDEX_CFD_D1_V1",
+    "calendar_version": 1,
+    "contract_or_series": "MT5_BROKER_FAMILY_CASH_INDEX_CFD",
+    "exchange_name": "MT5_BROKER_FAMILY",
+    "provider_contract": "MT5_BROKER_FAMILY_INDEX_CFD_DATA_V1",
+    "provider_id": "MT5_BROKER_FAMILY"
+  },
+  "format": "fragarach_ii.broker_index_cfd_authority.v1",
+  "bridge": {
+    "request_contract": "fragarach.mt5_evidence_request.v0.4",
+    "response_contract": "fragarach.mt5_evidence_response.v0.4",
+    "poll_path": "/v1/mt5/evidence/requests/next",
+    "response_path": "/v1/mt5/evidence/responses",
+    "transport_client_id": "tradewinds-mt5-bridge",
+    "transport_clients": {
+      "tradewinds-mt5-bridge": "tradewinds-mt5-bridge",
+      "eightcap-mt5-bridge": "eightcap-mt5-bridge"
+    },
+    "routes": [
+      {
+        "broker_family": "approved-index-data-broker-family-v1",
+        "provider_symbols": {
+          "XOM": "ExxonMobil.r",
+          "NAS100": "NAS100.r",
+          "US30": "US30.r",
+          "US500": "US500.r"
+        },
+        "record_provider": "FUSION_MARKETS_MT5",
+        "record_provider_contract": "FUSION_MARKETS_MT5_MCP_HISTORY_V1",
+        "route_id": "registered_standard_data_primary"
+      },
+      {
+        "authority_reference": "fragarach_2/eightcap_mt5_crypto/v1",
+        "broker_family": "eightcap-live-crypto-v1",
+        "provider_symbols": {},
+        "record_provider": "EIGHTCAP_MT5",
+        "record_provider_contract": "EIGHTCAP_MT5_MCP_HISTORY_V1",
+        "route_id": "eightcap_standard_data_primary",
+      "activity_field": "tick_volume",
+        "spread_policy": "RETAIN_RAW_OPTIONAL_NOT_CANONICAL"
+      }
+    ],
+    "native_timeframes_by_symbol": {
+      "XOM": ["H1", "M30", "M5"],
+      "NAS100": ["D1", "H1", "M30", "M5"],
+      "US30": ["D1", "H1", "M30", "M5"],
+      "US500": ["D1", "H1", "M30", "M5"]
+    }
+  },
+  "interchangeability": "EQUIVALENT_DATA_ROUTES_WITH_PER_RECEIPT_ROUTE_PROVENANCE",
+  "timestamp_authority": {
+    "policy_id": "MT5_BROKER_SERVER_US_DST_UTC_PLUS_2_3_V1",
+    "raw_semantics": "MT5_BROKER_SERVER_INTERVAL_OPEN",
+    "standard_offset": "+02:00",
+    "daylight_offset": "+03:00",
+    "daylight_state_authority": "America/New_York",
+    "conversion": "UTC_EQUALS_BROKER_SERVER_TIME_MINUS_ACTIVE_OFFSET",
+    "preserve_raw_timestamp": true
+  },
+  "routes": [
+    {
+      "manifest_contracts": [
+        "fragarach.mt5.market_data_package.v1"
+      ],
+      "manifest_identity": {
+        "account_profile": "STANDARD_NON_TRADING_DATA",
+        "platform": "MT5",
+        "provider": "FUSION_MARKETS",
+        "provider_route_id": "fusion_mt5_data_reader"
+      },
+      "record_provider": "FUSION_MARKETS_MT5",
+      "record_provider_contract": "FUSION_MARKETS_MT5_MCP_HISTORY_V1",
+      "route_id": "fusion_mt5_data_reader"
+    }
+  ],
+  "symbols": [
+    "XOM",
+    "US30",
+    "US500",
+    "NAS100"
+  ],
+  "timeframes": [
+    "D1",
+    "H1",
+    "M30",
+    "M5"
+  ],
+  "derived_timeframes": {
+    "M15": {
+      "authority": "FRAGARACH_SYNTHETIC_REGISTRY",
+      "source_timeframe": "M5",
+      "windows_collection_permitted": false
+    }
+  }
+}

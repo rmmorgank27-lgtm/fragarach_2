@@ -228,7 +228,9 @@ private struct EstateFindingsView: View {
     }
     private var matchingLanes:[EstateTruthLane] {
         switch condition {
-        case "Healthy": return lanes.filter{$0.truthState.authorityState == "GREEN"}
+        case "Gold": return lanes.filter{$0.truthState.authorityState == "GOLD"}
+        case "Green": return lanes.filter{$0.truthState.authorityState == "GREEN"}
+        case "Healthy": return lanes.filter{$0.truthState.authorityState == "GOLD" || $0.truthState.authorityState == "GREEN"}
         case "Attention": return lanes.filter{$0.truthState.authorityState == "AMBER"}
         case "Critical": return lanes.filter{$0.truthState.authorityState == "RED"}
         case "Coverage": return lanes.filter{$0.truthState.coverageScore != 100}
@@ -244,7 +246,7 @@ private struct EstateFindingsView: View {
                 ForEach(matchingLanes) { lane in
                     Button { onSelect(lane.id) } label: {
                         HStack(alignment:.firstTextBaseline,spacing:10) {
-                            Circle().fill(TruthPresentation.color(lane.truthState.authorityState)).frame(width:8,height:8)
+                            TruthStateMark(state: TruthPresentation.visualState(authority: lane.truthState.authorityState, operational: lane.freshnessDimension?.label), size: 12)
                             Text("\(lane.symbol) · \(lane.timeframe)").fontWeight(.semibold)
                             Text(reason(for:lane)).foregroundStyle(.secondary).lineLimit(2)
                             Spacer()
@@ -261,7 +263,8 @@ private struct EstateFindingsView: View {
     }
     private func reason(for lane:EstateTruthLane)->String {
         if let detail=lane.freshnessDimension?.label,detail != "Current" { return detail }
-        if lane.truthState.authorityState == "GREEN" { return "Healthy canonical authority" }
+        if lane.truthState.authorityState == "GOLD" { return "Expected canonical edge present" }
+        if lane.truthState.authorityState == "GREEN" { return "Within three completed boundaries of the expected edge" }
         return lane.gapSummary.operationalImpact == "NOT_MEASURED" ? lane.truthState.validationState : lane.gapSummary.operationalImpact
     }
 }

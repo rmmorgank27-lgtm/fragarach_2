@@ -186,6 +186,33 @@ def test_required_set_uses_market_doctrine_for_fx_crypto_and_stocks() -> None:
         assert stock_plan["required_timeframes"] == ["D1"]
 
 
+def test_commissioned_stock_intraday_lanes_flow_into_management_required_set() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        database = Path(directory) / "stock.sqlite3"
+        initialize_database(database)
+        _register_discovered(database, "AAPL")
+        with registered_writer(database) as connection:
+            connection.executemany(
+                "INSERT INTO evidence_lanes VALUES(?,?, 'D1','EVIDENCE_LANE_V1',1,?)",
+                [
+                    ("AAPL", timeframe, OBSERVED.isoformat())
+                    for timeframe in ("H1", "M30", "M5")
+                ],
+            )
+
+        plan = required_set_acquisition_plan(
+            database,
+            symbol="AAPL",
+            provider_profiles=(_stock_profile(),),
+            at=OBSERVED,
+        )
+
+        assert plan["required_timeframes"] == ["D1", "H1", "M30", "M5"]
+        assert {lane["timeframe"] for lane in plan["lanes"]} == {
+            "D1", "H1", "M30", "M5",
+        }
+
+
 def test_grouped_plan_includes_per_lane_blocking_reasons() -> None:
     with tempfile.TemporaryDirectory() as directory:
         database = Path(directory) / "authority.sqlite3"

@@ -204,6 +204,7 @@ def test_launch_agent_is_independent_loopback_only_and_does_not_mutate_authority
     )
 
     assert definition["Label"] == "com.raymorgan.fragarach-ii.replica-publisher"
+    assert definition["ProgramArguments"][:2] == ["/usr/bin/env", "/usr/bin/python3"]
     assert definition["ProgramArguments"][-4:] == ["--host", "127.0.0.1", "--port", "9462"]
     assert "scheduler" not in " ".join(definition["ProgramArguments"])
     assert publisher_service_status(lifecycle)["state"] == "NOT_INSTALLED"

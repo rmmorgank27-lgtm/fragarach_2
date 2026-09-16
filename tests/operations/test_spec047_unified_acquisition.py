@@ -207,15 +207,16 @@ def test_shared_projection_exposes_all_providers_and_reviewed_solusd_representat
             credentials={},
         )
         rows = projection["rows"]
-        assert len(rows) == 16
+        assert len(rows) == 20
         d1 = {row["provider"]: row for row in rows if row["timeframe"] == "D1"}
-        assert d1["BINANCE"]["provider_representation"] == "SOL/USD"
-        assert d1["BINANCE"]["mapping_class"] == "EXACT_REPRESENTATION"
+        assert d1["BINANCE"]["provider_representation"] == "SOL/USDT"
+        assert d1["BINANCE"]["mapping_class"] == "APPROVED_EQUIVALENT_REPRESENTATION"
         assert d1["COINGECKO"]["mapping_class"] == "APPROVED_PROVIDER_ALIAS"
+        assert d1["COINGECKO_DEX"]["capability_state"] == "TIMEFRAME_UNSUPPORTED"
         assert d1["TWELVE_DATA"]["capability_state"] == "CREDENTIAL_REQUIRED"
         assert d1["YAHOO_FINANCE"]["eligibility"] == "INELIGIBLE"
         assert all(row["canonical_base_asset"] == "SOL" for row in rows)
-        assert not any(row.get("provider_symbol") == "SOLUSDT" for row in rows)
+        assert any(row.get("provider_symbol") == "SOLUSDT" for row in rows)
 
 
 def test_operator_fetch_uses_scheduler_failover_and_skips_ineligible_provider() -> None:
@@ -584,7 +585,7 @@ def test_solusdt_is_not_an_approved_solusd_real_representation() -> None:
         ) is None
 
 
-def test_crypto_freshness_is_24_7_and_critical_staleness_cannot_remain_green() -> None:
+def test_crypto_freshness_uses_completed_boundary_status_bands() -> None:
     with tempfile.TemporaryDirectory() as directory:
         database = Path(directory) / "authority.sqlite3"
         _registered_sol(database, d1_dates=("2026-07-11",))
@@ -605,14 +606,16 @@ def test_crypto_freshness_is_24_7_and_critical_staleness_cannot_remain_green() -
                     connection, symbol="SOLUSD", timeframe=timeframe, as_of=as_of
                 )
                 for timeframe in ("D1", "H1", "M30", "M5")
-            }
+        }
         assert all(row["state"] == "Behind" for row in states.values())
-        assert all(row["severity"] == "CRITICAL" for row in states.values())
+        assert states["D1"]["lane_status"] == "GREEN"
+        assert states["H1"]["lane_status"] == "AMBER"
+        assert states["M30"]["lane_status"] == "RED"
+        assert states["M5"]["lane_status"] == "RED"
         assert states["M5"]["lag"]["count"] > states["M30"]["lag"]["count"] > states["H1"]["lag"]["count"]
         truth = truth_state_for_lane(database, symbol="SOLUSD", timeframe="D1", as_of=as_of)
-        assert truth["freshness"]["severity"] == "CRITICAL"
-        assert truth["authority_state"] == "RED"
-        assert truth["overall_operational_state"] == "Critical"
+        assert truth["authority_state"] == "GREEN"
+        assert truth["overall_operational_state"] == "Healthy"
 
 
 def test_current_crypto_m5_edge_is_current_under_continuous_calendar() -> None:

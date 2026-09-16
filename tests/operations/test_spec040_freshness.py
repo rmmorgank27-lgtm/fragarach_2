@@ -5,6 +5,7 @@ import unittest
 from datetime import UTC, datetime
 from pathlib import Path
 
+from fragarach_ii.freshness import _lane_status
 from fragarach_ii.lane_commissioning import ensure_commissioned_lane
 from fragarach_ii.lane_freshness_service import lane_freshness_report
 from fragarach_ii.storage import open_read_only, registered_writer
@@ -14,6 +15,14 @@ from tests.validation.test_d1_session_validation import _create_lane, _epoch
 
 
 class Spec040FreshnessTests(unittest.TestCase):
+    def test_lane_status_bands_are_counted_in_completed_timeframe_units(self) -> None:
+        self.assertEqual(_lane_status(current=True, lag_count=0), "GOLD")
+        for lag in (1, 3):
+            self.assertEqual(_lane_status(current=False, lag_count=lag), "GREEN")
+        for lag in (4, 12):
+            self.assertEqual(_lane_status(current=False, lag_count=lag), "AMBER")
+        self.assertEqual(_lane_status(current=False, lag_count=13), "RED")
+
     def test_stale_persisted_validation_cannot_keep_lane_current(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "authority.sqlite3"
@@ -37,6 +46,7 @@ class Spec040FreshnessTests(unittest.TestCase):
             self.assertEqual(truth["latest_canonical_observation"], "2026-07-13T00:00:00+00:00")
             self.assertEqual(truth["freshness"]["expected_latest"], "2026-07-14T00:00:00+00:00")
             self.assertEqual(truth["freshness"]["state"], "Behind")
+            self.assertEqual(truth["freshness"]["lane_status"], "GREEN")
             self.assertEqual(truth["freshness_score"], 0)
 
     def test_d1_and_intraday_latest_observations_use_the_canonical_edge(self) -> None:
@@ -77,6 +87,7 @@ class Spec040FreshnessTests(unittest.TestCase):
             for timeframe, (_, close_text) in observations.items():
                 self.assertEqual(rows[timeframe]["actual_latest"], close_text)
                 self.assertEqual(rows[timeframe]["freshness"]["state"], "Current")
+                self.assertEqual(rows[timeframe]["freshness"]["lane_status"], "GOLD")
 
     def test_audit_reports_current_behind_and_unavailable_with_reasons(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

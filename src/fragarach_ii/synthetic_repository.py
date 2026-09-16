@@ -243,6 +243,9 @@ class SyntheticRepository:
                     (policy["source_timeframe"], policy["source_timeframe"]),
                 ).fetchall()
                 for symbol, asset_class in rows:
+                    included_symbols = policy.get("included_symbols")
+                    if included_symbols and str(symbol).upper() not in included_symbols:
+                        continue
                     market = canonical_market(str(asset_class))
                     if market in policy["excluded_markets"]:
                         continue
@@ -788,6 +791,11 @@ def _validate_automatic_registration_policy(item, rules):
     item["target_timeframe"] = str(item["target_timeframe"]).upper()
     item["excluded_markets"] = {
         str(value).strip().upper() for value in item["excluded_markets"]
+    }
+    item["included_symbols"] = {
+        str(value).strip().upper()
+        for value in item.get("included_symbols", [])
+        if str(value).strip()
     }
     item["asset_class_rules"] = {
         str(asset_class).strip().upper(): str(rule_id)

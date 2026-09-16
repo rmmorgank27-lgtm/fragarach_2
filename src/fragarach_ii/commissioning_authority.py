@@ -6,6 +6,8 @@ from collections.abc import Iterable,Mapping
 
 
 ALL_TIMEFRAMES = ("D1", "H1", "M30", "M5")
+BROKER_INDEX_CFD_TIMEFRAMES = ("D1", "H1", "M30", "M15", "M5")
+SUPPORTED_TIMEFRAMES = tuple(dict.fromkeys((*ALL_TIMEFRAMES, *BROKER_INDEX_CFD_TIMEFRAMES)))
 
 # This is the only definition of the operational estate Fragarach requires.
 # Callers provide persisted registration/lane facts; this authority never
@@ -15,6 +17,7 @@ REQUIRED_TIMEFRAMES = {
     "METALS": ALL_TIMEFRAMES,
     "ENERGY": ALL_TIMEFRAMES,
     "INDICES": ALL_TIMEFRAMES,
+    "BROKER_INDEX_CFDS": BROKER_INDEX_CFD_TIMEFRAMES,
     "CRYPTO": ALL_TIMEFRAMES,
     "STOCKS": ("D1",),
 }
@@ -43,6 +46,8 @@ def canonical_market(asset_class: str) -> str:
     """Normalize registration asset classes into the commissioning markets."""
 
     value = asset_class.strip().upper()
+    if value == "BROKER_INDEX_CFDS":
+        return value
     if value == "FX" or "FOREX" in value:
         return "FOREX"
     if "METAL" in value:
@@ -62,6 +67,13 @@ def required_timeframes(asset_class: str) -> tuple[str, ...]:
     """Return the complete ordered set of required lanes for an asset class."""
 
     return REQUIRED_TIMEFRAMES.get(canonical_market(asset_class), ("D1",))
+
+
+def displayed_timeframes(asset_class: str) -> tuple[str, ...]:
+    """Keep the established estate grid while exposing approved native additions."""
+
+    required = required_timeframes(asset_class)
+    return required if any(value not in ALL_TIMEFRAMES for value in required) else ALL_TIMEFRAMES
 
 
 def commissioning_policy(asset_class: str, timeframe: str) -> str:
@@ -106,7 +118,7 @@ def project_required_lanes(
     enabled=enabled_lanes
     result=[]
     for symbol,asset_class in registrations:
-        for timeframe in ALL_TIMEFRAMES:
+        for timeframe in displayed_timeframes(asset_class):
             key=(symbol,timeframe)
             lane_enabled=(
                 timeframe in required_timeframes(asset_class)

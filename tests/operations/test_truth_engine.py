@@ -121,7 +121,7 @@ class TruthEngineTests(unittest.TestCase):
         )
 
         self.assertLess(state["truth_score"], 90)
-        self.assertEqual(state["authority_state"], "GREEN")
+        self.assertEqual(state["authority_state"], "GOLD")
         self.assertEqual(state["validation_state"], "STALE")
         self.assertEqual(state["evidence_integrity"]["state"], "Not current")
         self.assertEqual(state["gap_classification"], "HISTORICAL_SNAPSHOT")
@@ -130,7 +130,25 @@ class TruthEngineTests(unittest.TestCase):
     def test_ninety_is_the_healthy_score_threshold(self) -> None:
         healthy = _state("H1", 365, expected=6_000, present=6_000)
         self.assertGreaterEqual(healthy["truth_score"], 90)
-        self.assertEqual(healthy["authority_state"], "GREEN")
+        self.assertEqual(healthy["authority_state"], "GOLD")
+
+    def test_lane_status_uses_gold_green_amber_red_closed_boundary_bands(self) -> None:
+        base = {
+            "state": "Behind",
+            "latest_canonical_observation": "2026-07-14T00:00:00+00:00",
+            "expected_latest": "2026-07-14T01:00:00+00:00",
+            "reason_code": "LATEST_CANONICAL_OBSERVATION_BEHIND_EXPECTED_LATEST",
+        }
+        expectations = {"GOLD": "GOLD", "GREEN": "GREEN", "AMBER": "AMBER", "RED": "RED"}
+        for supplied, expected in expectations.items():
+            with self.subTest(status=supplied):
+                state = _calculate(
+                    "AUDUSD", "H1",
+                    ("TWELVE_DATA", "CONTRACT", "AUD/USD", "REGISTERED_WITH_EVIDENCE"),
+                    (100, 1_700_000_000, 1_800_000_000, 1_800_003_600),
+                    None, ("ledger",), {**base, "lane_status": supplied},
+                )
+                self.assertEqual(state["authority_state"], expected)
 
     def test_extreme_fx_price_outlier_forces_red_authority(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

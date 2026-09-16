@@ -80,6 +80,7 @@ def ingest_staged_batch(
     outcome_facts: Mapping[str, str | int | bool],
     preserve_rejected_evidence: bool,
     before_commit: Callable[[sqlite3.Connection], None] | None = None,
+    writer_lock_timeout_seconds: float = 0.0,
 ) -> IngestionResult:
     return ingest_staged_batches(
         database_path,
@@ -90,6 +91,7 @@ def ingest_staged_batch(
         outcome_facts=outcome_facts,
         preserve_rejected_evidence=preserve_rejected_evidence,
         before_commit=before_commit,
+        writer_lock_timeout_seconds=writer_lock_timeout_seconds,
     )
 
 
@@ -103,6 +105,7 @@ def ingest_staged_batches(
     outcome_facts: Mapping[str, str | int | bool],
     preserve_rejected_evidence: bool,
     before_commit: Callable[[sqlite3.Connection], None] | None = None,
+    writer_lock_timeout_seconds: float = 0.0,
 ) -> IngestionResult:
     """Atomically admit staged chunks while retaining every raw response.
 
@@ -125,7 +128,11 @@ def ingest_staged_batches(
         "rows_inserted": 0, "rows_unchanged": 0,
         "sqlite_result_code": "NOT_STARTED", "writer_identity": None,
     }
-    with registered_writer(database_path, measurement=sqlite_write) as connection:
+    with registered_writer(
+        database_path,
+        measurement=sqlite_write,
+        lock_timeout_seconds=writer_lock_timeout_seconds,
+    ) as connection:
         apply_migrations(connection)
         if batch.bars:
             _require_registration(connection, batch.bars[0].symbol, batch.bars[0].timeframe)

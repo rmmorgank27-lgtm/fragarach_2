@@ -26,6 +26,7 @@ CONTRACT = "fragarach_ii.external_consumer_history.v1"
 INTRADAY_CONTRACT="fragarach_ii.external_consumer_history.v2"
 CATALOG_CONTRACT = "fragarach_ii.external_consumer_catalog.v2"
 ESTATE_CATALOGUE_CONTRACT = "fragarach.catalogue.v1"
+LANE_STATUS_CONTRACT = "fragarach_ii.lane_status.v1"
 SUPPORTED_TIMEFRAMES={"D1","H1","M30","M15","M5"}
 DATABASE_ENVIRONMENT_VARIABLE = "FRAGARACH_AUTHORITY_DATABASE"
 DEFAULT_DATABASE = (
@@ -49,6 +50,42 @@ def canonical_database_path() -> Path:
 
     configured = os.environ.get(DATABASE_ENVIRONMENT_VARIABLE)
     return Path(configured).expanduser().resolve() if configured else DEFAULT_DATABASE.resolve()
+
+
+def lane_status_contract() -> dict[str, object]:
+    """Return the additive four-band freshness notice for every consumer.
+
+    ``authority`` remains the legacy three-band compatibility alias. New
+    consumers must make display or admission decisions from ``lane_status``.
+    """
+
+    return {
+        "contract": LANE_STATUS_CONTRACT,
+        "unit": "eligible_completed_timeframe_boundary",
+        "states": {
+            "GOLD": {
+                "lag_completed_units": 0,
+                "meaning": "canonical edge is present at the expected completed boundary",
+            },
+            "GREEN": {
+                "lag_completed_units": "1-3",
+                "meaning": "behind the canonical edge, but within three completed timeframe units",
+            },
+            "AMBER": {
+                "lag_completed_units": "4-12",
+                "meaning": "behind by four to twelve completed timeframe units",
+            },
+            "RED": {
+                "lag_completed_units": ">=13",
+                "meaning": "behind by more than twelve units, unavailable, or blocked by integrity failure",
+            },
+        },
+        "consumer_guidance": {
+            "read": "Use lane_status for the four-band state.",
+            "legacy_authority": "authority remains GREEN for a GOLD lane so existing three-band readers continue to work.",
+            "safety_days_eligible": ["GOLD", "GREEN", "AMBER"],
+        },
+    }
 
 
 def get_history(
@@ -128,7 +165,9 @@ class HistoryService:
             raise ExternalConsumerServiceError(
                 "UNSUPPORTED_TIMEFRAME",requested_timeframe
             )
-        if requested_timeframe == "M15":
+        if requested_timeframe == "M15" and not self._has_direct_history(
+            requested_symbol, requested_timeframe
+        ):
             return self._get_synthetic_history(
                 requested_symbol, requested_timeframe,
                 consumer=consumer, evidence_requirement=evidence_requirement,
@@ -148,18 +187,37 @@ class HistoryService:
             asset_class=connection.execute("SELECT asset_class FROM instrument_registrations WHERE asset=? AND timeframe='D1'",(canonical_symbol,)).fetchone()[0]
             from .lane_commissioning import market_policy
             policy=market_policy(asset_class,requested_timeframe)
-            if policy=="INTENTIONALLY_DEFERRED":return _unavailable("INTENTIONALLY_DEFERRED",canonical_symbol,requested_timeframe,"Stock intraday authority is intentionally deferred")
+            if policy=="INTENTIONALLY_DEFERRED":
+                from .stock_cfd_mt5 import broker_stock_cfd_intraday_enabled
+                if not broker_stock_cfd_intraday_enabled(
+                    self.database_path, canonical_symbol, requested_timeframe
+                ):
+                    return _unavailable("INTENTIONALLY_DEFERRED",canonical_symbol,requested_timeframe,"Stock intraday authority is intentionally deferred")
             if connection.execute("SELECT 1 FROM evidence_lanes WHERE asset=? AND timeframe=?",(canonical_symbol,requested_timeframe)).fetchone() is None:
                 return _unavailable("TIMEFRAME_NOT_ACTIVE",canonical_symbol,requested_timeframe,f"{canonical_symbol}:{requested_timeframe} is not active")
 
             rows = connection.execute(
                 """
-                SELECT open_time_utc,open,high,low,close,volume
-                FROM bars
-                WHERE asset=? AND timeframe=?
-                ORDER BY open_time_utc
+                WITH ranked_activity AS (
+                    SELECT open_time_utc,tick_volume,real_volume,spread,
+                           activity_source_label,provider_symbol,
+                           row_number() OVER (
+                               PARTITION BY open_time_utc
+                               ORDER BY r.rowid DESC,activity_observation_id DESC
+                           ) AS rank
+                    FROM market_activity_observations a
+                    JOIN ingest_runs r ON r.ingest_run_id=a.admission_run_id
+                    WHERE a.asset=? AND a.timeframe=?
+                )
+                SELECT b.open_time_utc,b.open,b.high,b.low,b.close,b.volume,
+                       a.tick_volume,a.real_volume,a.spread,
+                       a.activity_source_label,a.provider_symbol
+                FROM bars b LEFT JOIN ranked_activity a
+                  ON a.open_time_utc=b.open_time_utc AND a.rank=1
+                WHERE b.asset=? AND b.timeframe=?
+                ORDER BY b.open_time_utc
                 """,
-                (canonical_symbol, requested_timeframe),
+                (canonical_symbol, requested_timeframe, canonical_symbol, requested_timeframe),
             ).fetchall()
             if not rows:
                 return _unavailable(
@@ -185,12 +243,15 @@ class HistoryService:
                 f"{error.code}: {error}",
             )
 
-        authority = str(truth["authority_state"])
-        reason = _authority_reason(truth) if authority == "RED" else None
+        lane_status = str(truth["authority_state"])
+        authority = _legacy_consumer_authority(lane_status)
+        reason = _authority_reason(truth) if lane_status == "RED" else None
         return {
             "contract": CONTRACT if requested_timeframe=="D1" else INTRADAY_CONTRACT,
+            "lane_status_contract": lane_status_contract(),
             "status": "AVAILABLE",
             "authority": authority,
+            "lane_status": lane_status,
             "reason": reason,
             "truth_score": truth["truth_score"],
             "CAODT": truth["caodt"],
@@ -199,17 +260,7 @@ class HistoryService:
             "first_bar": _iso_utc(rows[0][0]),
             "last_bar": _iso_utc(rows[-1][0]),
             "bar_count": len(rows),
-            "bars": [
-                {
-                    "timestamp": row[0],
-                    "open": row[1],
-                    "high": row[2],
-                    "low": row[3],
-                    "close": row[4],
-                    "volume": row[5],
-                }
-                for row in rows
-            ],
+            "bars": [_history_bar(row) for row in rows],
         }
 
     def get_history_range(
@@ -261,7 +312,9 @@ class HistoryService:
                 status="UNSUPPORTED_TIMEFRAME",
                 warnings=["TIMEFRAME_NOT_SUPPORTED"],
             )
-        if requested_timeframe == "M15":
+        if requested_timeframe == "M15" and not self._has_direct_history(
+            requested_symbol, requested_timeframe
+        ):
             return self._get_synthetic_history_range(
                 request,
                 start=start,
@@ -335,10 +388,26 @@ class HistoryService:
                     warnings=["TIMEFRAME_NOT_ACTIVE"],
                 )
             raw_rows = connection.execute(
-                """SELECT open_time_utc,close_time_utc,open,high,low,close,volume
-                   FROM bars WHERE asset=? AND timeframe=?
-                   ORDER BY open_time_utc""",
-                (canonical_symbol, requested_timeframe),
+                """
+                WITH ranked_activity AS (
+                    SELECT open_time_utc,tick_volume,real_volume,spread,
+                           activity_source_label,provider_symbol,
+                           row_number() OVER (
+                               PARTITION BY open_time_utc
+                               ORDER BY r.rowid DESC,activity_observation_id DESC
+                           ) AS rank
+                    FROM market_activity_observations a
+                    JOIN ingest_runs r ON r.ingest_run_id=a.admission_run_id
+                    WHERE a.asset=? AND a.timeframe=?
+                )
+                SELECT b.open_time_utc,b.close_time_utc,b.open,b.high,b.low,b.close,b.volume,
+                       a.tick_volume,a.real_volume,a.spread,
+                       a.activity_source_label,a.provider_symbol
+                FROM bars b LEFT JOIN ranked_activity a
+                  ON a.open_time_utc=b.open_time_utc AND a.rank=1
+                WHERE b.asset=? AND b.timeframe=? ORDER BY b.open_time_utc
+                """,
+                (canonical_symbol, requested_timeframe, canonical_symbol, requested_timeframe),
             ).fetchall()
         finally:
             connection.close()
@@ -375,6 +444,7 @@ class HistoryService:
         )
         quality_warnings: list[str] = []
         authority_state = "UNKNOWN"
+        lane_status = "UNKNOWN"
         truth_score: object = None
         try:
             truth = truth_state_for_lane(
@@ -382,9 +452,10 @@ class HistoryService:
                 symbol=canonical_symbol,
                 timeframe=requested_timeframe,
             )
-            authority_state = str(truth["authority_state"])
+            lane_status = str(truth["authority_state"])
+            authority_state = _legacy_consumer_authority(lane_status)
             truth_score = truth.get("truth_score")
-            if authority_state != "GREEN":
+            if authority_state not in {"GOLD", "GREEN"}:
                 quality_warnings.append(
                     f"AUTHORITY_STATE_{authority_state}: {_authority_reason(truth)}"
                 )
@@ -394,6 +465,7 @@ class HistoryService:
             "authority_kind": "FRAGARACH_II",
             "authority_revision": authority_revision,
             "authority_state": authority_state,
+            "lane_status": lane_status,
             "truth_score": truth_score,
             "lane_state_version": lane_state[1],
             "lane_updated_at_utc": lane_state[2],
@@ -574,8 +646,10 @@ class HistoryService:
         )
         return {
             "contract": INTRADAY_CONTRACT,
+            "lane_status_contract": lane_status_contract(),
             "status": "AVAILABLE",
             "authority": authority,
+            "lane_status": "AMBER",
             "reason": reason,
             "truth_score": None,
             "CAODT": _iso_utc(rows[-1]["timestamp"]),
@@ -609,7 +683,7 @@ class HistoryService:
             str(value).strip().upper() for value in timeframes
         } if timeframes else set(SUPPORTED_TIMEFRAMES)
         direct = tuple(
-            value for value in ("D1", "H1", "M30", "M5")
+            value for value in ("D1", "H1", "M30", "M15", "M5")
             if value in requested
         )
         lanes = []
@@ -642,7 +716,8 @@ class HistoryService:
                 {
                     "symbol": symbol,
                     "timeframe": timeframe,
-                    "authority": truth["authority_state"],
+                    "authority": _legacy_consumer_authority(str(truth["authority_state"])),
+                    "lane_status": truth["authority_state"],
                     "truth_score": truth["truth_score"],
                     "CAODT": truth["caodt"],
                     "first_bar": _iso_utc(earliest),
@@ -667,12 +742,17 @@ class HistoryService:
                         "Available", "Incomplete", "Stale",
                     }
                     or not product["observation_count"]
+                    or any(
+                        item["symbol"] == product["symbol"] and item["timeframe"] == "M15"
+                        for item in histories
+                    )
                 ):
                     continue
                 histories.append({
                     "symbol": product["symbol"],
                     "timeframe": "M15",
                     "authority": "AMBER",
+                    "lane_status": "AMBER",
                     "truth_score": None,
                     "CAODT": _iso_utc(
                         product["latest_synthetic_observation"]
@@ -697,10 +777,21 @@ class HistoryService:
             capabilities = {}
         return {
             "contract": CATALOG_CONTRACT,
+            "lane_status_contract": lane_status_contract(),
             "status": "AVAILABLE",
             "histories": histories,
             "capabilities": capabilities,
         }
+
+    def _has_direct_history(self, symbol: str, timeframe: str) -> bool:
+        connection = open_read_only(self.database_path)
+        try:
+            return connection.execute(
+                "SELECT 1 FROM bars WHERE asset=? AND timeframe=? LIMIT 1",
+                (symbol.strip().upper(), timeframe.strip().upper()),
+            ).fetchone() is not None
+        finally:
+            connection.close()
 
     def get_catalogue(self) -> dict[str, object]:
         """Project registration, lifecycle and canonical D1 availability once."""
@@ -847,6 +938,7 @@ class HistoryService:
         ).hexdigest()
         return {
             "contract": ESTATE_CATALOGUE_CONTRACT,
+            "lane_status_contract": lane_status_contract(),
             "status": "AVAILABLE",
             "catalogue_revision": revision,
             "generated_at": datetime.now(UTC).isoformat(),
@@ -931,8 +1023,10 @@ def _unavailable(
 ) -> dict[str, object]:
     return {
         "contract": CONTRACT if timeframe=="D1" else INTRADAY_CONTRACT,
+        "lane_status_contract": lane_status_contract(),
         "status": status,
         "authority": None,
+        "lane_status": None,
         "reason": reason,
         "truth_score": None,
         "CAODT": None,
@@ -966,6 +1060,12 @@ def _authority_reason(truth: dict[str, object]) -> str:
     return f"Truth Score {truth['truth_score']}"
 
 
+def _legacy_consumer_authority(lane_status: str) -> str:
+    """Keep v1 consumers that accept only GREEN compatible with Gold lanes."""
+
+    return "GREEN" if lane_status == "GOLD" else lane_status
+
+
 def _iso_utc(epoch_seconds: int) -> str:
     return datetime.fromtimestamp(epoch_seconds, UTC).isoformat()
 
@@ -982,6 +1082,7 @@ def _range_request_fields(
     return {
         "contract": HISTORY_RANGE_CONTRACT_VERSION,
         "contract_version": HISTORY_RANGE_CONTRACT_VERSION,
+        "lane_status_contract": lane_status_contract(),
         "request_identity": identity,
         "request_id": identity,
         "consumer_identity": consumer,
@@ -1038,6 +1139,22 @@ def _range_empty_response(
     }
 
 
+def _history_bar(row: object) -> dict[str, object]:
+    value = {
+        "timestamp": row[0], "open": row[1], "high": row[2],
+        "low": row[3], "close": row[4], "volume": row[5],
+    }
+    if len(row) > 6 and row[6] is not None:
+        value.update({
+            "tick_activity": row[6],
+            "tick_activity_source": row[9],
+            "tick_activity_provider_symbol": row[10],
+            "broker_reported_volume": row[7],
+            "mt5_spread": row[8],
+        })
+    return value
+
+
 def _direct_observation(
     row,
     *,
@@ -1075,7 +1192,7 @@ def _direct_observation(
             if seconds is None:
                 raise ValueError(f"unsupported completion rule: {timeframe}")
             completed = opened + seconds
-    return {
+    result = {
         "timestamp": canonical_utc(opened),
         "close_timestamp": canonical_utc(int(completed)),
         "open": row[2],
@@ -1084,6 +1201,15 @@ def _direct_observation(
         "close": row[5],
         "volume": row[6],
     }
+    if len(row) > 7 and row[7] is not None:
+        result.update({
+            "tick_activity": row[7],
+            "tick_activity_source": row[10],
+            "tick_activity_provider_symbol": row[11],
+            "broker_reported_volume": row[8],
+            "mt5_spread": row[9],
+        })
+    return result
 
 
 def _bounded_observations(

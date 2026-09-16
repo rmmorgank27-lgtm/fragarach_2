@@ -51,9 +51,11 @@ def launch_agent_definition(
 ) -> dict[str, Any]:
     executable = Path(python).expanduser().resolve()
     repo = Path(repository).expanduser().resolve()
+    user = os.environ.get("USER", "raymorgan")
     return {
         "Label": SERVICE_LABEL,
         "ProgramArguments": [
+            "/usr/bin/env",
             str(executable),
             "-m",
             "fragarach_ii.commands.replica_publisher",
@@ -66,10 +68,18 @@ def launch_agent_definition(
             "--port",
             str(port),
         ],
-        "EnvironmentVariables": {"PYTHONPATH": str(repo / "src")},
+        "EnvironmentVariables": {
+            "PYTHONPATH": str(repo / "src"),
+            "HOME": str(Path.home()),
+            "USER": user,
+            "LOGNAME": os.environ.get("LOGNAME", user),
+            "__CF_USER_TEXT_ENCODING": os.environ.get(
+                "__CF_USER_TEXT_ENCODING", f"0x{os.getuid():X}:0:0"
+            ),
+        },
         "RunAtLoad": True,
         "KeepAlive": {"SuccessfulExit": False},
-        "ProcessType": "Background",
+        "ProcessType": "Standard",
         "StandardOutPath": str(paths.stdout_log),
         "StandardErrorPath": str(paths.stderr_log),
         "ThrottleInterval": 5,

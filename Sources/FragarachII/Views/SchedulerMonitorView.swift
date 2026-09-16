@@ -27,7 +27,7 @@ struct SchedulerMetricCard: View {
         if let action { Button(action:action){content}.buttonStyle(.plain) } else { content }
     }
     private func stateColor(_ value:String)->Color {
-        switch value.uppercased() { case "HEALTHY","CURRENT","RUNNING","SUCCESS":.green;case "DEGRADED","BEHIND","WAITING","NO_NEW_DATA":.orange;case "CRITICAL","FAILED","UNAVAILABLE":.red;default:.secondary }
+        switch value.uppercased() { case "HEALTHY","CURRENT","RUNNING","SUCCESS":.green;case "DEGRADED","RECOVERING","BEHIND","WAITING","NO_NEW_DATA":.orange;case "CRITICAL","FAILED","UNAVAILABLE","STALE":.red;default:.secondary }
     }
 }
 
@@ -64,6 +64,7 @@ struct SchedulerMonitorView: View {
                         if !store.schedulerServiceRunning { Button("Restart Scheduler"){store.startScheduler()}.buttonStyle(.borderedProminent) }
                     }
                     schedulerServiceSection(snapshot)
+                    mt5BridgeSection(store.schedulerServiceStatus?.mt5Bridge)
                     m5FreshnessControls
                     queueControls(snapshot)
                     executionSection(snapshot)
@@ -209,8 +210,74 @@ struct SchedulerMonitorView: View {
                     diagnosticsButton()
                 }
             }
+            mt5BridgeSection(status.mt5Bridge).frame(maxWidth:760)
             Spacer()
         }.padding(36)
+    }
+
+    @ViewBuilder private func mt5BridgeSection(_ status:MT5BridgeMonitorStatus?)->some View {
+        GroupBox("MT5 Bridge") {
+            if let status {
+                VStack(alignment:.leading,spacing:10) {
+                    HStack(spacing:8) {
+                        Circle().fill(stateColor(status.effectiveStatus)).frame(width:9,height:9)
+                        Text(status.effectiveStatus.replacingOccurrences(of:"_",with:" ").capitalized).font(.headline)
+                        Spacer()
+                        Text("Windows watchdog · \(status.freshnessState.capitalized)").font(.caption).foregroundStyle(.secondary)
+                    }
+                    Facts([
+                        ("Bridge nodes",bridgeNodeSummary(status)),
+                        ("Bridge process",status.bridge?.status.replacingOccurrences(of:"_",with:" ").capitalized ?? "No report"),
+                        ("Report received",SchedulerFormatting.timestamp(status.receivedAtUTC)),
+                        ("Report age",status.ageSeconds.map(durationAge) ?? "—"),
+                        ("Bridge heartbeat",SchedulerFormatting.timestamp(status.bridge?.heartbeatAtUTC)),
+                        ("Watchdog",status.watchdog?.status.replacingOccurrences(of:"_",with:" ").capitalized ?? "No report"),
+                        ("Watchdog check",SchedulerFormatting.timestamp(status.watchdog?.checkedAtUTC)),
+                        ("Last result",status.bridge?.lastResult?.replacingOccurrences(of:"_",with:" ").capitalized ?? "—"),
+                        ("Queue","\(status.queue.pending) pending · \(status.queue.completed) completed · \(status.queue.expired) expired"),
+                        ("Last automatic restart",SchedulerFormatting.timestamp(status.recovery?.lastRestartAtUTC)),
+                        ("Restarts","\(status.recovery?.restartCountLastHour ?? 0) this hour · \(status.recovery?.totalRestartCount ?? 0) lifetime"),
+                        ("Last accepted request",status.bridge?.requestID ?? "—"),
+                        ("Source route",status.bridge?.sourceRoute ?? "—"),
+                    ])
+                    if let nodes=status.nodes, nodes.count > 1 {
+                        VStack(alignment:.leading,spacing:5) {
+                            Text("Bridge nodes").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                            ForEach(nodes) { node in
+                                HStack(spacing:7) {
+                                    Circle().fill(stateColor(node.effectiveStatus)).frame(width:7,height:7)
+                                    Text(node.node.nodeID).font(.caption.monospaced())
+                                    Text(node.node.role?.replacingOccurrences(of:"_",with:" ").capitalized ?? "MT5 node").font(.caption).foregroundStyle(.secondary)
+                                    Spacer()
+                                    Text(node.effectiveStatus.replacingOccurrences(of:"_",with:" ").capitalized).font(.caption.weight(.medium))
+                                }
+                            }
+                        }.padding(.top,2)
+                    }
+                    if ["UNAVAILABLE","STALE","CRITICAL"].contains(status.effectiveStatus) {
+                        Label(mt5BridgeGuidance(status),systemImage:"exclamationmark.triangle.fill")
+                            .font(.caption).foregroundStyle(.orange)
+                    } else if status.effectiveStatus == "RECOVERING" {
+                        Label("The watchdog is inside its bounded automatic recovery sequence.",systemImage:"arrow.clockwise.circle.fill")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
+                }.frame(maxWidth:.infinity,alignment:.leading).padding(.vertical,4)
+            } else {
+                Text("Awaiting the first authenticated Windows watchdog report.").foregroundStyle(.secondary).padding(.vertical,8)
+            }
+        }
+    }
+
+    private func bridgeNodeSummary(_ status:MT5BridgeMonitorStatus)->String {
+        let total=status.nodeCount ?? status.nodes?.count ?? 1
+        let healthy=status.healthyNodeCount ?? status.nodes?.filter{$0.effectiveStatus=="HEALTHY"}.count ?? (status.effectiveStatus=="HEALTHY" ? 1:0)
+        return "\(healthy) healthy of \(total)"
+    }
+
+    private func mt5BridgeGuidance(_ status:MT5BridgeMonitorStatus)->String {
+        if status.effectiveStatus == "UNAVAILABLE" { return "No authenticated watchdog report has reached Fragarach yet." }
+        if status.effectiveStatus == "STALE" { return "The Windows watchdog report is overdue; bridge health is unknown even if market data still looks current." }
+        return status.watchdog?.error ?? status.bridge?.error ?? "Automatic recovery needs operator attention."
     }
 
     @ViewBuilder private func timeTriggeredStatusView(_ status:SchedulerServiceStatus)->some View {
@@ -299,6 +366,7 @@ struct SchedulerMonitorView: View {
                         ("Queue","\(health?.actionableQueueDepth ?? 0) actionable · \(health?.blockedQueueDepth ?? 0) blocked"),
                     ])
                 }
+                mt5BridgeSection(status.mt5Bridge)
             }.padding()
         }
     }
@@ -688,7 +756,7 @@ struct SchedulerMonitorView: View {
 
     private func durationAge(_ seconds:Double)->String { let total=Int(seconds);if total >= 3600{return "\(total/3600)h \((total%3600)/60)m"};if total >= 60{return "\(total/60)m \(total%60)s"};return "\(total)s" }
     private func stateColor(_ value:String)->Color {
-        switch value.uppercased(){case "CURRENT","RUNNING","SUCCESS","HEALTHY","READY","AVAILABLE":.green;case "WAITING","WAITING FOR BUDGET","BEHIND","NO_NEW_DATA","DEGRADED","COOLING DOWN","RATE LIMITED":.orange;case "FAILED","BLOCKED","MANUAL REQUIRED","UNAVAILABLE","CREDENTIAL MISSING","AUTHENTICATION FAILED","QUOTA EXCEEDED","ENTITLEMENT BLOCKED","INVALID","EXPIRED":.red;default:.secondary}
+        switch value.uppercased(){case "CURRENT","RUNNING","SUCCESS","HEALTHY","READY","AVAILABLE":.green;case "WAITING","WAITING FOR BUDGET","BEHIND","NO_NEW_DATA","DEGRADED","RECOVERING","COOLING DOWN","RATE LIMITED":.orange;case "FAILED","BLOCKED","MANUAL REQUIRED","UNAVAILABLE","STALE","CRITICAL","CREDENTIAL MISSING","AUTHENTICATION FAILED","QUOTA EXCEEDED","ENTITLEMENT BLOCKED","INVALID","EXPIRED":.red;default:.secondary}
     }
 
     @ViewBuilder private func providerHealth(_ snapshot:SchedulerSnapshot)->some View {

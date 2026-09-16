@@ -248,7 +248,7 @@ class LaneValidationSummaryAmendmentTests(unittest.TestCase):
             )
             self.assertEqual(
                 restored.execute("SELECT count(*) FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchone()[0],
-                13,
+                14,
             )
         finally:
             restored.close()

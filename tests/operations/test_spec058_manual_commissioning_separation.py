@@ -9,12 +9,13 @@ from pathlib import Path
 
 from fragarach_ii.commissioning_authority import project_required_lanes
 from fragarach_ii.estate_truth_service import estate_truth_state
-from fragarach_ii.lane_commissioning import commissioned_lane_keys, ensure_commissioned_lane
+from fragarach_ii.lane_commissioning import commissioned_lane_keys, ensure_commissioned_lane, ensure_manual_acquisition_lane, lane_eligibility
 from fragarach_ii.market_discovery import discover_market
 from fragarach_ii.providers.instrument_search import candidate_from_dict
+from fragarach_ii.provider_facts import approve_reviewed_provider_mapping
 from fragarach_ii.scheduler_integrity import active_universe
 from fragarach_ii.scheduler_service import SchedulerJournal, run_due_acquisitions, run_operator_fetch
-from fragarach_ii.storage import initialize_database, open_read_only, register_instrument, registered_writer
+from fragarach_ii.storage import RegistrationCandidate, initialize_database, open_read_only, register_instrument, registered_writer
 
 
 NOW = datetime(2026, 7, 14, 14, 2, tzinfo=UTC)
@@ -151,3 +152,73 @@ def test_truth_presentation_has_only_four_operational_meanings() -> None:
     )
     states = {row["timeframe"]: row["operational_state"] for row in rows}
     assert states == {"D1": "Current", "H1": "Behind", "M30": "Unavailable", "M5": "Not Commissioned"}
+
+
+def test_reviewed_energy_reference_mapping_supplies_commissioning_source_nature() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        database = Path(directory) / "authority.sqlite3"
+        initialize_database(database)
+        register_instrument(
+            database,
+            RegistrationCandidate(
+                asset="USOIL", timeframe="D1", instrument_family="USOIL",
+                local_symbol="USOIL", display_name="US Oil CFD",
+                instrument_type="CFD", asset_class="ENERGY",
+                representation_type="CFD", trading_currency="USD",
+                exchange_name="OTC", provider_id=None, provider_contract=None,
+                provider_symbol=None, provider_instrument_type=None,
+                calendar_id="REGISTRY_D1_V1", calendar_version=1,
+                gap_doctrine_id="FRAGARACH_II_D1_GAP_DOCTRINE_V1",
+                gap_doctrine_version=1, underlying_reference="COMMODITY:WTI",
+            ),
+            registered_at_utc=NOW.isoformat(),
+        )
+        assert lane_eligibility(database, "USOIL", "H1") == (
+            False, "PROVIDER_SYMBOL_MAPPING_REQUIRED"
+        )
+
+        approve_reviewed_provider_mapping(
+            database,
+            canonical_symbol="USOIL",
+            provider="TWELVE_DATA",
+            provider_symbol="WTI/USD",
+            timeframe="H1",
+            asset_class="ENERGY",
+            representation_type="CFD",
+            provider_instrument_type="Energy Resource",
+            decided_at=NOW,
+        )
+
+        assert lane_eligibility(database, "USOIL", "H1") == (True, None)
+
+
+def test_existing_d1_lane_can_be_declared_manual_only() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        database = Path(directory) / "authority.sqlite3"
+        initialize_database(database)
+        register_instrument(
+            database,
+            RegistrationCandidate(
+                asset="UKOIL", timeframe="D1", instrument_family="UKOIL",
+                local_symbol="UKOIL", display_name="UK Oil CFD",
+                instrument_type="CFD", asset_class="ENERGY",
+                representation_type="CFD", trading_currency="USD",
+                exchange_name="OTC", provider_id=None, provider_contract=None,
+                provider_symbol=None, provider_instrument_type=None,
+                calendar_id="REGISTRY_D1_V1", calendar_version=1,
+                gap_doctrine_id="FRAGARACH_II_D1_GAP_DOCTRINE_V1",
+                gap_doctrine_version=1, underlying_reference="COMMODITY:BRENT",
+            ),
+            registered_at_utc=NOW.isoformat(),
+        )
+        with open_read_only(database) as connection:
+            assert ("UKOIL", "D1") in commissioned_lane_keys(connection)
+
+        assert ensure_manual_acquisition_lane(
+            database, "UKOIL", "D1", observed_at=NOW.isoformat()
+        )
+        assert not ensure_manual_acquisition_lane(
+            database, "UKOIL", "D1", observed_at=NOW.isoformat()
+        )
+        with open_read_only(database) as connection:
+            assert ("UKOIL", "D1") not in commissioned_lane_keys(connection)

@@ -1,10 +1,22 @@
 import Foundation
 
 // Keep the desktop reader pinned to the complete current authority schema.
-// Scheduler runtime control and its immutable audit trail were promoted from
-// the legacy journal into SQLite by migration 10, so they are part of the
-// database identity even though the UI does not materialise them directly.
-public let foundationTables = Set(["authority_events", "bars", "evidence_lanes", "ingest_runs", "instrument_registrations", "lane_state", "provenance", "raw_blocks", "rollup_state", "schema_migrations", "scheduler_runtime_state", "scheduler_audit_events"])
+// Scheduler runtime control, its immutable audit trail, and governed instrument
+// profiles are part of the current migrated authority database identity even
+// though the UI does not materialise every table directly.
+public let foundationTables = Set(["authority_events", "bars", "evidence_lanes", "ingest_runs", "instrument_profile_events", "instrument_registrations", "lane_state", "market_activity_observations", "provenance", "raw_blocks", "rollup_state", "schema_migrations", "scheduler_runtime_state", "scheduler_audit_events"])
+
+public struct TickActivitySummary: Equatable, Sendable {
+    public let earliestObservation: Int64?
+    public let latestObservation: Int64?
+    public let latestPriceObservation: Int64?
+    public let state: String
+    public let sourceLabel: String
+    public let provider: String?
+    public let providerSymbol: String?
+    public let backfillState: String?
+    public let backfillNextStart: String?
+}
 
 public struct ValidationSummary: Codable, Equatable, Sendable {
     public let format: String
@@ -57,6 +69,7 @@ public struct LaneRecord: Identifiable, Equatable, Sendable {
     public let earliestBar: Int64?
     public let latestBar: Int64?
     public let validation: ValidationSummary?
+    public let tickActivity: TickActivitySummary?
 }
 
 public struct OperationRecord: Identifiable, Equatable, Sendable {
@@ -311,6 +324,7 @@ public struct EstateSummary: Codable, Equatable, Sendable {
     public let missingCommissions: Int
     public let notEnabledLanes: Int?
     public let operationalCoveragePercent: Int?
+    public let goldCount: Int
     public let greenCount: Int
     public let amberCount: Int
     public let redCount: Int
@@ -325,7 +339,7 @@ public struct EstateSummary: Codable, Equatable, Sendable {
         case operationalLanes = "operational_lanes", missingCommissions = "missing_commissions"
         case notEnabledLanes = "not_enabled_lanes"
         case operationalCoveragePercent = "operational_coverage_percent"
-        case greenCount = "green_count", amberCount = "amber_count", redCount = "red_count"
+        case goldCount = "gold_count", greenCount = "green_count", amberCount = "amber_count", redCount = "red_count"
         case authorityVersion = "authority_version", generatedAt = "generated_at", aggregation
     }
 }
@@ -410,7 +424,7 @@ public struct EstateTruthLane: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
-public struct TimeframeCapability:Codable,Equatable,Sendable,Identifiable{public var id:String{timeframe};public let timeframe:String;public let policyState:String;public let authorityState:String;public let providerMappingState:String;public let provider:String?;public let providerSymbol:String?;public let providerContract:String?;public let calendarAuthority:String?;public let sessionAuthority:String?;public let entitlementState:String;public let evidenceState:String;public let validationState:String;public let truthState:String;public let servable:Bool;public let consumptionAvailable:Bool;public let automationEligible:Bool?;public let requiredOperatorAction:String?;public let initialFetchEligible:Bool;public let initialFetchBlockers:[String];public let reasonCodes:[String];public let providerCapabilities:[AcquisitionCapabilityRow]?;public let lastSuccessfulProvider:AcquisitionCapabilityLastSuccess?;enum CodingKeys:String,CodingKey{case timeframe,provider,servable;case policyState="policy_state",authorityState="authority_state",providerMappingState="provider_mapping_state",providerSymbol="provider_symbol",providerContract="provider_contract",calendarAuthority="calendar_authority",sessionAuthority="session_authority",entitlementState="entitlement_state",evidenceState="evidence_state",validationState="validation_state",truthState="truth_state",consumptionAvailable="consumption_available",automationEligible="automation_eligible",requiredOperatorAction="required_operator_action",initialFetchEligible="initial_fetch_eligible",initialFetchBlockers="initial_fetch_blockers",reasonCodes="reason_codes",providerCapabilities="provider_capabilities",lastSuccessfulProvider="last_successful_provider"}}
+public struct TimeframeCapability:Codable,Equatable,Sendable,Identifiable{public var id:String{timeframe};public let timeframe:String;public let policyState:String;public let authorityState:String;public let providerMappingState:String;public let provider:String?;public let providerSymbol:String?;public let providerContract:String?;public let calendarAuthority:String?;public let sessionAuthority:String?;public let entitlementState:String;public let evidenceState:String;public let validationState:String;public let truthState:String;public let servable:Bool;public let consumptionAvailable:Bool;public let automationEligible:Bool?;public let operatorFetchEligible:Bool?;public let requiredOperatorAction:String?;public let initialFetchEligible:Bool;public let initialFetchBlockers:[String];public let reasonCodes:[String];public let providerCapabilities:[AcquisitionCapabilityRow]?;public let lastSuccessfulProvider:AcquisitionCapabilityLastSuccess?;enum CodingKeys:String,CodingKey{case timeframe,provider,servable;case policyState="policy_state",authorityState="authority_state",providerMappingState="provider_mapping_state",providerSymbol="provider_symbol",providerContract="provider_contract",calendarAuthority="calendar_authority",sessionAuthority="session_authority",entitlementState="entitlement_state",evidenceState="evidence_state",validationState="validation_state",truthState="truth_state",consumptionAvailable="consumption_available",automationEligible="automation_eligible",operatorFetchEligible="operator_fetch_eligible",requiredOperatorAction="required_operator_action",initialFetchEligible="initial_fetch_eligible",initialFetchBlockers="initial_fetch_blockers",reasonCodes="reason_codes",providerCapabilities="provider_capabilities",lastSuccessfulProvider="last_successful_provider"}}
 public struct SymbolTimeframeCapability:Codable,Equatable,Sendable,Identifiable{public var id:String{symbol};public let symbol:String;public let assetClass:String;public let authorisedTimeframes:[String];public let declaredTimeframes:[String];public let activeTimeframes:[String];public let servableTimeframes:[String];public let intentionallyDeferredTimeframes:[String];public let blockedTimeframes:[String];public let timeframes:[TimeframeCapability];enum CodingKeys:String,CodingKey{case symbol,timeframes;case assetClass="asset_class",authorisedTimeframes="authorised_timeframes",declaredTimeframes="declared_timeframes",activeTimeframes="active_timeframes",servableTimeframes="servable_timeframes",intentionallyDeferredTimeframes="intentionally_deferred_timeframes",blockedTimeframes="blocked_timeframes"}}
 
 public struct CommissionedLaneState:Codable,Equatable,Sendable,Identifiable {
@@ -956,6 +970,92 @@ public struct SchedulerServiceDiagnostics:Codable,Equatable,Sendable {
     enum CodingKeys:String,CodingKey {case contract,checks;case generatedAt="generated_at",serviceGeneration="service_generation",activeMutation="active_mutation",mutationAgeSeconds="mutation_age_seconds",credentialsIncluded="credentials_included"}
 }
 
+public struct MT5BridgeQueueStatus:Codable,Equatable,Sendable {
+    public let pending:Int
+    public let completed:Int
+    public let responses:Int
+    public let expired:Int
+}
+
+public struct MT5BridgeRuntimeStatus:Codable,Equatable,Sendable {
+    public let status:String
+    public let heartbeatAtUTC:String?
+    public let processStartedAtUTC:String?
+    public let lastResult:String?
+    public let requestID:String?
+    public let sourceRoute:String?
+    public let error:String?
+    enum CodingKeys:String,CodingKey {case status,error;case heartbeatAtUTC="heartbeat_at_utc",processStartedAtUTC="process_started_at_utc",lastResult="last_result",requestID="request_id",sourceRoute="source_route"}
+}
+
+public struct MT5WatchdogStatus:Codable,Equatable,Sendable {
+    public let status:String
+    public let checkedAtUTC:String?
+    public let reason:String?
+    public let action:String?
+    public let heartbeatAgeSeconds:Double?
+    public let unhealthyForSeconds:Double?
+    public let error:String?
+    enum CodingKeys:String,CodingKey {case status,reason,action,error;case checkedAtUTC="checked_at_utc",heartbeatAgeSeconds="heartbeat_age_seconds",unhealthyForSeconds="unhealthy_for_seconds"}
+}
+
+public struct MT5BridgeRecoveryStatus:Codable,Equatable,Sendable {
+    public let lastRestartAtUTC:String?
+    public let restartCountLastHour:Int
+    public let totalRestartCount:Int
+    enum CodingKeys:String,CodingKey {case lastRestartAtUTC="last_restart_at_utc",restartCountLastHour="restart_count_last_hour",totalRestartCount="total_restart_count"}
+}
+
+public struct MT5BridgeNodeIdentity:Codable,Equatable,Sendable {
+    public let nodeID:String
+    public let brokerFamily:String?
+    public let terminalIdentity:String?
+    public let role:String?
+    enum CodingKeys:String,CodingKey {case nodeID="node_id",brokerFamily="broker_family",terminalIdentity="terminal_identity",role}
+}
+
+public struct MT5BridgeCatalogueStatus:Codable,Equatable,Sendable {
+    public let state:String
+    public let generatedAtUTC:String?
+    public let symbolCount:Int
+    public let authorisedCount:Int
+    enum CodingKeys:String,CodingKey {case state;case generatedAtUTC="generated_at_utc",symbolCount="symbol_count",authorisedCount="authorised_count"}
+}
+
+public struct MT5BridgeNodeStatus:Codable,Equatable,Sendable,Identifiable {
+    public var id:String { node.nodeID }
+    public let node:MT5BridgeNodeIdentity
+    public let effectiveStatus:String
+    public let freshnessState:String
+    public let receivedAtUTC:String?
+    public let reportedAtUTC:String?
+    public let ageSeconds:Double?
+    public let bridge:MT5BridgeRuntimeStatus?
+    public let watchdog:MT5WatchdogStatus?
+    public let recovery:MT5BridgeRecoveryStatus?
+    public let queue:MT5BridgeQueueStatus?
+    public let catalogue:MT5BridgeCatalogueStatus?
+    enum CodingKeys:String,CodingKey {case node,bridge,watchdog,recovery,queue,catalogue;case effectiveStatus="effective_status",freshnessState="freshness_state",receivedAtUTC="received_at_utc",reportedAtUTC="reported_at_utc",ageSeconds="age_seconds"}
+}
+
+public struct MT5BridgeMonitorStatus:Codable,Equatable,Sendable {
+    public let contract:String
+    public let effectiveStatus:String
+    public let freshnessState:String
+    public let receivedAtUTC:String?
+    public let reportedAtUTC:String?
+    public let ageSeconds:Double?
+    public let freshnessBudgetSeconds:Int
+    public let bridge:MT5BridgeRuntimeStatus?
+    public let watchdog:MT5WatchdogStatus?
+    public let recovery:MT5BridgeRecoveryStatus?
+    public let queue:MT5BridgeQueueStatus
+    public let nodes:[MT5BridgeNodeStatus]?
+    public let nodeCount:Int?
+    public let healthyNodeCount:Int?
+    enum CodingKeys:String,CodingKey {case contract,bridge,watchdog,recovery,queue,nodes;case effectiveStatus="effective_status",freshnessState="freshness_state",receivedAtUTC="received_at_utc",reportedAtUTC="reported_at_utc",ageSeconds="age_seconds",freshnessBudgetSeconds="freshness_budget_seconds",nodeCount="node_count",healthyNodeCount="healthy_node_count"}
+}
+
 public struct SchedulerServiceStatus:Codable,Equatable,Sendable {
     public let contract:String
     public let serviceState:String
@@ -998,9 +1098,10 @@ public struct SchedulerServiceStatus:Codable,Equatable,Sendable {
     public let blockedScheduleDashboard:[SchedulerUpdateRegisterLane]
     public let schedulerPolicy:String?
     public let schedulerPolicyKey:String?
+    public let mt5Bridge:MT5BridgeMonitorStatus?
     enum CodingKeys:String,CodingKey {
         case contract,installed,live,compatibility
-        case serviceState="service_state",serviceBuild="service_build",runningBuild="running_build",serviceInstance="service_instance",serviceGeneration="service_generation",serviceStartTime="service_start_time",heartbeatTime="heartbeat_time",lastSuccessfulMonitorUpdate="last_successful_monitor_update",restartCount="restart_count",lastExitReason="last_exit_reason",serviceLocation="service_location",authorityDatabase="authority_database",operationalJournal="operational_journal",automaticLoginStart="automatic_login_start",credentialSource="credential_source",activeMutation="active_mutation",lastMutation="last_mutation",mutationStatus="mutation_status",mutationStage="mutation_stage",mutationStartedAt="mutation_started_at",mutationLastProgressAt="mutation_last_progress_at",mutationCancellable="mutation_cancellable",mutationFailure="mutation_failure",reconciliationStatus="reconciliation_status",recommendedActions="recommended_actions",acquisitionOwnerActive="acquisition_owner_active",operationalHealth="operational_health",audit,schedulerMode="scheduler_mode",authorityRevision="authority_revision",authorityChangeToken="authority_change_token",nextDueCheck="next_due_check",register,scheduleDashboard="schedule_dashboard",blockedScheduleDashboard="blocked_schedule_dashboard",schedulerPolicy="scheduler_policy",schedulerPolicyKey="scheduler_policy_key"
+        case serviceState="service_state",serviceBuild="service_build",runningBuild="running_build",serviceInstance="service_instance",serviceGeneration="service_generation",serviceStartTime="service_start_time",heartbeatTime="heartbeat_time",lastSuccessfulMonitorUpdate="last_successful_monitor_update",restartCount="restart_count",lastExitReason="last_exit_reason",serviceLocation="service_location",authorityDatabase="authority_database",operationalJournal="operational_journal",automaticLoginStart="automatic_login_start",credentialSource="credential_source",activeMutation="active_mutation",lastMutation="last_mutation",mutationStatus="mutation_status",mutationStage="mutation_stage",mutationStartedAt="mutation_started_at",mutationLastProgressAt="mutation_last_progress_at",mutationCancellable="mutation_cancellable",mutationFailure="mutation_failure",reconciliationStatus="reconciliation_status",recommendedActions="recommended_actions",acquisitionOwnerActive="acquisition_owner_active",operationalHealth="operational_health",audit,schedulerMode="scheduler_mode",authorityRevision="authority_revision",authorityChangeToken="authority_change_token",nextDueCheck="next_due_check",register,scheduleDashboard="schedule_dashboard",blockedScheduleDashboard="blocked_schedule_dashboard",schedulerPolicy="scheduler_policy",schedulerPolicyKey="scheduler_policy_key",mt5Bridge="mt5_bridge"
     }
     public init(from decoder:Decoder)throws {
         let c=try decoder.container(keyedBy:CodingKeys.self)
@@ -1045,6 +1146,7 @@ public struct SchedulerServiceStatus:Codable,Equatable,Sendable {
         blockedScheduleDashboard=try c.decodeIfPresent([SchedulerUpdateRegisterLane].self,forKey:.blockedScheduleDashboard) ?? []
         schedulerPolicy=try c.decodeIfPresent(String.self,forKey:.schedulerPolicy)
         schedulerPolicyKey=try c.decodeIfPresent(String.self,forKey:.schedulerPolicyKey)
+        mt5Bridge=try c.decodeIfPresent(MT5BridgeMonitorStatus.self,forKey:.mt5Bridge)
     }
 }
 
@@ -1219,6 +1321,7 @@ public enum OperationIntent: Equatable, Sendable {
     case readEstateTruth
     case readTruth(symbol: String, timeframe: String)
     case marketHistory(symbol: String, timeframe: String, tradingDays: Int)
+    case historySummary(symbol: String)
     case resolveInstrument(query: String)
     case discoverMarket(query: String)
     case searchInstrument(query: String)

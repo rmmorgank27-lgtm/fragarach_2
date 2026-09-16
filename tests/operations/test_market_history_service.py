@@ -5,6 +5,7 @@ import io
 import json
 import tempfile
 import unittest
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from fragarach_ii.commands.get_market_history import main
@@ -87,6 +88,63 @@ class MarketHistoryServiceTests(unittest.TestCase):
                     response["Warnings"],
                     ["CONSTRUCTION_AUTHORITY_NOT_COMMISSIONED"],
                 )
+
+    def test_weekly_history_rolls_up_complete_calendar_week_from_d1(self) -> None:
+        from fragarach_ii.storage import registered_writer
+        with registered_writer(self.database) as connection:
+            values = {
+                "2026-07-06": ("1.0", "1.4", "0.9", "1.2"),
+                "2026-07-07": ("1.2", "1.5", "1.1", "1.3"),
+                "2026-07-08": ("1.3", "1.6", "1.2", "1.4"),
+                "2026-07-09": ("1.4", "1.7", "1.3", "1.5"),
+                "2026-07-10": ("1.5", "1.8", "1.4", "1.6"),
+            }
+            for day, ohlc in values.items():
+                epoch = int(datetime.fromisoformat(day).replace(tzinfo=UTC).timestamp())
+                connection.execute(
+                    "UPDATE bars SET open=?,high=?,low=?,close=? "
+                    "WHERE asset='AUDUSD' AND timeframe='D1' AND open_time_utc=?",
+                    (*ohlc, epoch),
+                )
+        before = self.database.read_bytes()
+
+        response = MarketHistoryService(self.database).get_market_history(
+            "AUDUSD", "W1", MarketHistoryWindow.last_trading_days(5)
+        )
+
+        self.assertIn(response["Status"], {"AVAILABLE", "AVAILABLE_WITH_WARNINGS"})
+        self.assertEqual(
+            response["OHLC"],
+            [{
+                "timestamp": "2026-07-06T00:00:00+00:00",
+                "open": "1.0", "high": "1.8", "low": "0.9", "close": "1.6",
+            }],
+        )
+        self.assertEqual(response["CAODT"], "2026-07-06T00:00:00+00:00")
+        self.assertEqual(self.database.read_bytes(), before)
+
+    def test_monthly_history_rolls_up_complete_month_and_excludes_partial(self) -> None:
+        database = Path(self.temporary.name) / "monthly.sqlite3"
+        days: list[str] = []
+        current = date(2026, 6, 1)
+        while current <= date(2026, 7, 10):
+            if current.isoweekday() <= 5:
+                days.append(current.isoformat())
+            current += timedelta(days=1)
+        _create_lane(database, "AUDUSD", days)
+        before = database.read_bytes()
+
+        response = MarketHistoryService(database).get_market_history(
+            "AUDUSD", "MN1", MarketHistoryWindow.last_trading_days(30)
+        )
+
+        self.assertEqual(len(response["OHLC"]), 1)
+        self.assertEqual(response["OHLC"][0]["timestamp"], "2026-06-01T00:00:00+00:00")
+        self.assertEqual(response["CAODT"], "2026-06-01T00:00:00+00:00")
+        self.assertEqual(
+            response["Warnings"].count("INCOMPLETE_DERIVED_PERIOD_EXCLUDED"), 1
+        )
+        self.assertEqual(database.read_bytes(), before)
 
     def test_cli_exposes_only_market_history_contract(self) -> None:
         output = io.StringIO()

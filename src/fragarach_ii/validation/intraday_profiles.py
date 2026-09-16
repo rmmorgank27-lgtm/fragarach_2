@@ -6,7 +6,7 @@ from datetime import UTC,datetime,timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-DURATIONS={"H1":3600,"M30":1800,"M5":300}
+DURATIONS={"H1":3600,"M30":1800,"M15":900,"M5":300}
 
 @dataclass(frozen=True,slots=True)
 class IntradayProfile:
@@ -17,6 +17,20 @@ class IntradayProfile:
 def profile_for(asset_class:str,timeframe:str)->IntradayProfile:
     asset_class=asset_class.upper();timeframe=timeframe.upper()
     if timeframe not in DURATIONS:raise ValueError(f"UNSUPPORTED_TIMEFRAME: {timeframe}")
+    if asset_class=="BROKER_INDEX_CFDS":
+        path=Path(__file__).resolve().parents[3]/"constitution"/"authorities"/"index_cfds"/"MT5_BROKER_FAMILY_INDEX_CFD_AUTHORITY_V1.json"
+        checksum=hashlib.sha256(path.read_bytes()).hexdigest()
+        return IntradayProfile(
+            asset_class,timeframe,"MT5_BROKER_INDEX_CFD_24X5_UTC_V1",
+            "MT5_BROKER_INDEX_CFD_DAILY_SESSION_V1","UTC",False,checksum,
+        )
+    if asset_class=="US_EQUITIES":
+        path=Path(__file__).resolve().parents[3]/"constitution"/"doctrines"/"US_EQUITIES_BASE_DOCTRINE_V1.md"
+        checksum=hashlib.sha256(path.read_bytes()).hexdigest()
+        return IntradayProfile(
+            asset_class,timeframe,"US_EQUITIES_D1_V1",
+            "US_EQUITIES_REGULAR_SESSION_V1","America/New_York",False,checksum,
+        )
     family={
         "FX":"fx/FX",
         "METALS":"metals/METALS",
@@ -44,7 +58,7 @@ def canonical_open(text:str,profile:IntradayProfile)->int:
 
 def is_aligned_open(epoch:int,profile:IntradayProfile)->bool:
     value=datetime.fromtimestamp(epoch,UTC)
-    if profile.continuous:return epoch%profile.seconds==0
+    if profile.continuous or profile.asset_class=="BROKER_INDEX_CFDS":return epoch%profile.seconds==0
     local=value.astimezone(ZoneInfo(profile.timezone))
     return not (local.second or local.microsecond or (local.minute*60)%profile.seconds)
 
@@ -52,6 +66,11 @@ def is_expected_open(epoch:int,profile:IntradayProfile)->bool:
     if profile.continuous:return True
     local=datetime.fromtimestamp(epoch,UTC).astimezone(ZoneInfo(profile.timezone))
     weekday=local.weekday()
+    if profile.asset_class=="BROKER_INDEX_CFDS":
+        return weekday in (0,1,2,3,4) and local.hour>=1
+    if profile.asset_class=="US_EQUITIES":
+        opened=local.hour*60+local.minute
+        return weekday in (0,1,2,3,4) and 9*60+30<=opened<16*60
     return weekday in (0,1,2,3) or (weekday==4 and local.hour<17) or (weekday==6 and local.hour>=17)
 
 def expected_opens(start:int,end_exclusive:int,profile:IntradayProfile)->tuple[int,...]:

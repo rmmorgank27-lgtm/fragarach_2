@@ -63,13 +63,15 @@ def initialize_database(database_path: str | Path) -> None:
 def registered_writer(
     database_path: str | Path,
     measurement: dict[str, object] | None = None,
+    *,
+    lock_timeout_seconds: float = 0.0,
 ) -> Iterator[sqlite3.Connection]:
     """Yield the sole mutable connection, coupled to the process-held lock."""
 
     path = Path(database_path).expanduser().resolve()
     if not path.parent.is_dir():
         raise FileNotFoundError(f"database parent directory does not exist: {path.parent}")
-    writer = WriterLock(path)
+    writer = WriterLock(path, timeout_seconds=lock_timeout_seconds)
     lock_started = time.monotonic()
     with writer:
         if measurement is not None:

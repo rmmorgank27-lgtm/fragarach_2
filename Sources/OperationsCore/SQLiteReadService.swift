@@ -28,12 +28,13 @@ public final class SQLiteReadService: @unchecked Sendable {
         let tables = Set(try strings(db, "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'"))
         guard tables == foundationTables else { throw AuthorityReadError.incompatibleDatabase("current authority table identity failed") }
         let migrations = try int(db, "SELECT count(*) FROM schema_migrations")
-        guard migrations == 10 else { throw AuthorityReadError.incompatibleDatabase("expected ten recognized migrations") }
+        guard migrations == 13 else { throw AuthorityReadError.incompatibleDatabase("expected thirteen recognized migrations") }
         let registrations = try queryRegistrations(db)
         let coverageByLane = estateTruth.map { state in
             Dictionary(uniqueKeysWithValues: state.truthMatrix.map { ($0.id, $0.truthState.coverage) })
         }
-        let lanes = try queryLanes(db, coverageByLane: coverageByLane)
+        let activity = try queryTickActivitySummaries(db, databasePath: path)
+        let lanes = try queryLanes(db, coverageByLane: coverageByLane, activityByLane: activity)
         let authorityEvents = try queryAuthorityEvents(db)
         let operations = try queryOperations(db, limit: max(1, min(operationLimit, 500)))
         return AuthoritySnapshot(databasePath: path, registrations: registrations, lanes: lanes, operations: operations, authorityEvents: authorityEvents, readAt: Date())
@@ -293,10 +294,26 @@ public final class SQLiteReadService: @unchecked Sendable {
 
     private func queryRegistrations(_ db: OpaquePointer) throws -> [InstrumentRegistrationRecord] {
         let sql = """
+        WITH ranked_provider_mapping AS (
+            SELECT json_extract(detail,'$.asset') AS asset,
+                   json_extract(detail,'$.provider') AS provider,
+                   json_extract(detail,'$.provider_contract') AS provider_contract,
+                   json_extract(detail,'$.provider_symbol') AS provider_symbol,
+                   row_number() OVER (
+                       PARTITION BY json_extract(detail,'$.asset')
+                       ORDER BY finished_at_utc DESC,ingest_run_id DESC
+                   ) AS ordinal
+            FROM ingest_runs
+            WHERE status='committed'
+              AND json_extract(detail,'$.mapping_state')='CONFIRMED_BY_VALID_EVIDENCE'
+        ), latest_provider_mapping AS (
+            SELECT asset,provider,provider_contract,provider_symbol
+            FROM ranked_provider_mapping WHERE ordinal=1
+        )
         SELECT r.asset,r.timeframe,r.display_name,r.asset_class,r.representation_type,
-               coalesce(r.provider_id,(SELECT json_extract(i.detail,'$.provider') FROM ingest_runs i WHERE i.status='committed' AND json_extract(i.detail,'$.asset')=r.asset AND json_extract(i.detail,'$.mapping_state')='CONFIRMED_BY_VALID_EVIDENCE' ORDER BY i.finished_at_utc DESC LIMIT 1),''),
-               coalesce(r.provider_contract,(SELECT json_extract(i.detail,'$.provider_contract') FROM ingest_runs i WHERE i.status='committed' AND json_extract(i.detail,'$.asset')=r.asset AND json_extract(i.detail,'$.mapping_state')='CONFIRMED_BY_VALID_EVIDENCE' ORDER BY i.finished_at_utc DESC LIMIT 1),''),
-               coalesce(r.provider_symbol,(SELECT json_extract(i.detail,'$.provider_symbol') FROM ingest_runs i WHERE i.status='committed' AND json_extract(i.detail,'$.asset')=r.asset AND json_extract(i.detail,'$.mapping_state')='CONFIRMED_BY_VALID_EVIDENCE' ORDER BY i.finished_at_utc DESC LIMIT 1),''),r.registration_status,r.registered_at_utc,
+               coalesce(r.provider_id,m.provider,''),
+               coalesce(r.provider_contract,m.provider_contract,''),
+               coalesce(r.provider_symbol,m.provider_symbol,''),r.registration_status,r.registered_at_utc,
                EXISTS(SELECT 1 FROM authority_events e
                  WHERE json_extract(e.canonical_payload,'$.body.asset')=r.asset
                  AND json_extract(e.canonical_payload,'$.body.timeframe')=r.timeframe
@@ -304,7 +321,9 @@ public final class SQLiteReadService: @unchecked Sendable {
                    OR json_extract(e.canonical_payload,'$.body.lifecycle_state') LIKE 'QUARANTINED%'
                    OR json_extract(e.canonical_payload,'$.body.lifecycle_state')='PERMANENTLY_REMOVED')
                  AND NOT EXISTS(SELECT 1 FROM authority_events successor WHERE successor.supersedes_event_id=e.authority_event_id))
-        FROM instrument_registrations r ORDER BY r.display_name,r.asset,r.timeframe
+        FROM instrument_registrations r
+        LEFT JOIN latest_provider_mapping m ON m.asset=r.asset
+        ORDER BY r.display_name,r.asset,r.timeframe
         """
         var statement: OpaquePointer?; try prepare(db,sql,&statement); defer{sqlite3_finalize(statement)}
         var result:[InstrumentRegistrationRecord]=[]
@@ -333,7 +352,7 @@ public final class SQLiteReadService: @unchecked Sendable {
         return result
     }
 
-    private func queryLanes(_ db: OpaquePointer, coverageByLane: [String: TruthCoverage]?) throws -> [LaneRecord] {
+    private func queryLanes(_ db: OpaquePointer, coverageByLane: [String: TruthCoverage]?, activityByLane: [String: TickActivitySummary]) throws -> [LaneRecord] {
         if let coverageByLane {
             let sql = """
             SELECT l.asset,l.timeframe,l.high_watermark_open_time_utc,l.state_version,
@@ -358,7 +377,8 @@ public final class SQLiteReadService: @unchecked Sendable {
                     lastIngestRunID:optionalText(statement,4),updatedAt:text(statement,5),
                     barCount:coverage?.rowCount ?? 0,
                     earliestBar:coverage.flatMap { epoch($0.earliestBar) },
-                    latestBar:highWatermark,validation:summary
+                    latestBar:highWatermark,validation:summary,
+                    tickActivity:activityByLane["\(asset):\(timeframe)"]
                 ))
             }
             return result
@@ -377,7 +397,72 @@ public final class SQLiteReadService: @unchecked Sendable {
         while sqlite3_step(statement) == SQLITE_ROW {
             let summaryText = optionalText(statement, 9)
             let summary = summaryText.flatMap { try? JSONDecoder().decode(ValidationSummary.self, from: Data($0.utf8)) }
-            result.append(LaneRecord(asset: text(statement,0), timeframe: text(statement,1), highWatermark: optionalInt(statement,2), stateVersion: Int(sqlite3_column_int64(statement,3)), lastIngestRunID: optionalText(statement,4), updatedAt: text(statement,5), barCount: Int(sqlite3_column_int64(statement,6)), earliestBar: optionalInt(statement,7), latestBar: optionalInt(statement,8), validation: summary))
+            let asset=text(statement,0),timeframe=text(statement,1)
+            result.append(LaneRecord(asset: asset, timeframe: timeframe, highWatermark: optionalInt(statement,2), stateVersion: Int(sqlite3_column_int64(statement,3)), lastIngestRunID: optionalText(statement,4), updatedAt: text(statement,5), barCount: Int(sqlite3_column_int64(statement,6)), earliestBar: optionalInt(statement,7), latestBar: optionalInt(statement,8), validation: summary, tickActivity: activityByLane["\(asset):\(timeframe)"]))
+        }
+        return result
+    }
+
+    private func queryTickActivitySummaries(_ db: OpaquePointer, databasePath: String) throws -> [String: TickActivitySummary] {
+        struct BackfillLane: Decodable {
+            let state: String?
+            let nextStart: String?
+            let plannedEnd: String?
+            enum CodingKeys: String, CodingKey {
+                case state
+                case nextStart = "next_start_utc"
+                case plannedEnd = "planned_end_utc"
+            }
+        }
+        struct BackfillState: Decodable { let lanes: [String: BackfillLane] }
+        let statePath = "\(databasePath).read-only-clients/mt5-bridge/activity-backfill/state.json"
+        let backfill = (try? Data(contentsOf: URL(fileURLWithPath: statePath)))
+            .flatMap { try? JSONDecoder().decode(BackfillState.self, from: $0) }?.lanes ?? [:]
+        let sql = """
+        SELECT l.asset,l.timeframe,
+               (SELECT min(a.open_time_utc) FROM market_activity_observations a
+                 WHERE a.asset=l.asset AND a.timeframe=l.timeframe),
+               (SELECT max(a.open_time_utc) FROM market_activity_observations a
+                 WHERE a.asset=l.asset AND a.timeframe=l.timeframe),
+               l.high_watermark_open_time_utc,
+               (SELECT a.activity_source_label FROM market_activity_observations a
+                 WHERE a.asset=l.asset AND a.timeframe=l.timeframe
+                 ORDER BY a.open_time_utc DESC,
+                          (SELECT r.rowid FROM ingest_runs r WHERE r.ingest_run_id=a.admission_run_id) DESC LIMIT 1),
+               (SELECT a.provider FROM market_activity_observations a
+                 WHERE a.asset=l.asset AND a.timeframe=l.timeframe
+                 ORDER BY a.open_time_utc DESC,
+                          (SELECT r.rowid FROM ingest_runs r WHERE r.ingest_run_id=a.admission_run_id) DESC LIMIT 1),
+               (SELECT a.provider_symbol FROM market_activity_observations a
+                 WHERE a.asset=l.asset AND a.timeframe=l.timeframe
+                 ORDER BY a.open_time_utc DESC,
+                          (SELECT r.rowid FROM ingest_runs r WHERE r.ingest_run_id=a.admission_run_id) DESC LIMIT 1)
+        FROM lane_state l
+        WHERE EXISTS (SELECT 1 FROM market_activity_observations a
+                       WHERE a.asset=l.asset AND a.timeframe=l.timeframe)
+        ORDER BY l.asset,l.timeframe
+        """
+        var statement: OpaquePointer?; try prepare(db, sql, &statement); defer { sqlite3_finalize(statement) }
+        var result: [String: TickActivitySummary] = [:]
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let asset=text(statement,0),timeframe=text(statement,1)
+            let latest=optionalInt(statement,3),latestPrice=optionalInt(statement,4)
+            let state = latest == nil ? "UNAVAILABLE" : (latest == latestPrice ? "CURRENT":"BEHIND")
+            let key="\(asset):\(timeframe)", plan=backfill[key]
+            result[key] = .init(
+                earliestObservation:optionalInt(statement,2),latestObservation:latest,
+                latestPriceObservation:latestPrice,state:state,sourceLabel:text(statement,5),
+                provider:optionalText(statement,6),providerSymbol:optionalText(statement,7),
+                backfillState:plan?.state,backfillNextStart:plan?.nextStart
+            )
+        }
+        for (key, plan) in backfill where result[key] == nil {
+            result[key] = .init(
+                earliestObservation:nil,latestObservation:nil,
+                latestPriceObservation:nil,state:"UNAVAILABLE",
+                sourceLabel:"Fusion MT5 tick activity",provider:"FUSION_MARKETS_MT5",
+                providerSymbol:nil,backfillState:plan.state,backfillNextStart:plan.nextStart
+            )
         }
         return result
     }

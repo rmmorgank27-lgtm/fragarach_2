@@ -42,6 +42,7 @@ class Spec049SchedulerServiceTests(unittest.TestCase):
             definition = launch_agent_definition(paths, python="/usr/bin/python3", repository=root)
             self.assertTrue(definition["RunAtLoad"])
             self.assertEqual(definition["KeepAlive"], {"SuccessfulExit": False})
+            self.assertEqual(definition["ProgramArguments"][:2], ["/usr/bin/env", "/usr/bin/python3"])
             self.assertEqual(definition["ProgramArguments"][-2:], ["--mode", "service-run"])
             self.assertNotIn("--monitor-only", definition["ProgramArguments"])
             serialized = plistlib.dumps(definition).decode()
@@ -51,6 +52,57 @@ class Spec049SchedulerServiceTests(unittest.TestCase):
             self.assertTrue(paths.launch_agent.exists())
             self.assertEqual(metadata["authority_database"], str(database.resolve()))
             self.assertEqual(paths.launch_agent.stat().st_mode & 0o777, 0o600)
+
+    def test_watchdog_repairs_monitor_and_escalates_persistent_scheduler_stall(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "authority.sqlite3"
+            initialize_database(database)
+            paths = self.paths(root, database)
+            runtime = PersistentSchedulerRuntime(paths, credential=None, monitor_only=True)
+            runtime._state = "RUNNING"
+            runtime._watchdog_monitor_failures = 2
+            runtime._monitor_is_responsive = lambda: False  # type: ignore[method-assign]
+            repairs: list[str] = []
+            runtime._rebuild_monitor_transport = lambda: repairs.append("repaired")  # type: ignore[method-assign]
+
+            runtime._watchdog_tick()
+
+            self.assertEqual(repairs, ["repaired"])
+            paths.status.parent.mkdir(parents=True, exist_ok=True)
+            paths.status.write_text(json.dumps({
+                "operational_health": {
+                    "overall_operational_health": "STALLED",
+                    "last_meaningful_progress_age_seconds": 900,
+                    "permitted_progress_window_seconds": 45,
+                }
+            }))
+            runtime._monitor_is_responsive = lambda: True  # type: ignore[method-assign]
+            runtime._watchdog_stall_observations = 11
+            exits: list[str] = []
+            runtime._terminate_for_recovery = lambda reason: exits.append(reason)  # type: ignore[method-assign]
+
+            runtime._watchdog_tick()
+
+            self.assertEqual(exits, ["SCHEDULER_PROGRESS_STALLED"])
+
+    def test_watchdog_gives_first_large_cycle_startup_grace(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "authority.sqlite3"
+            initialize_database(database)
+            paths = self.paths(root, database)
+            runtime = PersistentSchedulerRuntime(paths, credential=None, monitor_only=True)
+            paths.status.parent.mkdir(parents=True, exist_ok=True)
+            paths.status.write_text(json.dumps({
+                "operational_health": {
+                    "overall_operational_health": "STALLED",
+                    "last_meaningful_progress_age_seconds": None,
+                    "permitted_progress_window_seconds": 45,
+                }
+            }))
+
+            self.assertFalse(runtime._published_scheduler_is_stalled())
 
     def test_only_one_process_can_own_one_authority(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -147,7 +199,7 @@ class Spec049SchedulerServiceTests(unittest.TestCase):
             report = verify_integrity(database)
             self.assertTrue(report.ok)
             self.assertEqual(report.application_tables, APPLICATION_TABLES)
-            self.assertEqual(len(APPLICATION_TABLES), 13)
+            self.assertEqual(len(APPLICATION_TABLES), 14)
 
     def test_live_status_overlays_running_register_workers(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

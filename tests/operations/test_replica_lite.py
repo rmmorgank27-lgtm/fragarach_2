@@ -35,6 +35,7 @@ from fragarach_ii.replica_publication import (
     set_publisher_enabled,
 )
 from fragarach_ii.storage import registered_writer
+from fragarach_ii.storage import RegistrationCandidate, register_instrument
 from fragarach_ii.replica_publisher_service import _handler
 from fragarach_ii.replica_lite_daemon import LiteLifecyclePaths, launch_agent_definition
 from fragarach_ii.replica_lite_service import _handler as _lite_handler
@@ -478,6 +479,67 @@ def test_selective_active_lane_keeps_studio_instrument_identity(tmp_path: Path) 
         active = selective_active_lanes(lite)[0]
         assert active["asset_class"] == available["asset_class"]
         assert active["instrument_type"] == available["instrument_type"]
+    finally:
+        _stop(server, thread)
+
+
+def test_selective_d1_materialises_resolved_calendar_for_lite(tmp_path: Path) -> None:
+    database = tmp_path / "authority.sqlite3"
+    register_instrument(
+        database,
+        RegistrationCandidate(
+            asset="QQQ", timeframe="D1", instrument_family="NASDAQ100",
+            local_symbol="QQQ", display_name="Invesco QQQ",
+            instrument_type="ETF", asset_class="INDICES",
+            representation_type="ETF", trading_currency="USD",
+            exchange_name="NASDAQ", provider_id="TWELVE_DATA",
+            provider_contract="TWELVE_DATA_TIME_SERIES_D1_V1",
+            provider_symbol="QQQ", provider_instrument_type="ETF",
+            provider_exchange="NASDAQ", calendar_id="REGISTRY_D1_V1",
+            calendar_version=1,
+            gap_doctrine_id="FRAGARACH_II_D1_GAP_DOCTRINE_V1",
+            gap_doctrine_version=1,
+        ),
+        registered_at_utc="2026-07-11T00:00:00+00:00",
+    )
+    _create_lane(database, "QQQ", ["2026-07-09", "2026-07-10"])
+    publisher = ReplicaPaths.for_database(database, support=tmp_path / "publisher")
+    client = add_client(publisher, client_id="macbook-pro", display_name="MacBook")
+    create_full_snapshot(publisher)
+    set_publisher_enabled(publisher, True)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _handler(publisher))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    lite = LitePaths.create(tmp_path / "lite")
+    configure_lite(
+        lite, endpoint=f"http://127.0.0.1:{server.server_address[1]}",
+        client_id="macbook-pro",
+    )
+    store_client_token(lite, client["issued_token"])
+    try:
+        request_lane(lite, symbol="QQQ", timeframe="D1")
+        synced = sync_selective(
+            lite, allow_unsigned=True, allow_insecure_transport=True
+        )
+        request = synced["registry"]["requests"][0]
+        assert request["calendar_id"] == "US_EQUITIES_D1_V1"
+        result = market_history(
+            lite, symbol="QQQ", timeframe="D1",
+            start_utc="2026-07-09T00:00:00Z",
+            end_utc_exclusive="2026-07-11T00:00:00Z",
+            as_of_utc="2026-07-11T23:59:59Z",
+        )
+        assert result["status"] == "AVAILABLE_WITH_WARNINGS"
+        assert result["bar_count"] == 2
+        assert not any("COMPLETION_AUTHORITY_UNAVAILABLE" in warning
+                       for warning in result["warnings"])
+        connection = sqlite3.connect(selective_active_lanes(lite)[0]["database"])
+        try:
+            assert connection.execute(
+                "SELECT calendar_id FROM registrations WHERE symbol='QQQ'"
+            ).fetchone() == ("US_EQUITIES_D1_V1",)
+        finally:
+            connection.close()
     finally:
         _stop(server, thread)
 

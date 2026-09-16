@@ -20,6 +20,7 @@ APPLICATION_TABLES = frozenset(
         "scheduler_runtime_state",
         "scheduler_audit_events",
         "instrument_profile_events",
+        "market_activity_observations",
     }
 )
 
@@ -1180,4 +1181,185 @@ MIGRATION_11_STATEMENTS = (
 def migration_11_checksum() -> str:
     return hashlib.sha256(
         "\n-- statement --\n".join(s.strip() for s in MIGRATION_11_STATEMENTS).encode()
+    ).hexdigest()
+
+
+MIGRATION_12_NAME = "Provenance correction lookup index"
+
+# Correct-mode ingestion must find the exact event supporting the current bar
+# before appending immutable correction lineage.  The lane-only index leaves
+# SQLite scanning millions of provenance rows for a one-bar MT5 update.
+MIGRATION_12_STATEMENTS = (
+    """CREATE INDEX provenance_correction_lookup
+       ON provenance(symbol,timeframe,timestamp,ingest_run_id,merge_action,
+                     recorded_at DESC,provenance_event_id DESC)""",
+)
+
+
+def migration_12_checksum() -> str:
+    return hashlib.sha256(
+        "\n-- statement --\n".join(s.strip() for s in MIGRATION_12_STATEMENTS).encode()
+    ).hexdigest()
+
+
+MIGRATION_13_NAME = "SPEC-066 attributed market activity observations"
+
+# Activity is companion evidence.  It is deliberately separate from
+# ``bars.volume`` so broker tick counts cannot be mistaken for exchange volume
+# or silently change the authority of the canonical OHLC bar.
+MIGRATION_13_STATEMENTS = (
+    """
+    CREATE TABLE market_activity_observations (
+        activity_observation_id TEXT PRIMARY KEY CHECK (
+            length(activity_observation_id) = 64
+            AND activity_observation_id NOT GLOB '*[^0-9a-f]*'
+        ),
+        asset TEXT NOT NULL CHECK (length(asset) > 0),
+        timeframe TEXT NOT NULL CHECK (length(timeframe) > 0),
+        open_time_utc INTEGER NOT NULL,
+        tick_volume INTEGER NOT NULL CHECK (tick_volume >= 0),
+        real_volume INTEGER CHECK (real_volume IS NULL OR real_volume >= 0),
+        spread INTEGER CHECK (spread IS NULL OR spread >= 0),
+        activity_kind TEXT NOT NULL CHECK (activity_kind = 'MT5_TICK_ACTIVITY'),
+        activity_source_label TEXT NOT NULL CHECK (
+            activity_source_label = 'Fusion MT5 tick activity'
+        ),
+        provider TEXT NOT NULL CHECK (length(provider) > 0),
+        provider_symbol TEXT NOT NULL CHECK (length(provider_symbol) > 0),
+        broker_family TEXT NOT NULL CHECK (length(broker_family) > 0),
+        terminal_route TEXT NOT NULL CHECK (length(terminal_route) > 0),
+        source_route TEXT NOT NULL CHECK (length(source_route) > 0),
+        request_id TEXT NOT NULL CHECK (length(request_id) > 0),
+        response_sha256 TEXT NOT NULL CHECK (
+            length(response_sha256) = 64
+            AND response_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
+        raw_block_id TEXT NOT NULL,
+        admission_run_id TEXT NOT NULL,
+        source_row_number INTEGER NOT NULL CHECK (source_row_number > 0),
+        source_timestamp_text TEXT NOT NULL CHECK (length(source_timestamp_text) > 0),
+        timestamp_policy TEXT NOT NULL CHECK (length(timestamp_policy) > 0),
+        captured_at_utc TEXT NOT NULL,
+        admitted_at_utc TEXT NOT NULL,
+        FOREIGN KEY (asset,timeframe,open_time_utc)
+            REFERENCES bars(asset,timeframe,open_time_utc)
+            ON UPDATE RESTRICT ON DELETE RESTRICT,
+        FOREIGN KEY (raw_block_id) REFERENCES raw_blocks(raw_block_id)
+            ON UPDATE RESTRICT ON DELETE RESTRICT,
+        FOREIGN KEY (admission_run_id) REFERENCES ingest_runs(ingest_run_id)
+            ON UPDATE RESTRICT ON DELETE RESTRICT,
+        UNIQUE (response_sha256,source_row_number)
+    ) STRICT, WITHOUT ROWID
+    """,
+    """CREATE INDEX market_activity_lane_edge
+       ON market_activity_observations(asset,timeframe,open_time_utc DESC,admitted_at_utc DESC)""",
+    """
+    CREATE TRIGGER market_activity_observations_no_update
+    BEFORE UPDATE ON market_activity_observations
+    BEGIN SELECT RAISE(ABORT, 'market activity observations are immutable'); END
+    """,
+    """
+    CREATE TRIGGER market_activity_observations_no_delete
+    BEFORE DELETE ON market_activity_observations
+    BEGIN SELECT RAISE(ABORT, 'market activity observations are append-only'); END
+    """,
+)
+
+
+def migration_13_checksum() -> str:
+    return hashlib.sha256(
+        "\n-- statement --\n".join(s.strip() for s in MIGRATION_13_STATEMENTS).encode()
+    ).hexdigest()
+
+
+MIGRATION_14_NAME = "Provider-specific MT5 activity attribution"
+
+# The original companion-activity table correctly kept broker tick counts out
+# of canonical ``bars.volume`` but over-constrained its human label to Fusion.
+# Rebuild the table without changing any retained row so separately attributed
+# Eightcap observations can coexist with the original Fusion evidence.
+MIGRATION_14_STATEMENTS = (
+    "DROP TRIGGER market_activity_observations_no_update",
+    "DROP TRIGGER market_activity_observations_no_delete",
+    "DROP INDEX market_activity_lane_edge",
+    "ALTER TABLE market_activity_observations RENAME TO market_activity_observations_v13",
+    """
+    CREATE TABLE market_activity_observations (
+        activity_observation_id TEXT PRIMARY KEY CHECK (
+            length(activity_observation_id) = 64
+            AND activity_observation_id NOT GLOB '*[^0-9a-f]*'
+        ),
+        asset TEXT NOT NULL CHECK (length(asset) > 0),
+        timeframe TEXT NOT NULL CHECK (length(timeframe) > 0),
+        open_time_utc INTEGER NOT NULL,
+        tick_volume INTEGER NOT NULL CHECK (tick_volume >= 0),
+        real_volume INTEGER CHECK (real_volume IS NULL OR real_volume >= 0),
+        spread INTEGER CHECK (spread IS NULL OR spread >= 0),
+        activity_kind TEXT NOT NULL CHECK (activity_kind = 'MT5_TICK_ACTIVITY'),
+        activity_source_label TEXT NOT NULL CHECK (
+            activity_source_label IN (
+                'Fusion MT5 tick activity', 'Eightcap MT5 tick activity'
+            )
+        ),
+        provider TEXT NOT NULL CHECK (length(provider) > 0),
+        provider_symbol TEXT NOT NULL CHECK (length(provider_symbol) > 0),
+        broker_family TEXT NOT NULL CHECK (length(broker_family) > 0),
+        terminal_route TEXT NOT NULL CHECK (length(terminal_route) > 0),
+        source_route TEXT NOT NULL CHECK (length(source_route) > 0),
+        request_id TEXT NOT NULL CHECK (length(request_id) > 0),
+        response_sha256 TEXT NOT NULL CHECK (
+            length(response_sha256) = 64
+            AND response_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
+        raw_block_id TEXT NOT NULL,
+        admission_run_id TEXT NOT NULL,
+        source_row_number INTEGER NOT NULL CHECK (source_row_number > 0),
+        source_timestamp_text TEXT NOT NULL CHECK (length(source_timestamp_text) > 0),
+        timestamp_policy TEXT NOT NULL CHECK (length(timestamp_policy) > 0),
+        captured_at_utc TEXT NOT NULL,
+        admitted_at_utc TEXT NOT NULL,
+        FOREIGN KEY (asset,timeframe,open_time_utc)
+            REFERENCES bars(asset,timeframe,open_time_utc)
+            ON UPDATE RESTRICT ON DELETE RESTRICT,
+        FOREIGN KEY (raw_block_id) REFERENCES raw_blocks(raw_block_id)
+            ON UPDATE RESTRICT ON DELETE RESTRICT,
+        FOREIGN KEY (admission_run_id) REFERENCES ingest_runs(ingest_run_id)
+            ON UPDATE RESTRICT ON DELETE RESTRICT,
+        UNIQUE (response_sha256,source_row_number)
+    ) STRICT, WITHOUT ROWID
+    """,
+    """
+    INSERT INTO market_activity_observations (
+        activity_observation_id,asset,timeframe,open_time_utc,tick_volume,
+        real_volume,spread,activity_kind,activity_source_label,provider,
+        provider_symbol,broker_family,terminal_route,source_route,request_id,
+        response_sha256,raw_block_id,admission_run_id,source_row_number,
+        source_timestamp_text,timestamp_policy,captured_at_utc,admitted_at_utc
+    ) SELECT
+        activity_observation_id,asset,timeframe,open_time_utc,tick_volume,
+        real_volume,spread,activity_kind,activity_source_label,provider,
+        provider_symbol,broker_family,terminal_route,source_route,request_id,
+        response_sha256,raw_block_id,admission_run_id,source_row_number,
+        source_timestamp_text,timestamp_policy,captured_at_utc,admitted_at_utc
+    FROM market_activity_observations_v13
+    """,
+    "DROP TABLE market_activity_observations_v13",
+    """CREATE INDEX market_activity_lane_edge
+       ON market_activity_observations(asset,timeframe,open_time_utc DESC,admitted_at_utc DESC)""",
+    """
+    CREATE TRIGGER market_activity_observations_no_update
+    BEFORE UPDATE ON market_activity_observations
+    BEGIN SELECT RAISE(ABORT, 'market activity observations are immutable'); END
+    """,
+    """
+    CREATE TRIGGER market_activity_observations_no_delete
+    BEFORE DELETE ON market_activity_observations
+    BEGIN SELECT RAISE(ABORT, 'market activity observations are append-only'); END
+    """,
+)
+
+
+def migration_14_checksum() -> str:
+    return hashlib.sha256(
+        "\n-- statement --\n".join(s.strip() for s in MIGRATION_14_STATEMENTS).encode()
     ).hexdigest()

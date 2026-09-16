@@ -86,7 +86,7 @@ def test_registration_command_migrates_v6_and_preserves_fx_mapping_discovery_out
         receipt=json.loads(output.getvalue())
         assert receipt["registration_status"] in {"REGISTERED_UNMAPPED","REGISTERED_NO_EVIDENCE"}
         with open_read_only(db) as connection:
-            assert connection.execute("select max(version) from schema_migrations").fetchone()[0]==11
+            assert connection.execute("select max(version) from schema_migrations").fetchone()[0]==14
             provider,status=connection.execute("select provider_id,registration_status from instrument_registrations where asset='EURUSD'").fetchone()
         assert (provider,status)==(None,"REGISTERED_UNMAPPED") or (provider=="TWELVE_DATA" and status=="REGISTERED_NO_EVIDENCE")
 

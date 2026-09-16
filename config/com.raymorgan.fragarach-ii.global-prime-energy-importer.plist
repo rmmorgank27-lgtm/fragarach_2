@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.raymorgan.fragarach-ii.global-prime-energy-importer</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13</string>
+        <string>-m</string>
+        <string>fragarach_ii.energy_mt5_importer</string>
+        <string>--database</string>
+        <string>/Users/raymorgan/VSC/Fragarach_2/data/runtime/spec002_real_evidence_acceptance.sqlite3</string>
+        <string>--receiver-root</string>
+        <string>/Users/raymorgan/Library/Application Support/Datagather/MT5Receiver</string>
+        <string>--state</string>
+        <string>/Users/raymorgan/VSC/Fragarach_2/data/runtime/global-prime-energy-importer.json</string>
+        <string>--watch</string>
+        <string>--poll-seconds</string>
+        <string>20</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/raymorgan/VSC/Fragarach_2</string>
+    <key>EnvironmentVariables</key>
+    <dict><key>PYTHONPATH</key><string>/Users/raymorgan/VSC/Fragarach_2/src</string></dict>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <key>StandardOutPath</key><string>/Users/raymorgan/VSC/Fragarach_2/data/runtime/global-prime-energy-importer.log</string>
+    <key>StandardErrorPath</key><string>/Users/raymorgan/VSC/Fragarach_2/data/runtime/global-prime-energy-importer-error.log</string>
+</dict>
+</plist>

@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import json
 import hashlib
+import errno
 import math
+import socket
+import ssl
 import threading
 import time
 import uuid
@@ -32,10 +35,15 @@ CONFIG_PATH = Path(__file__).resolve().parents[2] / "config/providers/acquisitio
 TEMPORARY_INELIGIBILITY = {
     "RATE_BUDGET_EXHAUSTED", "ADAPTIVE_CAPACITY_RESERVED", "PROVIDER_COOLDOWN",
     "CREDENTIAL_MISSING", "AUTHENTICATION_BLOCKED", "AUTHENTICATION_FAILED",
+    # Twelve Data exposes its rate budget as credits rather than generic
+    # requests.  A consumed credit window has an exact next-release time and
+    # is therefore ordinary queue backpressure, never evidence that an
+    # approved route has disappeared.
+    "CREDIT_WINDOW",
 }
 RETRYABLE_FAILURES = {
     "TWELVEDATA_RATE_LIMIT_429", "TWELVEDATA_UPSTREAM_5XX",
-    "TWELVEDATA_TRANSPORT_FAILURE",
+    "TWELVEDATA_TRANSPORT_FAILURE", "PROVIDER_DNS_FAILURE",
 }
 EVIDENCE_FAILURES = {
     "INVALID_RESPONSE", "INVALID_CHRONOLOGY", "INVALID_OHLC",
@@ -628,6 +636,8 @@ def _routing_policy(
     policy = _routing_policy_name(asset_class, timeframe)
     if policy != "CRYPTO_INTRADAY_V1":
         return 100, policy, None
+    if profile.provider == "COINGECKO_DEX" and mapping.get("intraday_quality_preferred") is True:
+        return 0, policy, None
     if profile.provider == "BINANCE":
         return (1 if mapping.get("quote_equivalence") == "USD_USDT_CRYPTO" else 0), policy, None
     if profile.provider == "TWELVE_DATA":
@@ -1294,7 +1304,18 @@ def classify_failure(error: BaseException) -> tuple[str, str]:
     if normalized in mapping:
         return mapping[normalized], str(error)
     text = str(error).lower()
-    if isinstance(error, (TimeoutError, ConnectionError)) or "timed out" in text:
+    transport_errnos = {
+        errno.ECONNABORTED, errno.ECONNREFUSED, errno.ECONNRESET,
+        errno.EHOSTDOWN, errno.EHOSTUNREACH, errno.ENETDOWN,
+        errno.ENETRESET, errno.ENETUNREACH, errno.EPIPE,
+    }
+    if isinstance(error, socket.gaierror):
+        return "PROVIDER_DNS_FAILURE", str(error)
+    if (
+        isinstance(error, (TimeoutError, ConnectionError, ssl.SSLError))
+        or (isinstance(error, OSError) and error.errno in transport_errnos)
+        or "timed out" in text
+    ):
         return "TWELVEDATA_TRANSPORT_FAILURE", str(error)
     if "429" in text:
         return "TWELVEDATA_RATE_LIMIT_429", str(error)

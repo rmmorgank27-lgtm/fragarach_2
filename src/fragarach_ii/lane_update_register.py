@@ -17,8 +17,8 @@ from pathlib import Path
 from typing import Iterator
 
 from .freshness import (
-    assess_lane_freshness, authority_revision_for_lane, normalized_utc,
-    provider_route_revision_for_lane,
+    PROVIDER_ROUTE_REVISION_VERSION, assess_lane_freshness,
+    authority_revision_for_lane, normalized_utc, provider_route_revision_for_lane,
 )
 from .operational_schedule import schedule_for_lane
 from .scheduler_integrity import active_universe
@@ -29,6 +29,7 @@ REGISTER_CONTRACT = "fragarach_ii.lane_update_register.v1"
 REGISTER_PRIORITY_REVISION = "2"
 REGISTER_STATES = frozenset({"READY", "RETRY", "BLOCKED", "PAUSED", "RUNNING"})
 _NORMAL_STATES = ("READY", "RETRY")
+_CADENCE_SECONDS = {"M5": 300, "M30": 1800, "H1": 3600, "D1": 86400}
 
 
 def register_path(database_path: str | Path) -> Path:
@@ -80,8 +81,10 @@ class LaneUpdateRegister:
                     next_check = str(schedule["next_scheduled_acquisition"])
                     state, outcome = "READY", "MIGRATED"
                 else:
-                    next_check = None
-                    state, outcome = "BLOCKED", str(schedule.get("reason_code") or "SCHEDULE_UNAVAILABLE")
+                    # A missing schedule is an operational defect to revisit,
+                    # not authority for an unattended permanent stop.
+                    next_check = (observed + timedelta(seconds=_CADENCE_SECONDS.get(timeframe, 3600))).isoformat()
+                    state, outcome = "RETRY", "AUTO_PROVIDER_CYCLE:" + str(schedule.get("reason_code") or "SCHEDULE_UNAVAILABLE")
                 rows.append({
                     "asset": symbol,
                     "timeframe": timeframe,
@@ -365,6 +368,36 @@ class LaneUpdateRegister:
                 raise
         return int(cursor.rowcount)
 
+    def release_legacy_dns_blocks(self, *, at: datetime | None = None) -> int:
+        """Requeue resolver failures recorded by older builds as programming defects.
+
+        The predicate is deliberately narrow: unrelated local programming
+        blocks remain fail-closed for operator review.
+        """
+        observed = normalized_utc(at).isoformat()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = connection.execute(
+                    """UPDATE lane_update_register
+                       SET state='RETRY', next_check_at_utc=?, retry_not_before_utc=?,
+                           last_outcome='PROVIDER_DNS_FAILURE; legacy block requeued automatically',
+                           retry_count=retry_count+1, updated_at_utc=?,
+                           lane_state_version=lane_state_version+1
+                       WHERE state='BLOCKED'
+                         AND upper(coalesce(last_outcome, '')) LIKE '%LOCAL_PROGRAMMING_ERROR%'
+                         AND lower(coalesce(last_outcome, '')) LIKE '%underlying_exception=gaierror:%'""",
+                    (observed, observed, observed),
+                )
+                if cursor.rowcount:
+                    self._set_meta(connection, "legacy_dns_blocks_released_at_utc", observed)
+                    self._set_meta(connection, "legacy_dns_blocks_released_count", str(cursor.rowcount))
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+        return int(cursor.rowcount)
+
     def refresh_provider_route_revisions(
         self, *, at: datetime | None = None, reason: str = "OPERATOR_REVIEW",
     ) -> dict[str, object]:
@@ -416,6 +449,10 @@ class LaneUpdateRegister:
                 self._set_meta(
                     connection, "provider_route_revision_refresh_reason",
                     str(reason).strip() or "OPERATOR_REVIEW",
+                )
+                self._set_meta(
+                    connection, "provider_route_revision_version",
+                    str(PROVIDER_ROUTE_REVISION_VERSION),
                 )
                 connection.commit()
             except BaseException:
@@ -496,16 +533,140 @@ class LaneUpdateRegister:
         )
         return {"state": "RETRY", "retry_count": retries, "next_check_at_utc": retry_at.isoformat()}
 
-    def block(self, *, asset: str, timeframe: str, reason: str, at: datetime | None = None) -> dict[str, object]:
+    def defer_provider_handoff(
+        self,
+        *,
+        asset: str,
+        timeframe: str,
+        until: datetime,
+        reason: str,
+        at: datetime | None = None,
+    ) -> dict[str, object]:
+        """Keep a lane out of generic dispatch while its primary owns it."""
+
+        observed = normalized_utc(at)
+        deferred_until = normalized_utc(until)
+        self._update(
+            asset,
+            timeframe,
+            state="RETRY",
+            next_check_at_utc=deferred_until.isoformat(),
+            last_outcome=reason,
+            retry_not_before_utc=deferred_until.isoformat(),
+            updated_at_utc=observed.isoformat(),
+        )
+        return {"state": "RETRY", "next_check_at_utc": deferred_until.isoformat()}
+
+    def release_provider_handoff(
+        self,
+        *,
+        asset: str,
+        timeframe: str,
+        reason: str,
+        at: datetime | None = None,
+    ) -> dict[str, object]:
+        """Make the governed fallback executable after primary failure."""
+
+        observed = normalized_utc(at)
+        self._update(
+            asset,
+            timeframe,
+            state="RETRY",
+            next_check_at_utc=observed.isoformat(),
+            last_outcome=reason,
+            retry_not_before_utc=observed.isoformat(),
+            updated_at_utc=observed.isoformat(),
+        )
+        return {"state": "RETRY", "next_check_at_utc": observed.isoformat()}
+
+    def release_automation_restored_blocks(
+        self, lanes: list[tuple[str, str]], *, at: datetime | None = None,
+    ) -> int:
+        """Make only specifically reconciled legacy blocks retryable.
+
+        This is deliberately narrower than a register-wide unblock: each lane
+        must have passed the scheduler's current provider-route reconciliation.
+        """
+
+        observed = normalized_utc(at)
+        released = 0
+        for asset, timeframe in sorted(set(lanes)):
+            with self._connection() as connection:
+                row = connection.execute(
+                    "SELECT state FROM lane_update_register WHERE asset=? AND timeframe=?",
+                    (asset, timeframe),
+                ).fetchone()
+            if row is None or str(row[0]) != "BLOCKED":
+                continue
+            self.retry(
+                asset=asset, timeframe=timeframe,
+                reason="CREDIT_WINDOW_RECOVERY_RETRY_QUEUED",
+                at=observed, not_before=observed,
+            )
+            released += 1
+        return released
+
+    def block(
+        self, *, asset: str, timeframe: str, reason: str, at: datetime | None = None,
+        approved: bool = False,
+    ) -> dict[str, object]:
+        """Record an operator-approved stop, otherwise retain a cadence retry.
+
+        Provider, bridge, mapping and schedule failures are evidence for a
+        provider cycle, not permission to stop a normal market lane.  Only an
+        explicit operator decision may set ``BLOCKED``.
+        """
         observed = normalized_utc(at)
         reason = str(reason).strip()
         if not reason:
             raise ValueError("BLOCK_REASON_REQUIRED")
+        if not approved:
+            lane = timeframe.strip().upper()
+            retry_at = observed + timedelta(seconds=_CADENCE_SECONDS.get(lane, 3600))
+            with self._connection() as connection:
+                row = connection.execute(
+                    "SELECT retry_count FROM lane_update_register WHERE asset=? AND timeframe=?",
+                    (asset, timeframe),
+                ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown lane update register row: {asset}:{timeframe}")
+            retries = int(row[0]) + 1
+            self._update(
+                asset, timeframe, state="RETRY", next_check_at_utc=retry_at.isoformat(),
+                last_outcome=f"AUTO_PROVIDER_CYCLE:{reason}", retry_count=retries,
+                retry_not_before_utc=retry_at.isoformat(), updated_at_utc=observed.isoformat(),
+            )
+            return {
+                "state": "RETRY", "retry_count": retries,
+                "next_check_at_utc": retry_at.isoformat(),
+                "reason": "AUTO_PROVIDER_CYCLE",
+            }
         self._update(
             asset, timeframe, state="BLOCKED", next_check_at_utc=None,
-            last_outcome=reason, retry_not_before_utc=None, updated_at_utc=observed.isoformat(),
+            last_outcome=f"{reason}; OPERATOR_APPROVED_BLOCK", retry_not_before_utc=None,
+            updated_at_utc=observed.isoformat(),
         )
         return {"state": "BLOCKED", **_blocker_guidance(reason)}
+
+    def release_unapproved_blocks(self, *, at: datetime | None = None) -> int:
+        """Migrate legacy automatic blocks into bounded provider-cycle retries."""
+
+        observed = normalized_utc(at)
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT asset,timeframe,retry_count FROM lane_update_register "
+                "WHERE state='BLOCKED' AND upper(coalesce(last_outcome,'')) "
+                "NOT LIKE '%OPERATOR_APPROVED_BLOCK%'"
+            ).fetchall()
+        for asset, timeframe, retry_count in rows:
+            retry_at = observed + timedelta(seconds=_CADENCE_SECONDS.get(str(timeframe).upper(), 3600))
+            self._update(
+                str(asset), str(timeframe), state="RETRY", next_check_at_utc=retry_at.isoformat(),
+                last_outcome="AUTO_PROVIDER_CYCLE:LEGACY_UNAPPROVED_BLOCK_RELEASED",
+                retry_count=int(retry_count) + 1, retry_not_before_utc=retry_at.isoformat(),
+                updated_at_utc=observed.isoformat(),
+            )
+        return len(rows)
 
     def pause(self, *, asset: str, timeframe: str, at: datetime | None = None) -> None:
         self._update(asset, timeframe, state="PAUSED", updated_at_utc=normalized_utc(at).isoformat())
@@ -600,7 +761,44 @@ class LaneUpdateRegister:
                        END"""
                 )
                 self._set_meta(connection, "priority_revision", REGISTER_PRIORITY_REVISION)
+            self._migrate_provider_route_revision(connection)
             self._set_meta(connection, "contract", REGISTER_CONTRACT)
+
+    def _migrate_provider_route_revision(self, connection: sqlite3.Connection) -> None:
+        """Upgrade fingerprint metadata without changing operational lane state.
+
+        Fingerprint algorithms are implementation metadata. Accepting a new
+        algorithm version must not be reported as a material provider-route
+        change on every weekly audit. Genuine route drift remains detectable
+        after this one-time migration because later hashes use the same version.
+        """
+
+        version = str(PROVIDER_ROUTE_REVISION_VERSION)
+        if self._meta(connection, "provider_route_revision_version") == version:
+            return
+        assets = [
+            str(row[0]) for row in connection.execute(
+                "SELECT DISTINCT asset FROM lane_update_register ORDER BY asset"
+            )
+        ]
+        if assets:
+            with open_read_only(self.database_path) as authority:
+                revisions = {
+                    asset: provider_route_revision_for_lane(
+                        authority, symbol=asset, timeframe="D1",
+                    )
+                    for asset in assets
+                }
+            for asset, revision in revisions.items():
+                connection.execute(
+                    "UPDATE lane_update_register SET provider_route_revision=? WHERE asset=?",
+                    (revision, asset),
+                )
+        self._set_meta(connection, "provider_route_revision_version", version)
+        self._set_meta(
+            connection, "provider_route_revision_migrated_at_utc",
+            datetime.now(UTC).isoformat(),
+        )
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -710,7 +908,13 @@ def _blocker_guidance(value: object) -> dict[str, str]:
     """
     reason = str(value or "UNSPECIFIED_BLOCK").strip() or "UNSPECIFIED_BLOCK"
     normalized = reason.upper()
-    if "CREDENTIAL" in normalized or "AUTHENTICATION" in normalized:
+    if "PROVIDER_DNS_FAILURE" in normalized or "UNDERLYING_EXCEPTION=GAIERROR" in normalized:
+        detail = "The provider hostname could not be resolved during a transient network failure."
+        repair = "No manual repair is required; the scheduler requeues DNS failures with bounded backoff."
+    elif "CREDIT_WINDOW" in normalized or "RATE_BUDGET" in normalized or "WAITING_FOR_CAPACITY" in normalized:
+        detail = "An approved provider is temporarily at its capacity limit; the lane remains eligible."
+        repair = "No manual repair is required; the scheduler requeues this lane at the recorded capacity release."
+    elif "CREDENTIAL" in normalized or "AUTHENTICATION" in normalized:
         detail = "The approved provider credential is missing, invalid, or rejected."
         repair = "Configure and validate the provider credential; verified lanes are requeued automatically."
     elif "CALENDAR" in normalized or "SESSION" in normalized or "SCHEDULE" in normalized or "EXPECTED_EDGE" in normalized:

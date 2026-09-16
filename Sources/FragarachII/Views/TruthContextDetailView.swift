@@ -28,13 +28,13 @@ struct EstateContextDetailView: View {
                 ("Coverage", percent(hierarchy.estateSummary.coveragePercent)),
                 ("Freshness", percent(hierarchy.estateSummary.freshnessPercent))
             ]) }
-            GroupBox("Attention") { AttentionCountButton(lanes: hierarchy.estateSummary.attentionLanes) }
+            GroupBox("Truth attention") { AttentionCountButton(lanes: hierarchy.estateSummary.attentionLanes) }
             SchedulerRecentEventsView(snapshot:scheduler)
             GroupBox("Aggregation") { Facts([("Truth", estate.estateSummary.aggregation.truthScore), ("Authority", estate.estateSummary.aggregation.authorityState), ("CAODT", estate.estateSummary.aggregation.caodt)]) }
         }.padding()
     }
 
-    private func score(_ summary: EstateGroupSummary) -> some View { VStack(alignment:.trailing){Text(summary.truthScore.map(String.init) ?? "—").font(.system(size:36,weight:.semibold,design:.rounded));Label(summary.authorityState,systemImage:"circle.fill").foregroundStyle(TruthPresentation.color(summary.authorityState))} }
+    private func score(_ summary: EstateGroupSummary) -> some View { VStack(alignment:.trailing){Text(summary.truthScore.map(String.init) ?? "—").font(.system(size:36,weight:.semibold,design:.rounded));HStack(spacing:5){TruthStateMark(state:summary.authorityState,size:14);Text(summary.authorityState)}.foregroundStyle(TruthPresentation.color(summary.authorityState))} }
     private func percent(_ value: Int?) -> String { value.map { "\($0)%" } ?? "Not measured" }
 }
 
@@ -48,12 +48,12 @@ struct GroupContextDetailView: View {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading) { Text(title).font(.largeTitle);Text(subtitle).foregroundStyle(.secondary) }
                 Spacer()
-                VStack(alignment:.trailing){Text(summary.truthScore.map(String.init) ?? "—").font(.system(size:36,weight:.semibold,design:.rounded));Label(summary.authorityState,systemImage:"circle.fill").foregroundStyle(TruthPresentation.color(summary.authorityState))}
+                VStack(alignment:.trailing){Text(summary.truthScore.map(String.init) ?? "—").font(.system(size:36,weight:.semibold,design:.rounded));HStack(spacing:5){TruthStateMark(state:summary.authorityState,size:14);Text(summary.authorityState)}.foregroundStyle(TruthPresentation.color(summary.authorityState))}
             }
             GroupBox("Operational health") { Facts([("Symbols", "\(summary.symbolCount)"), ("Healthy", "\(summary.healthyCount)"), ("Critical", "\(summary.criticalCount)"), ("Coverage", percent(summary.coveragePercent)), ("Freshness", percent(summary.freshnessPercent)), ("CAODT", TruthPresentation.text(summary.caodt))]) }
-            GroupBox("Attention") { AttentionCountButton(lanes: summary.attentionLanes) }
-            GroupBox("Attention symbols") {
-                if summary.attentionSymbols.isEmpty { Text("No symbols currently require attention.").foregroundStyle(.secondary).frame(maxWidth:.infinity,alignment:.leading).padding(.vertical,6) }
+            GroupBox("Truth attention") { AttentionCountButton(lanes: summary.attentionLanes) }
+            GroupBox("Truth-attention symbols") {
+                if summary.attentionSymbols.isEmpty { Text("No symbols currently have an Amber truth assessment.").foregroundStyle(.secondary).frame(maxWidth:.infinity,alignment:.leading).padding(.vertical,6) }
                 else { Text(summary.attentionSymbols.joined(separator: ", ")).textSelection(.enabled).frame(maxWidth:.infinity,alignment:.leading).padding(.vertical,6) }
             }
             GroupBox("Provider summary") { Facts([("Providers", summary.providers.isEmpty ? "Provider Mapping Required" : summary.providers.joined(separator: ", ")), ("Provider count", "\(summary.providers.count)")]) }

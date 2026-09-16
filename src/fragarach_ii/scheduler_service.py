@@ -28,7 +28,7 @@ from .freshness import (
 from .history_depth import governed_d1_initial_start
 from .lane_freshness_service import lane_freshness_report
 from .operational_schedule import latest_closed_session_date, schedule_for_lane
-from .lane_update_register import LaneUpdateRegister, REGISTER_CONTRACT
+from .lane_update_register import LaneUpdateRegister, REGISTER_CONTRACT, register_path
 from .estate_audit import audit_status, run_estate_audit, weekly_audit_due
 from .acquisition_orchestrator import (
     acquisition_capability_projection,
@@ -88,6 +88,7 @@ from .adaptive_scheduler import (
     time_triggered_pacing,
 )
 from .commissioning_authority import (
+    displayed_timeframes,
     operational_market_rank,
     project_required_lanes,
     required_timeframes,
@@ -119,6 +120,8 @@ MANUAL_RECONCILIATION_OUTCOMES = {
     "REQUEST_DISMISSED",
 }
 RECONCILABLE_REQUEST_STATES = ACTIONABLE_REQUEST_STATES | {"Waiting"}
+_CREDIT_WINDOW_RECOVERY_REVISION = 1
+_CREDIT_WINDOW_REGISTER_RECOVERY_REVISION = 1
 
 # A full scheduler snapshot reconciles the estate and executes SQLite JSON
 # projections.  It is intentionally authoritative, but repeating it for a
@@ -741,6 +744,34 @@ def _reconcile_manual_requests_loaded(
     return {"changed": changed, "report": report}
 
 
+def _credit_window_recovery_required(journal: SchedulerJournal) -> bool:
+    """Whether this legacy journal needs its one safe capacity re-evaluation.
+
+    Earlier releases converted temporary Twelve Data credit-window exhaustion
+    into terminal manual work. Do one bounded reconciliation only when that
+    exact evidence exists in a pre-recovery journal; ordinary timed wakes keep
+    their register-only fast path.
+    """
+
+    if int(journal.data.get("credit_window_recovery_revision", 0) or 0) >= _CREDIT_WINDOW_RECOVERY_REVISION:
+        return False
+    requests = journal.data.get("manual_requests")
+    return isinstance(requests, list) and any(
+        isinstance(request, dict) and "CREDIT_WINDOW" in json.dumps(request, sort_keys=True)
+        for request in requests
+    )
+
+
+def _credit_window_register_recovery_required(journal: SchedulerJournal) -> bool:
+    if int(journal.data.get("credit_window_register_recovery_revision", 0) or 0) >= _CREDIT_WINDOW_REGISTER_RECOVERY_REVISION:
+        return False
+    return any(
+        isinstance(request, dict)
+        and request.get("reconciliation_status") == "AUTOMATION_RESTORED"
+        for request in journal.data.get("manual_requests", [])
+    )
+
+
 def _manual_capability_revision(provider_revision, profiles, provider_state, credentials, universe):
     state = {
         profile.provider: {
@@ -827,6 +858,7 @@ def _completion_edge(work, bounds, expected_edge):
 def _execution_reason_code(classification: str) -> str:
     return {
         "TWELVEDATA_TRANSPORT_FAILURE": "REQUEST_TIMEOUT",
+        "PROVIDER_DNS_FAILURE": "REQUEST_TIMEOUT",
         "TWELVEDATA_RATE_LIMIT_429": "BUDGET_UNAVAILABLE",
         "TWELVEDATA_UPSTREAM_5XX": "HTTP_ERROR",
         "TWELVEDATA_INVALID_RESPONSE": "INVALID_RESPONSE",
@@ -859,6 +891,7 @@ def _retryable_failure(classification: str) -> bool:
     return classification in {
         "TWELVEDATA_RATE_LIMIT_429", "TWELVEDATA_UPSTREAM_5XX",
         "TWELVEDATA_TRANSPORT_FAILURE",
+        "PROVIDER_DNS_FAILURE",
         "PROVIDER_D1_NOT_READY",
         "TWELVEDATA_INVALID_RESPONSE",
         "LOCAL_PARSE_ERROR", "LOCAL_ADMISSION_ERROR", "LOCAL_CANONICAL_ERROR",
@@ -874,7 +907,7 @@ def _throughput_limiter(cycle: dict[str, object]) -> str:
         return "PROVIDER_429"
     if any(item.startswith("SQLITE_") for item in domains):
         return "DATABASE"
-    if any(item in {"TWELVEDATA_UPSTREAM_5XX", "TWELVEDATA_TRANSPORT_FAILURE", "TWELVEDATA_INVALID_RESPONSE"} for item in domains):
+    if any(item in {"TWELVEDATA_UPSTREAM_5XX", "TWELVEDATA_TRANSPORT_FAILURE", "PROVIDER_DNS_FAILURE", "TWELVEDATA_INVALID_RESPONSE"} for item in domains):
         return "UPSTREAM_FAILURE"
     if any(item.startswith("LOCAL_") or item in {"PUBLICATION_ERROR", "QUEUE_COMPLETION_ERROR"} for item in domains):
         return "LOCAL_EXECUTION"
@@ -916,6 +949,11 @@ def _idle_input_revision(
             journal,
             provider_facts_path(database),
             publication_path(database),
+            # MT5 responses arrive in an authenticated sidecar inbox.  It is
+            # a scheduler input even though it is not a canonical database
+            # file: omitting it lets a live Scheduler sleep through durable
+            # broker receipts until an unrelated wake source changes.
+            Path(f"{database}.read-only-clients/mt5-bridge/inbox"),
         )
     )
 
@@ -946,6 +984,24 @@ def _authority_change_token(database_path: str | Path) -> str:
         facts = [str(value or "") for value in row]
     except (OSError, sqlite3.Error):
         facts = ["authority-unavailable"]
+    # A permanent operational stop changes what Estate Truth may claim even
+    # when canonical bytes have not changed. Claims, retries, and heartbeats
+    # remain excluded so ordinary scheduler churn does not rebuild Estate.
+    runtime_path=register_path(database)
+    if runtime_path.exists():
+        try:
+            runtime=sqlite3.connect(f"file:{runtime_path}?mode=ro",uri=True)
+            try:
+                blocked=runtime.execute(
+                    """SELECT asset,timeframe,last_outcome,updated_at_utc
+                         FROM lane_update_register WHERE state='BLOCKED'
+                         ORDER BY asset,timeframe"""
+                ).fetchall()
+            finally:
+                runtime.close()
+            facts.append(json.dumps(blocked,separators=(",",":")))
+        except sqlite3.Error:
+            facts.append("scheduler-register-unavailable")
     return hashlib.sha256("|".join(facts).encode()).hexdigest()
 
 
@@ -1057,6 +1113,7 @@ def _finish_manual_evaluation(request, provider_revision, capability_revision, e
 def _manual_temporary_block(plan, provider_state):
     temporary = {
         "RATE_BUDGET_EXHAUSTED": ("Waiting for Budget", "Waiting for local provider budget"),
+        "CREDIT_WINDOW": ("Waiting for Budget", "Waiting for provider credit window"),
         "ADAPTIVE_CAPACITY_RESERVED": ("Waiting for Budget", "Waiting for adaptive capacity"),
         "QUEUE_BANDWIDTH_EXHAUSTED": ("Waiting for Budget", "Waiting for adaptive capacity"),
         "PROVIDER_COOLDOWN": ("Cooling Down", "Provider cooldown is active"),
@@ -1760,18 +1817,41 @@ def _run_due_acquisitions_unlocked(
     credential_verified = _twelve_data_credential_is_verified(database_path, credentials)
     if credential_verified and update_register is not None:
         update_register.release_verified_credential_blocks(at=observed)
+    if update_register is not None:
+        update_register.release_legacy_dns_blocks(at=observed)
+        # The route policy is now operator-stop only.  Bring prior automatic
+        # blocks back into the normal cadence before selecting live work.
+        update_register.release_unapproved_blocks(at=observed)
     budgets = build_rate_budgets(
         profiles, journal.providers, monotonic=monotonic,
         wall_clock=(lambda: datetime.now(UTC)), credential=credential,
         sleeper=(time.sleep if acquirer is acquire_from_provider else (lambda _delay: None)),
     )
+    credit_window_recovery = time_triggered and _credit_window_recovery_required(journal)
     manual_reconciliation = (
-        {"changed": False}
-        if time_triggered else _reconcile_manual_requests_loaded(
+        _reconcile_manual_requests_loaded(
             database_path, journal, observed, credential=credential,
-            trigger="DISPATCH", profiles=profiles, budgets=budgets,
+            trigger="CREDIT_WINDOW_RECOVERY" if credit_window_recovery else "DISPATCH",
+            profiles=profiles, budgets=budgets,
         )
+        if (not time_triggered or credit_window_recovery) else {"changed": False}
     )
+    if credit_window_recovery:
+        journal.data["credit_window_recovery_revision"] = _CREDIT_WINDOW_RECOVERY_REVISION
+        manual_reconciliation["changed"] = True
+    if time_triggered and update_register is not None and _credit_window_register_recovery_required(journal):
+        restored_lanes = [
+            (str(request.get("symbol")), str(request.get("timeframe")))
+            for request in journal.data.get("manual_requests", [])
+            if isinstance(request, dict)
+            and request.get("reconciliation_status") == "AUTOMATION_RESTORED"
+            and request.get("symbol") and request.get("timeframe")
+        ]
+        manual_reconciliation["credit_window_blocks_released"] = update_register.release_automation_restored_blocks(
+            restored_lanes, at=observed,
+        )
+        journal.data["credit_window_register_recovery_revision"] = _CREDIT_WINDOW_REGISTER_RECOVERY_REVISION
+        manual_reconciliation["changed"] = True
     if manual_reconciliation["changed"]:
         journal.save()
     scheduled_demand = (
@@ -2679,6 +2759,7 @@ def _run_due_acquisitions_unlocked(
                         )
                         journal.providers.setdefault(provider, {})["last_429_at"] = budget_state.get("last_429_at")
                     if classification.startswith("TWELVEDATA_") or classification in {
+                        "PROVIDER_DNS_FAILURE",
                         "CREDENTIAL_MISSING", "AUTHENTICATION_FAILED", "QUOTA_EXCEEDED",
                         "ENTITLEMENT_BLOCKED",
                     }:
@@ -3072,6 +3153,125 @@ class SchedulerService:
             self.credential = self.credential_provider()
         return self.credential
 
+    def _admit_mt5_receipts(self) -> dict[str, int]:
+        """Drain bridge transport receipts before selecting provider work."""
+
+        from .mt5_bridge_queue import drain_received_responses
+
+        support = Path(f"{Path(self.database_path).expanduser().resolve()}.read-only-clients")
+        return drain_received_responses(self.database_path, support)
+
+    def _queue_mt5_primary_lanes(self, *, at: datetime) -> dict[str, object]:
+        """Send broker-primary work and gate generic providers until failure.
+
+        The bridge is asynchronous: a fulfilled response, not queue admission,
+        advances the canonical edge.  While a healthy bridge owns a request we
+        defer only that lane to its next standard boundary.  If the bridge is
+        not healthy we leave the lane available for Twelve Data's normal
+        fallback selection instead of creating an automatic block.
+        """
+
+        from .mt5_bridge_health import bridge_health_status
+        from .mt5_bridge_requests import enqueue_due_requests, fail_pending_primary_requests
+
+        health = bridge_health_status(self.database_path, now=at)
+        if health.get("effective_status") != "HEALTHY":
+            support = Path(f"{Path(self.database_path).expanduser().resolve()}.read-only-clients")
+            failed = fail_pending_primary_requests(
+                self.database_path,
+                support,
+                reason=f"MT5_BRIDGE_HEALTH_{health.get('effective_status')}",
+                at=at,
+            )
+            register = LaneUpdateRegister(self.database_path)
+            for grant in failed:
+                symbol, _, timeframe = str(grant.get("lane") or "").partition(":")
+                if not symbol or not timeframe:
+                    continue
+                try:
+                    register.release_provider_handoff(
+                        asset=symbol,
+                        timeframe=timeframe,
+                        reason=str(grant.get("reason") or "MT5_BRIDGE_FAILURE_FALLBACK"),
+                        at=at,
+                    )
+                except (KeyError, ValueError, sqlite3.Error):
+                    continue
+            return {
+                "status": "FALLBACK_AVAILABLE",
+                "bridge": health.get("effective_status"),
+                "failed": failed,
+                "queued": [],
+            }
+        support = Path(f"{Path(self.database_path).expanduser().resolve()}.read-only-clients")
+        try:
+            report = enqueue_due_requests(
+                self.database_path,
+                support,
+                support / "mt5-bridge" / "scheduler-state.json",
+                at=at,
+            )
+        except (OSError, RuntimeError, ValueError, sqlite3.Error) as error:
+            return {"status": "FALLBACK_AVAILABLE", "bridge": "QUEUE_ERROR", "detail": str(error), "queued": []}
+        register = LaneUpdateRegister(self.database_path)
+        for item in [*report.get("pending", []), *report.get("queued", [])]:
+            if not isinstance(item, dict) or not isinstance(item.get("lane"), str):
+                continue
+            symbol, separator, timeframe = item["lane"].partition(":")
+            if not separator:
+                continue
+            try:
+                expires = datetime.fromisoformat(
+                    str(item.get("expires_at_utc")).replace("Z", "+00:00")
+                )
+                register.defer_provider_handoff(
+                    asset=symbol,
+                    timeframe=timeframe,
+                    until=expires,
+                    reason=f"MT5_BRIDGE_PRIMARY_PENDING:{item.get('request_id')}",
+                    at=at,
+                )
+            except (KeyError, TypeError, ValueError, sqlite3.Error):
+                continue
+        for grant in report.get("fallback_grants", []):
+            symbol, separator, timeframe = str(grant.get("lane") or "").partition(":")
+            if not separator:
+                continue
+            try:
+                register.release_provider_handoff(
+                    asset=symbol,
+                    timeframe=timeframe,
+                    reason=str(grant.get("reason") or "MT5_BRIDGE_FAILURE_FALLBACK"),
+                    at=at,
+                )
+            except (KeyError, ValueError, sqlite3.Error):
+                continue
+        return report
+
+    def _queue_mt5_activity_backfill(self) -> dict[str, object]:
+        """Offer one history chunk only after ordinary MT5 work is queued."""
+
+        from .mt5_tick_activity import queue_activity_backfill_requests
+
+        support = Path(f"{Path(self.database_path).expanduser().resolve()}.read-only-clients")
+        try:
+            return queue_activity_backfill_requests(
+                self.database_path, support, max_requests=1,
+            )
+        except (OSError, RuntimeError, ValueError, sqlite3.Error) as error:
+            return {"status": "BACKFILL_QUEUE_ERROR", "detail": str(error), "queued": []}
+
+    def _queue_mt5_continuous_activity(self, *, at: datetime) -> dict[str, object]:
+        from .mt5_tick_activity import queue_continuous_activity_requests
+
+        support = Path(f"{Path(self.database_path).expanduser().resolve()}.read-only-clients")
+        try:
+            return queue_continuous_activity_requests(
+                self.database_path, support, at=at,
+            )
+        except (OSError, RuntimeError, ValueError, sqlite3.Error) as error:
+            return {"status": "ACTIVITY_QUEUE_ERROR", "detail": str(error), "queued": []}
+
     def run_forever(self, emit: Callable[[dict[str, object]], None]) -> None:
         # Dispatch leads monitoring.  A full estate/status projection can take
         # materially longer than a scheduler cadence on a large estate, so it
@@ -3112,6 +3312,22 @@ class SchedulerService:
                 run_estate_audit(
                     self.database_path, at=self.clock(), trigger="WEEKLY_MAINTENANCE",
                 )
+            # MT5 responses are received by the non-authoritative HTTP
+            # publisher, then admitted here before provider workers start.
+            receipts = self._admit_mt5_receipts()
+            if receipts["received"]:
+                # Admission is bounded, so drain the next durable receipt
+                # batch before starting unrelated provider work.  This keeps
+                # the transport inbox from growing while canonical evidence
+                # is waiting for the Scheduler's sole writer.
+                continue
+            # Broker-primary raw-spread lanes are handed to MT5 before the
+            # generic provider executor claims due work.  An unhealthy bridge
+            # intentionally leaves those lanes for the configured fallback.
+            mt5_cycle_at = normalized_utc(self.clock())
+            self._queue_mt5_primary_lanes(at=mt5_cycle_at)
+            self._queue_mt5_continuous_activity(at=mt5_cycle_at)
+            self._queue_mt5_activity_backfill()
             # The register-driven executor returns a compact runtime summary;
             # provider work therefore never waits behind an estate monitor
             # projection.
@@ -4077,7 +4293,13 @@ def required_set_acquisition_plan(
     observed = normalized_utc(at)
     canonical_symbol = symbol.strip().upper()
     asset_class = _asset_class(database_path, canonical_symbol)
-    required = tuple(required_timeframes(asset_class))
+    with open_read_only(database_path) as connection:
+        commissioned = commissioned_lane_keys(connection)
+    required = tuple(
+        timeframe for timeframe in displayed_timeframes(asset_class)
+        if timeframe in required_timeframes(asset_class)
+        or (canonical_symbol, timeframe) in commissioned
+    )
     journal = SchedulerJournal(database_path, journal_path)
     profiles = tuple(provider_profiles or load_provider_profiles())
     credentials = credential_map(credential)
@@ -4624,6 +4846,34 @@ def _required_set_lane_plan(
             "eligibility": "BLOCKED",
             "blocking_reason": str(error),
         }
+    from .mt5_bridge_requests import operator_bridge_route
+    bridge_support = Path(
+        f"{Path(database_path).expanduser().resolve()}.read-only-clients"
+    )
+    bridge_symbol = operator_bridge_route(
+        database_path, bridge_support, symbol=symbol, timeframe=timeframe,
+    )
+    if bridge_symbol is not None:
+        return base | {
+            "provider": "MT5_BRIDGE",
+            "provider_symbol": bridge_symbol,
+            "intent": intent,
+            "request_bounds": {"start": bounds[0], "end": bounds[1]},
+            "eligibility": "EXECUTABLE",
+            "blocking_reason": None,
+            "executable": True,
+            "providers_considered": [{
+                "provider": "MT5_BRIDGE",
+                "provider_symbol": bridge_symbol,
+                "eligible": True,
+                "mapping_status": "APPROVED_PROVIDER_ALIAS",
+                "mapping_class": "APPROVED_PROVIDER_ALIAS",
+                "fallback_rank": 0,
+                "reason": None,
+            }],
+            "estimated_request_count": 1,
+            "fallback_sequence": ["MT5_BRIDGE"],
+        }
     plan = acquisition_plan(
         database_path,
         symbol=symbol,
@@ -5005,6 +5255,31 @@ def run_operator_fetch(
             bounds = (str(resume_start), bounds[1])
         if date.fromisoformat(str(bounds[0])) > date.fromisoformat(str(bounds[1])):
             bounds = (bounds[1], bounds[1])
+    # MT5 broker-primary lanes use the sidecar queue rather than the generic
+    # HTTP acquisition worker.  The route is the live catalogue/manifest
+    # intersection; no provider identity is inferred from the registration.
+    from .mt5_bridge_requests import enqueue_operator_request
+    bridge_support = Path(
+        f"{Path(database_path).expanduser().resolve()}.read-only-clients"
+    )
+    bridge_result = enqueue_operator_request(
+        database_path,
+        bridge_support,
+        symbol=canonical_symbol,
+        timeframe=canonical_timeframe,
+        start_utc=str(bounds[0]),
+        end_utc=str(bounds[1]),
+        at=observed,
+    )
+    if bridge_result is not None:
+        return {
+            **bridge_result,
+            "canonical_edge_before": edge_before,
+            "canonical_edge_after": edge_before,
+            "expected_edge": freshness.get("expected_latest"),
+            "authority_revision": revision_before,
+            "evidence_committed": False,
+        }
     if not lane_exists:
         projection=acquisition_capability_projection(
             database_path,symbol=canonical_symbol,timeframe=canonical_timeframe,
@@ -5730,6 +6005,7 @@ def _structured_provider_result(classification: str) -> str:
         "ADAPTIVE_CAPACITY_RESERVED": "WAITING_FOR_LOCAL_BUDGET",
         "QUEUE_BANDWIDTH_EXHAUSTED": "WAITING_FOR_LOCAL_BUDGET",
         "TWELVEDATA_TRANSPORT_FAILURE": "TRANSIENT_PROVIDER_FAILURE",
+        "PROVIDER_DNS_FAILURE": "TRANSIENT_PROVIDER_FAILURE",
         "TWELVEDATA_UPSTREAM_5XX": "TRANSIENT_PROVIDER_FAILURE",
         "PROVIDER_D1_NOT_READY": "TRANSIENT_PROVIDER_FAILURE",
         "TWELVEDATA_INVALID_RESPONSE": "INVALID_EVIDENCE",

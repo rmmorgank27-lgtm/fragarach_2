@@ -6,6 +6,7 @@ import multiprocessing
 import os
 import sqlite3
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -26,6 +27,14 @@ from fragarach_ii.storage.schema import APPLICATION_TABLES
 def _attempt_writer_lock(database_path: str, result_queue: multiprocessing.Queue) -> None:
     try:
         with WriterLock(database_path):
+            result_queue.put(("acquired", None))
+    except WriterLockError as error:
+        result_queue.put(("blocked", error.owner))
+
+
+def _wait_for_writer_lock(database_path: str, result_queue: multiprocessing.Queue) -> None:
+    try:
+        with WriterLock(database_path, timeout_seconds=2.0):
             result_queue.put(("acquired", None))
     except WriterLockError as error:
         result_queue.put(("blocked", error.owner))
@@ -98,6 +107,20 @@ class StorageFoundationTestCase(unittest.TestCase):
 
         with WriterLock(self.database):
             pass
+
+    def test_writer_lock_can_wait_for_a_short_registered_write(self) -> None:
+        context = multiprocessing.get_context("spawn")
+        result_queue = context.Queue()
+        process = context.Process(
+            target=_wait_for_writer_lock,
+            args=(str(self.database), result_queue),
+        )
+        with WriterLock(self.database):
+            process.start()
+            time.sleep(0.15)
+        process.join(timeout=5)
+        self.assertEqual(process.exitcode, 0)
+        self.assertEqual(result_queue.get(timeout=1), ("acquired", None))
 
     def test_concurrent_readers_see_committed_snapshot_during_write(self) -> None:
         readers = [open_read_only(self.database) for _ in range(8)]

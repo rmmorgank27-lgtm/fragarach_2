@@ -34,6 +34,7 @@ class CalendarRuleTests(unittest.TestCase):
 
     def test_metals_good_friday_and_early_close_weekdays(self) -> None:
         calendar = self.registry.calendar_by_id("METALS_D1_V1")
+        self.assertEqual(calendar.effective_from, date(1970, 1, 1))
         expected = {
             2024: date(2024, 3, 29),
             2025: date(2025, 4, 18),

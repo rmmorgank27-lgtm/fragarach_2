@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .binance import acquire_binance
 from .coingecko import acquire_coingecko
+from .coingecko_dex import acquire_coingecko_dex
 from .twelve_data import acquire_twelve_data
 from .yahoo_finance import acquire_yahoo
 
@@ -53,5 +54,13 @@ def acquire_from_provider(
             provider_symbol=provider_symbol, from_date=from_date,
             through_date=through_date, merge_mode=merge_mode, progress=progress,
             mapping_class=mapping_class,
+        )
+    if provider == "COINGECKO_DEX":
+        return acquire_coingecko_dex(
+            database_path, asset=asset, timeframe=timeframe,
+            provider_symbol=provider_symbol, from_date=from_date,
+            through_date=through_date, merge_mode=merge_mode, progress=progress,
+            mapping_class=mapping_class,
+            api_base_url=provider_api_base_url,
         )
     raise ValueError(f"unsupported orchestrated provider: {provider}")

@@ -62,6 +62,36 @@
       "partial_current_period_behaviour": "UNPUBLISHED"
     },
     {
+      "rule_id": "MT5_BROKER_INDEX_CFD_M5_TO_M15_UTC_V1",
+      "version": 1,
+      "source_timeframe": "M5",
+      "target_timeframe": "M15",
+      "calendar": "MT5_BROKER_INDEX_CFD_24X5_UTC_V1",
+      "session_anchor": "01:00",
+      "interval_closure": "LEFT_CLOSED_RIGHT_OPEN",
+      "timezone": "UTC",
+      "required_component_count": 3,
+      "ohlc_calculation": "FIRST_OPEN_MAX_HIGH_MIN_LOW_LAST_CLOSE",
+      "volume_handling": "SUM_IF_ALL_PRESENT_ELSE_NULL",
+      "missing_component_behaviour": "INCOMPLETE_NO_PUBLICATION",
+      "partial_current_period_behaviour": "UNPUBLISHED"
+    },
+    {
+      "rule_id": "MT5_US_STOCK_CFD_M5_TO_M15_NEW_YORK_V1",
+      "version": 1,
+      "source_timeframe": "M5",
+      "target_timeframe": "M15",
+      "calendar": "US_EQUITIES_D1_V1",
+      "session_anchor": "09:30",
+      "interval_closure": "LEFT_CLOSED_RIGHT_OPEN",
+      "timezone": "America/New_York",
+      "required_component_count": 3,
+      "ohlc_calculation": "FIRST_OPEN_MAX_HIGH_MIN_LOW_LAST_CLOSE",
+      "volume_handling": "SUM_IF_ALL_PRESENT_ELSE_NULL",
+      "missing_component_behaviour": "INCOMPLETE_NO_PUBLICATION",
+      "partial_current_period_behaviour": "UNPUBLISHED"
+    },
+    {
       "rule_id": "FX_M30_TO_H2_SESSION_V1",
       "version": 1,
       "source_timeframe": "M30",
@@ -102,7 +132,26 @@
         "FX": "FX_M5_TO_M15_SESSION_V1",
         "METALS": "METALS_M5_TO_M15_SESSION_V1",
         "CRYPTO": "CRYPTO_M5_TO_M15_UTC_V1",
-        "ENERGY": "ENERGY_M5_TO_M15_SESSION_V1"
+        "ENERGY": "ENERGY_M5_TO_M15_SESSION_V1",
+        "BROKER_INDEX_CFDS": "MT5_BROKER_INDEX_CFD_M5_TO_M15_UTC_V1"
+      },
+      "authorised_consumers": [
+        "SignalBar",
+        "MorphixFC",
+        "com.raymorgan.echo",
+        "com.raymorgan.echopulse",
+        "com.raymorgan.echo.service"
+      ],
+      "status": "ACTIVE"
+    },
+    {
+      "policy_id": "XOM_FUSION_M5_TO_M15_V1",
+      "source_timeframe": "M5",
+      "target_timeframe": "M15",
+      "included_symbols": ["XOM"],
+      "excluded_markets": [],
+      "asset_class_rules": {
+        "US_EQUITIES": "MT5_US_STOCK_CFD_M5_TO_M15_NEW_YORK_V1"
       },
       "authorised_consumers": [
         "SignalBar",

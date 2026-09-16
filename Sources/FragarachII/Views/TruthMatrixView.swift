@@ -39,6 +39,7 @@ struct TruthMatrixView:View {
         GroupBox("Truth Matrix") {
             if lanes.isEmpty { ContentUnavailableView("No matching authority",systemImage:"magnifyingglass") }
             else { ScrollView([.horizontal,.vertical]) {
+                TruthMatrixLegend()
                 Grid(alignment:.leading,horizontalSpacing:8,verticalSpacing:8) {
                     GridRow { Text("Symbol").font(.caption).foregroundStyle(.secondary);ForEach(timeframes,id:\.self){Text($0).font(.caption).foregroundStyle(.secondary).frame(width:108)} }
                     Divider().gridCellUnsizedAxes(.horizontal)
@@ -58,7 +59,26 @@ struct TruthMatrixView:View {
 
 private struct TruthMatrixCell:View {
     let lane:EstateTruthLane;let operationalState:String;let isSelected:Bool;let queueUpdate:((String)->Void)?;let action:()->Void
-    var body:some View { Button(action:action){VStack(spacing:3){Text("\(lane.truthState.truthScore)").font(.headline.monospacedDigit());Text(operationalState.uppercased()).font(.caption2).lineLimit(1)}.foregroundStyle(.primary).frame(width:108,height:48).background(TruthPresentation.color(operationalState).opacity(isSelected ? 0.32:0.14),in:RoundedRectangle(cornerRadius:7)).overlay{RoundedRectangle(cornerRadius:7).stroke(isSelected ? Color.accentColor:.clear,lineWidth:2)}}.buttonStyle(.plain).contextMenu { if lane.timeframe == "M5", operationalState == "Behind" { Button("Queue M5 update now",systemImage:"play.fill"){queueUpdate?(lane.id)} } }.accessibilityLabel("\(lane.symbol) \(lane.timeframe), score \(lane.truthState.truthScore), \(operationalState)") }
+    private var visualState:String { TruthPresentation.visualState(authority:lane.truthState.authorityState,operational:operationalState) }
+    var body:some View { Button(action:action){VStack(spacing:3){HStack(spacing:5){TruthStateMark(state:visualState,size:11);Text("\(lane.truthState.truthScore)").font(.headline.monospacedDigit())};Text(operationalState.uppercased()).font(.caption2).lineLimit(1)}.foregroundStyle(.primary).frame(width:108,height:48).background(TruthPresentation.color(visualState).opacity(isSelected ? 0.32:0.14),in:RoundedRectangle(cornerRadius:7)).overlay{RoundedRectangle(cornerRadius:7).stroke(isSelected ? Color.accentColor:.clear,lineWidth:2)}}.buttonStyle(.plain).contextMenu { if lane.timeframe == "M5", operationalState == "Behind" { Button("Queue M5 update now",systemImage:"play.fill"){queueUpdate?(lane.id)} } }.accessibilityLabel("\(lane.symbol) \(lane.timeframe), score \(lane.truthState.truthScore), \(operationalState)") }
+}
+
+private struct TruthMatrixLegend: View {
+    var body: some View {
+        HStack(spacing: 12) {
+            Text("Lane state").foregroundStyle(.secondary)
+            legend("GOLD", "Excellent")
+            legend("GREEN", "Current")
+            legend("AMBER", "Action due")
+            legend("RED", "Critical")
+        }
+        .font(.caption2)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.bottom, 8)
+    }
+    private func legend(_ state: String, _ text: String) -> some View {
+        HStack(spacing: 3) { TruthStateMark(state: state, size: 10); Text(text) }
+    }
 }
 
 private struct MissingCommissionCell:View {

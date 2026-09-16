@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import errno
+import socket
+import ssl
 import plistlib
 from datetime import UTC, datetime
 from pathlib import Path
@@ -96,6 +99,9 @@ def test_provider_responses_never_mask_as_local_missing():
     assert classify_failure(AcquisitionError("RATE_LIMITED", "Twelve Data HTTP 429"))[0] == "TWELVEDATA_RATE_LIMIT_429"
     assert classify_failure(AcquisitionError("QUOTA_EXCEEDED", "credits exhausted"))[0] == "QUOTA_EXCEEDED"
     assert classify_failure(TimeoutError("provider timed out"))[0] == "TWELVEDATA_TRANSPORT_FAILURE"
+    assert classify_failure(OSError(errno.EHOSTUNREACH, "No route to host"))[0] == "TWELVEDATA_TRANSPORT_FAILURE"
+    assert classify_failure(ssl.SSLEOFError(8, "unexpected EOF"))[0] == "TWELVEDATA_TRANSPORT_FAILURE"
+    assert classify_failure(socket.gaierror(socket.EAI_NONAME, "name unavailable"))[0] == "PROVIDER_DNS_FAILURE"
 
 
 def test_provider_health_distinguishes_missing_from_remote_authentication():

@@ -10,6 +10,7 @@ from collections.abc import Callable
 from .freshness import normalized_utc
 from .storage import open_read_only
 from .truth_engine import TruthEngineError, truth_state_for_lane
+from .external_consumer_service import lane_status_contract
 
 
 AUTHORITY_CONTRACT = "fragarach_ii.operational_authority.v1"
@@ -167,6 +168,7 @@ def _response(
     historical = max(0, missing - (current or 0)) if missing is not None else None
     return {
         "contract": AUTHORITY_CONTRACT,
+        "lane_status_contract": lane_status_contract(),
         "historical_bars": [
             {
                 "open_time_utc": row[0],

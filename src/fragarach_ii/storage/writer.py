@@ -8,6 +8,7 @@ import os
 import socket
 import sys
 import threading
+import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -34,9 +35,12 @@ class WriterLockError(RuntimeError):
 class WriterLock:
     """A process-held exclusive flock with non-authoritative diagnostic metadata."""
 
-    def __init__(self, database_path: str | Path) -> None:
+    def __init__(self, database_path: str | Path, *, timeout_seconds: float = 0.0) -> None:
         self.database_path = Path(database_path).expanduser().resolve()
         self.lock_path = Path(f"{self.database_path}.writer.lock")
+        if timeout_seconds < 0:
+            raise ValueError("writer lock timeout must be non-negative")
+        self.timeout_seconds = float(timeout_seconds)
         self._file: IO[bytes] | None = None
         self._token: str | None = None
         with _LOCAL_WRITER_GUARDS_LOCK:
@@ -57,7 +61,14 @@ class WriterLock:
     def acquire(self) -> "WriterLock":
         if self.held:
             raise RuntimeError("writer lock instance is already held")
-        self._local_guard.acquire()
+        deadline = time.monotonic() + self.timeout_seconds
+        acquired_local = (
+            self._local_guard.acquire(timeout=self.timeout_seconds)
+            if self.timeout_seconds > 0
+            else self._local_guard.acquire()
+        )
+        if not acquired_local:
+            raise WriterLockError(self.lock_path)
         self._local_guard_held = True
         try:
             descriptor = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
@@ -66,14 +77,18 @@ class WriterLock:
             self._local_guard_held = False
             raise
         lock_file = os.fdopen(descriptor, "r+b", buffering=0)
-        try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            owner = self._read_metadata(lock_file)
-            lock_file.close()
-            self._local_guard.release()
-            self._local_guard_held = False
-            raise WriterLockError(self.lock_path, owner) from error
+        while True:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError as error:
+                if self.timeout_seconds <= 0 or time.monotonic() >= deadline:
+                    owner = self._read_metadata(lock_file)
+                    lock_file.close()
+                    self._local_guard.release()
+                    self._local_guard_held = False
+                    raise WriterLockError(self.lock_path, owner) from error
+                time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
 
         self._file = lock_file
         self._token = uuid.uuid4().hex

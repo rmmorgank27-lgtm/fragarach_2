@@ -25,8 +25,8 @@ class Spec025IntradayTests(unittest.TestCase):
     def tearDown(self):self.tmp.cleanup()
     def test_migration_8_preserves_v1_and_table_boundary(self):
         with open_read_only(self.db) as c:
-            self.assertEqual(c.execute("select max(version) from schema_migrations").fetchone()[0],11)
-            self.assertEqual(c.execute("select count(*) from sqlite_schema where type='table' and name not like 'sqlite_%'").fetchone()[0],13)
+            self.assertEqual(c.execute("select max(version) from schema_migrations").fetchone()[0],14)
+            self.assertEqual(c.execute("select count(*) from sqlite_schema where type='table' and name not like 'sqlite_%'").fetchone()[0],14)
         self.assertTrue(verify_integrity(self.db).ok)
     def test_policy_is_separate_from_lane_state(self):
         self.assertEqual(market_policy("US_EQUITIES","H1"),"INTENTIONALLY_DEFERRED")

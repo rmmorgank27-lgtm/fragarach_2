@@ -42,6 +42,7 @@ def ingest_manual_file(
     clock: Clock | None = None,
     before_commit: Callable[[sqlite3.Connection], None] | None = None,
     progress: Callable[[str], None] | None = None,
+    writer_lock_timeout_seconds: float = 15.0,
 ) -> IngestionResult:
     if merge_mode not in {"preserve", "correct"}:
         raise ValueError("merge mode must be 'preserve' or 'correct'")
@@ -126,6 +127,7 @@ def ingest_manual_file(
         },
         preserve_rejected_evidence=True,
         before_commit=before_commit,
+        writer_lock_timeout_seconds=writer_lock_timeout_seconds,
     )
     admission_completed = datetime.now(UTC)
     timing_trace.append(timing_record(

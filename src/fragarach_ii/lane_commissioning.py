@@ -1,13 +1,16 @@
 """Reviewed activation of core evidence lanes under the D1 identity anchor."""
 from __future__ import annotations
 from datetime import UTC,datetime
+from functools import lru_cache
+import hashlib
+import json
 from pathlib import Path
-from .commissioning_authority import ALL_TIMEFRAMES,commissioning_policy
+from .commissioning_authority import SUPPORTED_TIMEFRAMES,commissioning_policy
 from .market_registry import load_registry
 from .storage import AuthorityEventManifest,append_authority_event,open_read_only,registered_writer,transaction
 from .storage.migrations import apply_migrations
 
-CORE=set(ALL_TIMEFRAMES)
+CORE=set(SUPPORTED_TIMEFRAMES)
 STOCK_CLASSES={"US_EQUITIES","UK_EQUITIES","GERMAN_EQUITIES","AUSTRALIAN_EQUITIES","STOCK","STOCKS"}
 STOCK_D1_AUTHORITIES={"US_EQUITIES":"US_EQUITIES_D1_AUTHORITY_V1","AUSTRALIAN_EQUITIES":"AUSTRALIAN_EQUITIES_D1_AUTHORITY_V1","UK_EQUITIES":"UK_EQUITIES_D1_AUTHORITY_V1"}
 STOCK_D1_CALENDARS={"US_EQUITIES":"US_EQUITIES_D1_V1","AUSTRALIAN_EQUITIES":"AUSTRALIAN_EQUITIES_D1_V1","UK_EQUITIES":"UK_EQUITIES_D1_V1"}
@@ -16,6 +19,30 @@ US_MARKET_VENUES={
     "NASDAQ GLOBAL INDEX DATA SERVICE","US INDEX MARKET",
 }
 GENERIC_MARKET_VENUES={"","UNKNOWN","OTC","INDEX NAMESPACE"}
+BROKER_INDEX_CFD_AUTHORITY_PATH=(
+    Path(__file__).resolve().parents[2]
+    / "constitution/authorities/index_cfds/MT5_BROKER_FAMILY_INDEX_CFD_AUTHORITY_V1.json"
+)
+
+@lru_cache(maxsize=1)
+def _broker_index_cfd_provider_pairs()->frozenset[tuple[str,str]]:
+    """Read approved routes from the authority catalogue, never from code."""
+    try:
+        authority=json.loads(BROKER_INDEX_CFD_AUTHORITY_PATH.read_text(encoding="utf-8"))
+        checksum=str(authority.pop("authority_checksum"))
+    except (OSError,ValueError,KeyError) as error:
+        raise ValueError("BROKER_FAMILY_AUTHORITY_UNAVAILABLE") from error
+    canonical=json.dumps(authority,sort_keys=True,separators=(",",":")).encode("utf-8")
+    if hashlib.sha256(canonical).hexdigest()!=checksum:
+        raise ValueError("BROKER_FAMILY_AUTHORITY_CHECKSUM_MISMATCH")
+    registration=authority.get("canonical_registration") or {}
+    pairs={(str(registration.get("provider_id")),str(registration.get("provider_contract")))}
+    for legacy in authority.get("accepted_legacy_registrations") or ():
+        if isinstance(legacy,dict):
+            pairs.add((str(legacy.get("provider_id")),str(legacy.get("provider_contract"))))
+    if any(not all(pair) or "None" in pair for pair in pairs):
+        raise ValueError("BROKER_FAMILY_AUTHORITY_INVALID")
+    return frozenset(pairs)
 
 def market_policy(asset_class:str,timeframe:str)->str:
     return commissioning_policy(asset_class,timeframe)
@@ -64,6 +91,7 @@ def resolved_calendar_authority(*,asset_class:str,calendar_id:str,exchange_name:
 
 def resolved_calendar_id(*,asset_class:str,calendar_id:str,exchange_name:str|None,canonical_symbol:str|None=None)->str|None:
     if calendar_id and calendar_id!="REGISTRY_D1_V1":return calendar_id
+    if asset_class=="ENERGY":return "ENERGY_D1_V1"
     # An operator-approved D1 provider proxy (for example WTI CFD → USO ETF)
     # carries its own reviewed session calendar.  This is intentionally an
     # explicit route setting, never a symbolic-identity inference.
@@ -82,7 +110,7 @@ def resolved_calendar_id(*,asset_class:str,calendar_id:str,exchange_name:str|Non
         return "US_EQUITIES_D1_V1"
     return None
 
-def eligibility_reason(*,asset_class:str,representation_type:str,provider_id:str|None,provider_contract:str|None,provider_symbol:str|None,calendar_id:str,exchange_name:str|None,identity_json:str,timeframe:str,registration_status:str|None="REGISTERED_NO_EVIDENCE",canonical_symbol:str|None=None)->str|None:
+def eligibility_reason(*,asset_class:str,representation_type:str,provider_id:str|None,provider_contract:str|None,provider_symbol:str|None,calendar_id:str,exchange_name:str|None,identity_json:str,timeframe:str,registration_status:str|None="REGISTERED_NO_EVIDENCE",canonical_symbol:str|None=None,source_nature:str|None=None)->str|None:
     if not registration_status or not registration_status.startswith("REGISTERED_"):return "INSTRUMENT_REGISTRATION_INACTIVE"
     if not provider_id or not provider_symbol:return "PROVIDER_SYMBOL_MAPPING_REQUIRED"
     expected=f"TWELVE_DATA_TIME_SERIES_{timeframe}_V1"
@@ -102,7 +130,8 @@ def eligibility_reason(*,asset_class:str,representation_type:str,provider_id:str
         return None
     if asset_class=="ENERGY":
         if representation_type in {"ETF","FUTURES"}:return f"ENERGY_INTRADAY_EXCLUDES_{representation_type}"
-        if '"source_nature":"PROVIDER_DERIVED_REFERENCE"' not in identity_json.replace(" ",""):return "ENERGY_SOURCE_NATURE_REQUIRED"
+        identity_source='"source_nature":"PROVIDER_DERIVED_REFERENCE"' in identity_json.replace(" ","")
+        if source_nature!="PROVIDER_DERIVED_REFERENCE" and not identity_source:return "ENERGY_SOURCE_NATURE_REQUIRED"
         return None
     if asset_class=="INDICES":
         if representation_type!="INDEX":return f"INDICES_INTRADAY_EXCLUDES_{representation_type}"
@@ -110,6 +139,16 @@ def eligibility_reason(*,asset_class:str,representation_type:str,provider_id:str
         required=("administrator","methodology_reference","calculation_calendar","calculation_window")
         missing=[name for name in required if f'"{name}":' not in compact]
         if missing:return "INDEX_PROFILE_REQUIRED:"+",".join(missing)
+        return None
+    if asset_class=="BROKER_INDEX_CFDS":
+        if representation_type!="CFD":return f"BROKER_INDEX_CFDS_EXCLUDES_{representation_type}"
+        try:approved=_broker_index_cfd_provider_pairs()
+        except ValueError as error:return str(error)
+        if (str(provider_id),str(provider_contract)) not in approved:return "BROKER_FAMILY_ROUTE_REQUIRED"
+        if provider_symbol!=(canonical_symbol or ""):return "EXACT_PROVIDER_SYMBOL_REQUIRED"
+        compact=identity_json.replace(" ","")
+        if '"underlying_reference":null' in compact:return "UNDERLYING_REFERENCE_REQUIRED"
+        if f'"selected_representation":"{canonical_symbol}"' not in compact:return "EXACT_SELECTED_REPRESENTATION_REQUIRED"
         return None
     return None
 
@@ -133,13 +172,15 @@ def lane_eligibility(database_path:str|Path,asset:str,timeframe:str)->tuple[bool
     finally:connection.close()
     if not row:return False,"UNREGISTERED_INSTRUMENT"
     provider_id,provider_contract,provider_symbol=row[2],row[3],row[4]
-    if not provider_id or not provider_symbol:
+    resolved=None
+    if not provider_id or not provider_symbol or row[0]=="ENERGY":
         resolved=resolved_provider_mapping_for_lane(database_path,asset.strip().upper(),timeframe.strip().upper())
+    if not provider_id or not provider_symbol:
         if resolved:
             provider_id=str(resolved["provider"])
             provider_contract=str(resolved["provider_contract"])
             provider_symbol=str(resolved["provider_symbol"])
-    reason=eligibility_reason(asset_class=row[0],representation_type=row[1],provider_id=provider_id,provider_contract=provider_contract,provider_symbol=provider_symbol,calendar_id=row[5],exchange_name=row[6],identity_json=row[7],registration_status=row[8],timeframe=timeframe.strip().upper(),canonical_symbol=asset.strip().upper())
+    reason=eligibility_reason(asset_class=row[0],representation_type=row[1],provider_id=provider_id,provider_contract=provider_contract,provider_symbol=provider_symbol,calendar_id=row[5],exchange_name=row[6],identity_json=row[7],registration_status=row[8],timeframe=timeframe.strip().upper(),canonical_symbol=asset.strip().upper(),source_nature=(resolved or {}).get("source_nature"))
     return reason is None,reason
 
 def resolved_provider_mapping_for_lane(
@@ -167,12 +208,18 @@ def resolved_provider_mapping_for_lane(
         if mapping_class in _DIRECT_MAPPING_CLASSES and provider_symbol and not (
             capability and capability.get("supported") is False
         ):
+            provider_type=str(mapping.get("provider_instrument_type") or "").upper()
+            approved_energy_reference=(
+                str(mapping.get("status") or "").upper()=="OPERATOR_RESOLVED"
+                and any(word in provider_type for word in ("ENERGY","COMMODITY","RESOURCE"))
+            )
             return {
                 "provider":"TWELVE_DATA",
                 "provider_contract":f"TWELVE_DATA_TIME_SERIES_{timeframe}_V1",
                 "provider_symbol":str(provider_symbol),
                 "mapping_class":mapping_class,
                 "authority_source":"PROVIDER_FACTS",
+                **({"source_nature":"PROVIDER_DERIVED_REFERENCE"} if approved_energy_reference else {}),
             }
 
     connection=open_read_only(database_path)
@@ -274,8 +321,11 @@ def ensure_manual_acquisition_lane(
     if not registration:raise ValueError(f"UNREGISTERED_INSTRUMENT: {asset}")
     if not str(registration[1]).startswith("REGISTERED_"):
         raise ValueError(f"INSTRUMENT_REGISTRATION_INACTIVE: {asset}")
-    if exists:return False
     observed=observed_at or datetime.now(UTC).isoformat()
+    if exists:
+        with open_read_only(database_path) as connection:
+            if _manual_lane_event(connection,asset,timeframe):
+                return False
     append_authority_event(
         database_path,
         AuthorityEventManifest(
@@ -291,20 +341,20 @@ def ensure_manual_acquisition_lane(
         ),
         recorded_at_utc=observed,
     )
-    with registered_writer(database_path) as connection:
-        apply_migrations(connection)
-        with transaction(connection):
-            connection.execute(
-                "INSERT OR IGNORE INTO evidence_lanes VALUES(?,?, 'D1','EVIDENCE_LANE_V1',1,?)",
-                (asset,timeframe,observed),
-            )
+    if not exists:
+        with registered_writer(database_path) as connection:
+            apply_migrations(connection)
+            with transaction(connection):
+                connection.execute(
+                    "INSERT OR IGNORE INTO evidence_lanes VALUES(?,?, 'D1','EVIDENCE_LANE_V1',1,?)",
+                    (asset,timeframe,observed),
+                )
     from .publication_service import enqueue_publication
     enqueue_publication(database_path, [(asset, timeframe)], trigger="MANUAL_LANE_DECLARATION")
     return True
 
 def ensure_commissioned_lane(database_path:str|Path,asset:str,timeframe:str,*,observed_at:str|None=None)->None:
     asset=asset.strip().upper();timeframe=timeframe.strip().upper()
-    if timeframe=="D1":return
     if timeframe not in CORE:raise ValueError(f"NOT_AUTHORISED: {timeframe}")
     c=open_read_only(database_path)
     try:

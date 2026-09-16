@@ -13,7 +13,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from .freshness import normalized_utc, provider_route_revision_for_lane
+from .freshness import (
+    normalized_utc, provider_route_facts_for_lane,
+    provider_route_revision_for_lane,
+)
 from .lane_update_register import LaneUpdateRegister, REGISTER_CONTRACT
 from .operational_schedule import schedule_for_lane
 from .scheduler_integrity import active_universe
@@ -31,6 +34,7 @@ _DETAIL_LIMIT = 1_500
 _SCHEDULE_TIMEZONE = "Australia/Brisbane"
 _DEFAULT_SCHEDULE = {"weekday": "SUNDAY", "hour": 10, "minute": 30}
 _WEEKDAYS = ("MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY")
+_STALE_RUNNING_AFTER = timedelta(minutes=15)
 
 
 def run_estate_audit(
@@ -222,11 +226,13 @@ def _run_locked(
     register_rows = {(str(row["asset"]), str(row["timeframe"])): row for row in register.rows()}
     findings: list[dict[str, object]] = []
     review_repairs: list[dict[str, object]] = []
+    route_lanes: dict[str, list[str]] = {}
     inspected = 0
     with open_read_only(database_path) as authority:
         for lane_id, lane in sorted(active.items()):
             inspected += 1
             asset, timeframe = str(lane["symbol"]), str(lane["timeframe"])
+            route_lanes.setdefault(asset, []).append(timeframe)
             key = (asset, timeframe)
             row = register_rows.get(key)
             lane_state, bars = _lane_facts(authority, asset, timeframe)
@@ -253,19 +259,15 @@ def _run_locked(
             if row is None:
                 continue
             schedule_revision = _schedule_revision(schedule)
-            route_revision = provider_route_revision_for_lane(authority, symbol=asset, timeframe=timeframe)
             if row.get("calendar_or_session_revision") != schedule_revision:
                 _finding(findings, "REPAIRABLE", "UPDATE_REGISTER_SCHEDULE_STALE", lane_id,
                          {"register_revision": row.get("calendar_or_session_revision")},
                          {"calendar_or_session_revision": schedule_revision}, observed,
                          "Recompute the next approved boundary")
-            if row.get("provider_route_revision") != route_revision:
-                _finding(findings, "WARNING", "PROVIDER_ROUTE_REVISION_CHANGED", lane_id,
-                         {"register_revision": row.get("provider_route_revision")},
-                         {"provider_route_revision": route_revision}, observed,
-                         "Review and refresh the operational route revision; the lane remains available")
-                review_repairs.append({"class": "PROVIDER_ROUTE_REVIEW", "lane": lane_id})
-            if row.get("state") == "RUNNING":
+            attempted_at = _parse_datetime(str(row.get("last_attempted_at_utc"))) if row.get("last_attempted_at_utc") else None
+            if row.get("state") == "RUNNING" and (
+                attempted_at is None or observed - attempted_at >= _STALE_RUNNING_AFTER
+            ):
                 _finding(findings, "REPAIRABLE", "STALE_RUNNING_REGISTER_ROW", lane_id,
                          {"last_attempted_at_utc": row.get("last_attempted_at_utc")},
                          {"state": "RETRY or BLOCKED"}, observed,
@@ -275,6 +277,40 @@ def _run_locked(
                          {"state": row.get("state")}, {"last_outcome": "classified reason"}, observed,
                          "Review operational state ownership")
                 review_repairs.append({"class": "OPERATIONAL_STATE_REVIEW", "lane": lane_id})
+
+        # Provider routing is registered once per symbol at D1. Report a
+        # material hash mismatch once per route, with all affected lanes, not
+        # once for every commissioned timeframe.
+        for asset, timeframes in sorted(route_lanes.items()):
+            rows = [register_rows.get((asset, timeframe)) for timeframe in timeframes]
+            rows = [row for row in rows if row is not None]
+            if not rows:
+                continue
+            route_revision = provider_route_revision_for_lane(
+                authority, symbol=asset, timeframe="D1",
+            )
+            register_revisions = sorted({
+                str(row.get("provider_route_revision") or "") for row in rows
+            })
+            if register_revisions == [route_revision]:
+                continue
+            affected_lanes = [f"{asset}:{timeframe}" for timeframe in sorted(timeframes)]
+            _finding(
+                findings, "WARNING", "PROVIDER_ROUTE_REVISION_CHANGED", f"{asset}:D1",
+                {"register_revisions": register_revisions, "affected_lanes": affected_lanes},
+                {
+                    "provider_route_revision": route_revision,
+                    "provider_route": provider_route_facts_for_lane(
+                        authority, symbol=asset, timeframe="D1",
+                    ),
+                },
+                observed,
+                "Review the displayed provider route and refresh its fingerprint; all affected lanes remain available",
+            )
+            review_repairs.append({
+                "class": "PROVIDER_ROUTE_REVIEW", "symbol": asset,
+                "lanes": affected_lanes,
+            })
 
     active_keys = {(str(lane["symbol"]), str(lane["timeframe"])) for lane in active.values()}
     for asset, timeframe in sorted(set(register_rows) - active_keys):

@@ -148,11 +148,13 @@ def test_crypto_intraday_prefers_binance_over_twelve_data_and_keeps_d1_independe
             plan = _plan(database, "ETHUSD", timeframe)
             considered = {row["provider"]: row for row in plan["providers_considered"]}
             assert plan["selected_provider"] == "BINANCE"
-            assert plan["selected_provider_symbol"] == "ETHUSD"
+            assert plan["selected_provider_symbol"] == "ETHUSDT"
+            assert plan["selected_mapping_class"] == "APPROVED_EQUIVALENT_REPRESENTATION"
             assert plan["selected_fallback_rank"] == 1
             assert plan["routing_policy"] == "CRYPTO_INTRADAY_V1"
-            assert considered["BINANCE"]["provider_representation"] == "ETH/USD"
-            assert considered["BINANCE"]["representation_type"] == "EXACT_REPRESENTATION"
+            assert considered["BINANCE"]["provider_representation"] == "ETH/USDT"
+            assert considered["BINANCE"]["representation_type"] == "APPROVED_EQUIVALENT_REPRESENTATION"
+            assert considered["BINANCE"]["quote_equivalence"] == "USD_USDT_CRYPTO"
             assert considered["BINANCE"]["fallback_rank"] == 1
             assert considered["TWELVE_DATA"]["reason"] == "CRYPTO_INTRADAY_NOT_APPROVED"
             assert considered["COINGECKO"]["reason"] == "TIMEFRAME_UNSUPPORTED"

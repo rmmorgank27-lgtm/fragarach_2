@@ -17,6 +17,13 @@ from .validation.intraday_profiles import expected_opens, profile_for
 
 FRESHNESS_CONTRACT = "fragarach_ii.lane_freshness.v1"
 AUTHORITY_REVISION_VERSION = 3
+PROVIDER_ROUTE_REVISION_VERSION = 2
+# Lane freshness is expressed in completed, eligible timeframe boundaries.
+# These bands deliberately sit above the scheduler's factual Current/Behind
+# state: a small delay still needs recovery work, but is not automatically an
+# unsafe input for every consuming engine.
+GREEN_MAX_LAG_UNITS = 3
+AMBER_MAX_LAG_UNITS = 12
 _BASIS = (
     "OPERATIONAL_CALENDAR",
     "TIMEFRAME",
@@ -200,11 +207,40 @@ def provider_route_revision_for_lane(
         # event identifiers are provenance for that row, not routing inputs;
         # including them made an equivalent registration republication look
         # like a material route change during the weekly audit.
-        "provider_route_revision_version": 2,
+        "provider_route_revision_version": PROVIDER_ROUTE_REVISION_VERSION,
         "registration_route": list(registration) if registration else None,
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def provider_route_facts_for_lane(
+    connection: sqlite3.Connection, *, symbol: str, timeframe: str,
+) -> dict[str, object]:
+    """Return the human-readable route inputs represented by the fingerprint."""
+
+    symbol = symbol.strip().upper()
+    _ = timeframe.strip().upper()  # The approved route is registered at D1.
+    columns = (
+        "asset", "provider_id", "provider_contract", "provider_symbol",
+        "provider_exchange", "provider_country", "provider_instrument_type",
+        "provider_identity_key", "registration_status",
+    )
+    registration = connection.execute(
+        """
+        SELECT asset,provider_id,provider_contract,provider_symbol,provider_exchange,
+               provider_country,provider_instrument_type,provider_identity_key,
+               registration_status
+          FROM instrument_registrations WHERE asset=? AND timeframe='D1'
+        """,
+        (symbol,),
+    ).fetchone()
+    return {
+        "provider_route_revision_version": PROVIDER_ROUTE_REVISION_VERSION,
+        "registration_route": (
+            dict(zip(columns, registration, strict=True)) if registration else None
+        ),
+    }
 
 
 def _assess_d1(
@@ -376,11 +412,13 @@ def _available(
 ) -> dict[str, object]:
     current = latest_epoch >= expected_epoch
     critical = not current and critical_after is not None and lag_count >= critical_after
+    lane_status = _lane_status(current=current, lag_count=lag_count)
     return {
         "contract": FRESHNESS_CONTRACT,
         "symbol": symbol,
         "timeframe": timeframe,
         "state": "Current" if current else "Behind",
+        "lane_status": lane_status,
         "severity": "HEALTHY" if current else "CRITICAL" if critical else "ATTENTION",
         "operational_state": "Current" if current else "Critically Behind" if critical else "Behind",
         "latest_canonical_observation": iso_utc_epoch(latest_epoch),
@@ -428,6 +466,7 @@ def _unavailable(
         "symbol": symbol,
         "timeframe": timeframe,
         "state": "Unavailable",
+        "lane_status": "RED",
         "severity": "UNAVAILABLE",
         "operational_state": "Unavailable",
         "latest_canonical_observation": iso_utc_epoch(latest_epoch),
@@ -440,6 +479,24 @@ def _unavailable(
         "as_of": observed_at.replace(microsecond=0).isoformat(),
         "basis": list(_BASIS),
     }
+
+
+def _lane_status(*, current: bool, lag_count: int) -> str:
+    """Classify a canonical edge without treating scheduler work as failure.
+
+    Gold means the expected closed edge is present. Green and Amber represent
+    bounded, explicit lateness in eligible closed boundaries; Red begins only
+    after twelve missed boundaries. Calendar closure and publication grace are
+    resolved before this helper receives a lag count.
+    """
+
+    if current:
+        return "GOLD"
+    if lag_count <= GREEN_MAX_LAG_UNITS:
+        return "GREEN"
+    if lag_count <= AMBER_MAX_LAG_UNITS:
+        return "AMBER"
+    return "RED"
 
 
 def _crypto_operational_policy(config_root: str | Path | None) -> dict[str, object]:

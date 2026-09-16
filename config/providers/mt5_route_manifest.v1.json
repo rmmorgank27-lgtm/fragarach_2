@@ -1,0 +1,75 @@
+{
+  "contract": "fragarach_ii.mt5_route_manifest.v1",
+  "revision": 6,
+  "purpose": "Reviewed MT5 acquisition authority and staged broker-node topology",
+  "receipt_retention_hours": 72,
+  "nodes": [
+    {
+      "node_id": "tradewinds-mt5-bridge",
+      "role": "PRIMARY",
+      "broker_family": "FUSION_MARKETS_MT5",
+      "transport_client_id": "tradewinds-mt5-bridge",
+      "source_route": "registered_standard_data_primary",
+      "queue_namespace": "default",
+      "asset_classes": ["FX", "METALS", "ENERGY", "INDICES", "BROKER_INDEX_CFDS", "US_EQUITIES", "UK_EQUITIES", "GERMAN_EQUITIES", "AUSTRALIAN_EQUITIES"],
+      "activation": "ACTIVE"
+    },
+    {
+      "node_id": "eightcap-mt5-bridge",
+      "role": "CRYPTO_PRIMARY",
+      "broker_family": "EIGHTCAP_MT5",
+      "transport_client_id": "eightcap-mt5-bridge",
+      "source_route": "eightcap_standard_data_primary",
+      "queue_namespace": "eightcap-mt5-bridge",
+      "asset_classes": ["CRYPTO"],
+      "activation": "ACTIVE"
+    },
+    {
+      "node_id": "mt5-same-broker-standby",
+      "role": "STANDBY",
+      "broker_family": "FUSION_MARKETS_MT5",
+      "activation": "PLANNED"
+    },
+    {
+      "node_id": "mt5-alternate-broker",
+      "role": "DIVERSITY_FALLBACK",
+      "broker_family": "ALTERNATE_BROKER_MT5",
+      "activation": "PLANNED"
+    }
+  ],
+  "class_policy": [
+    {
+      "asset_classes": ["FX", "METALS", "ENERGY", "INDICES", "BROKER_INDEX_CFDS"],
+      "timeframes": ["D1", "H1", "M30", "M5"],
+      "provider_order": ["MT5_BRIDGE", "TWELVE_DATA", "YAHOO_FINANCE"],
+      "activation": "ACTIVE_OPERATOR_APPROVED_2026-09-11"
+    },
+    {
+      "asset_classes": ["US_EQUITIES", "UK_EQUITIES", "GERMAN_EQUITIES", "AUSTRALIAN_EQUITIES"],
+      "timeframes": ["D1"],
+      "provider_order": ["TWELVE_DATA", "MT5_BRIDGE", "YAHOO_FINANCE"],
+      "activation": "ACTIVE_OPERATOR_APPROVED_2026-09-15"
+    },
+    {
+      "asset_classes": ["CRYPTO"],
+      "timeframes": ["D1", "H1", "M30", "M5"],
+      "provider_order": ["MT5_BRIDGE", "BINANCE", "COINGECKO"],
+      "activation": "ACTIVE_OPERATOR_APPROVED_2026-09-15_EIGHTCAP_EXACT_USD"
+    }
+  ],
+  "approved_aliases": {
+    "XAUUSD": "XAUUSD.r",
+    "XAGUSD": "XAGUSD.r",
+    "USOIL": "XTIUSD.r",
+    "UKOIL": "XBRUSD.r",
+    "NAS100": "NAS100.r",
+    "US30": "US30.r",
+    "US500": "US500.r"
+  },
+  "reviewed_mt5_primary_lanes": [
+    {"canonical_symbol": "NAS100", "asset_class": "INDICES", "timeframes": ["D1", "H1", "M30", "M5"], "provider_symbol": "NAS100.r", "mapping_class": "APPROVED_PROVIDER_ALIAS", "authority_source": "INDEX_CFD_MT5_AUTHORITY_V1"},
+    {"canonical_symbol": "US30", "asset_class": "INDICES", "timeframes": ["D1", "H1", "M30", "M5"], "provider_symbol": "US30.r", "mapping_class": "APPROVED_PROVIDER_ALIAS", "authority_source": "INDEX_CFD_MT5_AUTHORITY_V1"},
+    {"canonical_symbol": "US500", "asset_class": "INDICES", "timeframes": ["D1", "H1", "M30", "M5"], "provider_symbol": "US500.r", "mapping_class": "APPROVED_PROVIDER_ALIAS", "authority_source": "INDEX_CFD_MT5_AUTHORITY_V1"},
+    {"canonical_symbol": "XOM", "asset_class": "US_EQUITIES", "timeframes": ["H1", "M30", "M5"], "provider_symbol": "ExxonMobil.r", "mapping_class": "APPROVED_PROVIDER_ALIAS", "authority_source": "XOM_FUSION_INTRADAY_OVERLAY_OPERATOR_APPROVED_2026-09-14"}
+  ]
+}

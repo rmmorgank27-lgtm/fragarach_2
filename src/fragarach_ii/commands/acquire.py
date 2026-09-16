@@ -6,13 +6,73 @@ import argparse
 import json
 import os
 import sys
+import time
 from collections.abc import Sequence
 
 from fragarach_ii.providers import AcquisitionError
 from fragarach_ii.providers.config import load_provider_config
 from fragarach_ii.scheduler_daemon import ServicePaths, make_command, ownership_is_active, send_service_request
 from fragarach_ii.scheduler_service import run_operator_fetch, resume_required_set_fetch, run_required_set_fetch
+from fragarach_ii.scheduler_state_store import SchedulerStateStore
 from fragarach_ii.credentials import CredentialAuthority
+
+
+_SERVICE_FETCH_SUBMISSION_OUTCOMES = {
+    "QUEUED", "DEDUPLICATED_ACTIVE_WORK", "REQUEUED_CURRENT_BOUNDARY",
+    "UPGRADED_TO_INITIAL_HISTORY",
+}
+
+
+def _await_service_fetch_result(
+    paths: ServicePaths,
+    submission: dict[str, object],
+    *,
+    timeout_seconds: float = 300.0,
+    poll_seconds: float = 0.1,
+) -> dict[str, object]:
+    """Resolve a Scheduler submission to its durable lane outcome."""
+
+    if str(submission.get("outcome") or "") not in _SERVICE_FETCH_SUBMISSION_OUTCOMES:
+        return submission
+    operation_id = str(submission.get("operation_id") or "")
+    symbol = str(submission.get("symbol") or "").upper()
+    timeframe = str(submission.get("timeframe") or "").upper()
+    if not operation_id or not symbol or not timeframe:
+        return submission
+    store = SchedulerStateStore(paths.database, paths.journal)
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    latest: dict[str, object] | None = None
+    while True:
+        state = store.load() or {}
+        lane = (state.get("lanes") or {}).get(f"{symbol}:{timeframe}", {})
+        if isinstance(lane, dict):
+            candidate = lane.get("last_operator_fetch_result")
+            pending = lane.get("operator_fetch_pending")
+            if isinstance(candidate, dict) and candidate.get("operation_id") == operation_id:
+                latest = candidate
+                pending_id = pending.get("id") if isinstance(pending, dict) else None
+                if str(candidate.get("outcome") or "") != "WAITING" or pending_id != operation_id:
+                    return {
+                        "contract": "fragarach_ii.acquisition_result.v1",
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        **candidate,
+                    }
+        if time.monotonic() >= deadline:
+            if latest is not None:
+                return {
+                    "contract": "fragarach_ii.acquisition_result.v1",
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    **latest,
+                }
+            return {
+                **submission,
+                "outcome": "WAITING",
+                "reason": "Scheduler accepted the fetch; provider completion remains pending",
+            }
+        time.sleep(max(0.01, poll_seconds))
+
 
 def _emit_progress(stage: str, **facts: object) -> None:
     payload = {"fragarach_operation_stage": stage, **facts}
@@ -78,6 +138,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             if response.get("result") not in {"accepted", "already applied"}:
                 raise ValueError(str(response.get("reason") or "Scheduler Service rejected Operator Fetch"))
             result = response.get("detail") or response
+            if not arguments.required_set and isinstance(result, dict):
+                if progress is not None:
+                    progress("requesting")
+                result = _await_service_fetch_result(paths, result)
+                if progress is not None:
+                    progress("response_received")
         elif os.environ.get("FRAGARACH_STANDALONE_RECOVERY") != "1":
             raise ValueError("SCHEDULER_SERVICE_NOT_RUNNING")
         elif arguments.required_set:

@@ -78,13 +78,13 @@ class Spec060SchedulerHealthTests(unittest.TestCase):
         )
         self.assertEqual(unavailable["overall_operational_health"], "UNAVAILABLE")
 
-    def test_terminal_failed_queue_artifact_is_blocked_not_a_false_stall(self) -> None:
+    def test_terminal_failed_queue_artifact_degrades_not_a_false_healthy_state(self) -> None:
         now = datetime.now(UTC)
         health = self.health(
             queue=[{"lane": "USDCHF:M30", "trace_id": "terminal", "enqueued_at": (now - timedelta(hours=1)).isoformat(), "operational_state": "Ready"}],
             events=[{"trace_id": "terminal", "event": "ATTEMPT_FAILED", "timestamp": now.isoformat(), "retryable": False, "reason_code": "DISPATCH_REJECTED"}],
         )
-        self.assertEqual(health["overall_operational_health"], "IDLE")
+        self.assertEqual(health["overall_operational_health"], "DEGRADED")
         self.assertEqual(health["actionable_queue_depth"], 0)
         self.assertEqual(health["blocked_queue_depth"], 1)
 

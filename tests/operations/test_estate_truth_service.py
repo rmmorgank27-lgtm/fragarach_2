@@ -8,9 +8,11 @@ import unittest
 from datetime import UTC, datetime
 from pathlib import Path
 
-from fragarach_ii.estate_truth_service import ESTATE_TRUTH_CONTRACT, EstateTruthCache, _estate_summary, estate_truth_state
+from fragarach_ii.estate_truth_service import ESTATE_TRUTH_CONTRACT, EstateTruthCache, _estate_summary, _overlay_synthetic_m15_products, estate_truth_state
 from fragarach_ii.commands.estate_truth import main
 from fragarach_ii.truth_engine import truth_state_for_lane
+from fragarach_ii.lane_update_register import LaneUpdateRegister
+from fragarach_ii.storage import registered_writer
 from tests.validation.test_d1_session_validation import _create_lane
 
 
@@ -46,6 +48,77 @@ class EstateTruthServiceTests(unittest.TestCase):
             self.assertIn("entitlement", lane["provider_summary"]["unknown_values"])
             self.assertIsNone(lane["gap_summary"]["current_gap_count"])
 
+    def test_provider_summary_uses_latest_canonical_bar_source_not_legacy_registration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "authority.sqlite3"
+            _create_lane(database, "AUDUSD", ["2026-07-10"])
+            with registered_writer(database) as connection:
+                connection.execute(
+                    """INSERT INTO ingest_runs(
+                           ingest_run_id,kind,status,started_at_utc,finished_at_utc,detail
+                       ) VALUES('current-route-run','test','committed',?,?,?)""",
+                    (self.GENERATED.isoformat(), self.GENERATED.isoformat(), json.dumps({
+                        "format": "fragarach_ii.ingest_outcome.v1",
+                        "source_rows": 1, "staged": 1, "inserted": 0,
+                        "corrected": 1, "unchanged": 0,
+                        "conflicts_preserved": 0, "rejected": 0, "rejections": [],
+                        "provider": "CURRENT_ROUTE",
+                        "provider_contract": "CURRENT_ROUTE_D1_V1",
+                        "provider_symbol": "AUDUSD.CURRENT",
+                    })),
+                )
+                connection.execute(
+                    """UPDATE bars SET updated_by_ingest_run_id='current-route-run'
+                       WHERE asset='AUDUSD' AND timeframe='D1'"""
+                )
+
+            lane = next(
+                item for item in estate_truth_state(database)["truth_matrix"]
+                if item["symbol"] == "AUDUSD" and item["timeframe"] == "D1"
+            )
+            self.assertEqual(lane["provider_summary"]["provider"], "CURRENT_ROUTE")
+            self.assertEqual(lane["provider_summary"]["provider_symbol"], "AUDUSD.CURRENT")
+
+    def test_current_synthetic_m15_replaces_retained_legacy_raw_m15_projection(self) -> None:
+        source={"symbol":"NAS100","timeframe":"M5","authority_revision":"sha256:source","freshness":{"state":"Current","lag":{"count":0,"unit":"closed_interval"}},"truth_state":{"symbol":"NAS100","timeframe":"M5","authority_state":"GOLD"},"evidence_integrity":{},"acquisition_dimension":{},"provider_summary":{"provider":"FUSION_MARKETS_MT5"},"gap_summary":{}}
+        legacy={"symbol":"NAS100","timeframe":"M15","truth_state":{"authority_state":"RED"}}
+        product={"id":"NAS100:M15","symbol":"NAS100","target_timeframe":"M15","registration_status":"ACTIVE","status":"Incomplete","immediate_source_symbol":"NAS100","immediate_source_timeframe":"M5","immediate_source_evidence_class":"REAL","source_revision":"sha256:source","synthetic_revision":7,"content_checksum":"sha256:content","latest_synthetic_observation":1784083500,"calendar_authority":"MT5_BROKER_INDEX_CFD_24X5_UTC_V1","aggregation_rule":"MT5_BROKER_INDEX_CFD_M5_TO_M15_UTC_V1"}
+        lane=next(item for item in _overlay_synthetic_m15_products([legacy,source],[product]) if item["timeframe"]=="M15")
+        self.assertEqual(lane["freshness"]["state"],"Current")
+        self.assertEqual(lane["truth_state"]["authority_state"],"GOLD")
+        self.assertEqual(lane["provider_summary"]["evidence_class"],"SYNTHETIC")
+
+    def test_scheduler_block_overrides_green_operational_presentation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "authority.sqlite3"
+            _create_lane(database, "AUDUSD", ["2026-07-09", "2026-07-10"])
+            observed = datetime(2026, 7, 11, 12, 0, tzinfo=UTC)
+            register = LaneUpdateRegister(database)
+            register.audit_estate(at=observed, reason="TEST")
+            register.block(
+                asset="AUDUSD", timeframe="D1",
+                reason="LOCAL_PROGRAMMING_ERROR; transient network misclassification",
+                at=observed, approved=True,
+            )
+
+            lane = next(
+                item for item in estate_truth_state(
+                    database, clock=lambda: observed
+                )["truth_matrix"]
+                if item["symbol"] == "AUDUSD" and item["timeframe"] == "D1"
+            )
+
+            self.assertEqual(lane["freshness"]["state"], "Current")
+            self.assertEqual(lane["truth_state"]["authority_state"], "RED")
+            self.assertLessEqual(lane["truth_state"]["truth_score"], 70)
+            self.assertEqual(lane["overall_operational_state"], "Critical")
+            self.assertEqual(lane["acquisition_dimension"]["state"], "SCHEDULER_BLOCKED")
+            self.assertEqual(lane["acquisition_dimension"]["scheduler_state"]["state"], "BLOCKED")
+            self.assertIn(
+                "SCHEDULER_LANE_BLOCKED",
+                lane["truth_state"]["explanation"]["limitations"],
+            )
+
     def test_estate_aggregation_is_owned_and_reconciles(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "authority.sqlite3"
@@ -55,7 +128,7 @@ class EstateTruthServiceTests(unittest.TestCase):
             scores = [lane["truth_state"]["truth_score"] for lane in state["truth_matrix"]]
             self.assertEqual(summary["overall_truth_score"], round(sum(scores) / len(scores)))
             self.assertEqual(summary["total_symbols"], len({lane["symbol"] for lane in state["truth_matrix"]}))
-            self.assertEqual(summary["green_count"] + summary["amber_count"] + summary["red_count"], len(state["truth_matrix"]))
+            self.assertEqual(summary["gold_count"] + summary["green_count"] + summary["amber_count"] + summary["red_count"], len(state["truth_matrix"]))
             self.assertTrue(summary["aggregation"])
 
     def test_one_critical_lane_does_not_override_a_healthy_estate_score(self) -> None:

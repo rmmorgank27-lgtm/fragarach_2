@@ -20,6 +20,7 @@ struct ReadOnlyClientsView:View {
                     onRefresh: { clientID in Task { await store.refreshReplicaClient(clientID) } },
                     onSetPaused: { clientID, paused in Task { await store.setReplicaSyncPaused(clientID, paused: paused) } }
                 )
+                mt5BridgesCard
                 studioLaneRequests
                 clientsCard
                 transportCard
@@ -29,9 +30,11 @@ struct ReadOnlyClientsView:View {
         }
         .task {
             await store.refreshReadOnlyClients()
+            await store.refreshSchedulerStatus(scheduleEstateRefresh:false)
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
                 await store.refreshReadOnlyClients(silently:true)
+                await store.refreshSchedulerStatus(scheduleEstateRefresh:false)
             }
         }
         .sheet(isPresented:Binding(get:{store.readOnlyIssuedToken != nil},set:{if !$0{store.clearReadOnlyIssuedToken()}})) { tokenSheet }
@@ -102,6 +105,71 @@ struct ReadOnlyClientsView:View {
                 }
             }.padding(8)
         }
+    }
+
+    private var mt5BridgesCard:some View {
+        GroupBox("MT5 data bridges") {
+            VStack(alignment:.leading,spacing:12) {
+                Text("Broker-native market data for the Fragarach estate. Each terminal remains read-only and keeps its own provider identity.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let nodes=store.schedulerServiceStatus?.mt5Bridge?.nodes,!nodes.isEmpty {
+                    ForEach(nodes) { node in
+                        VStack(alignment:.leading,spacing:8) {
+                            HStack(spacing:8) {
+                                Circle().fill(bridgeColor(node.effectiveStatus)).frame(width:9,height:9)
+                                VStack(alignment:.leading,spacing:2) {
+                                    Text(bridgeName(node)).font(.headline)
+                                    Text(node.node.nodeID).font(.caption.monospaced()).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Text(node.effectiveStatus.replacingOccurrences(of:"_",with:" ").capitalized)
+                                    .font(.caption.bold()).foregroundStyle(bridgeColor(node.effectiveStatus))
+                            }
+                            HStack(spacing:22) {
+                                LabeledContent("Role",value:node.node.role?.replacingOccurrences(of:"_",with:" ").capitalized ?? "Market data")
+                                LabeledContent("Catalogue",value:catalogueSummary(node))
+                                LabeledContent("Queue",value:queueSummary(node))
+                                LabeledContent("Last report",value:SchedulerFormatting.timestamp(node.receivedAtUTC))
+                            }.font(.caption)
+                            if node.node.nodeID == "eightcap-mt5-bridge" {
+                                Label("Crypto primary · D1, H1, M30 and M5 · exact broker symbols · tick volume retained",systemImage:"bitcoinsign.circle.fill")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(10)
+                        .background(.quaternary.opacity(0.35),in:RoundedRectangle(cornerRadius:8))
+                    }
+                } else {
+                    Text("Awaiting authenticated MT5 bridge reports.").foregroundStyle(.secondary).padding(.vertical,6)
+                }
+                Divider()
+                HStack {
+                    Button("Refresh Bridge Status") {Task{await store.refreshSchedulerStatusFromUI()}}
+                    Button("Fetch Available Data Now") {Task{await store.runSchedulerQueue()}}
+                        .buttonStyle(.borderedProminent)
+                        .disabled(store.schedulerActionInProgress != nil)
+                    if store.schedulerActionInProgress != nil {ProgressView().controlSize(.small)}
+                    Spacer()
+                    Text("Windows watchdogs manage process recovery; these controls refresh status and wake broker-data queues.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }.padding(8)
+        }
+    }
+
+    private func bridgeName(_ node:MT5BridgeNodeStatus)->String {
+        node.node.nodeID == "eightcap-mt5-bridge" ? "Eightcap MT5 · Crypto":"Fusion MT5 · Markets"
+    }
+    private func bridgeColor(_ status:String)->Color {
+        switch status {case "HEALTHY":return .green;case "RECOVERING","DEGRADED":return .orange;case "CRITICAL":return .red;default:return .secondary}
+    }
+    private func catalogueSummary(_ node:MT5BridgeNodeStatus)->String {
+        guard let catalogue=node.catalogue,catalogue.state == "AVAILABLE" else{return "Waiting"}
+        return "\(catalogue.authorisedCount) ready · \(catalogue.symbolCount) available"
+    }
+    private func queueSummary(_ node:MT5BridgeNodeStatus)->String {
+        guard let queue=node.queue else{return "—"}
+        return "\(queue.pending) pending · \(queue.completed) complete"
     }
 
     private var publicationCard:some View {

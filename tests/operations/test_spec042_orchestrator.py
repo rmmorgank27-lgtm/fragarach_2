@@ -89,6 +89,33 @@ class Spec042OrchestratorTests(unittest.TestCase):
         controller.dispatch(replacement["reservation_id"],2)
         self.assertLessEqual(controller.inspect()["calls_used"], 55)
 
+    def test_credit_window_is_temporary_not_a_provider_route_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "authority.sqlite3"
+            _create_lane(database, "AUDUSD", ["2026-07-13"])
+            provider = profile("TWELVE_DATA", priority=1)
+
+            class CreditWindow:
+                def inspect(self, *_args, **_kwargs):
+                    return {
+                        "eligible": False,
+                        "reason": "CREDIT_WINDOW",
+                        "next_available": "2026-07-14T00:01:00+00:00",
+                    }
+
+            plan = acquisition_plan(
+                database, symbol="AUDUSD", timeframe="D1",
+                canonical_edge="2026-07-13T00:00:00+00:00",
+                expected_edge="2026-07-14T00:00:00+00:00",
+                missing_start="2026-07-14", missing_end="2026-07-14",
+                scheduled_boundary="2026-07-14T21:00:00+00:00",
+                profiles=(provider,), provider_state={}, budgets={"TWELVE_DATA": CreditWindow()},
+                credentials={}, now=datetime(2026, 7, 14, 0, tzinfo=UTC),
+            )
+
+            self.assertIsNone(plan["selected_provider"])
+            self.assertEqual(plan["temporary_ineligibility"][0]["reason"], "CREDIT_WINDOW")
+
     def test_retryable_failure_fails_over_sequentially(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "authority.sqlite3"; journal = Path(directory) / "scheduler.json"

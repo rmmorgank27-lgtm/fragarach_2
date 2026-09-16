@@ -5,6 +5,8 @@ public struct EstateGroupSummary: Equatable, Sendable {
     public let authorityState: String
     public let symbolCount: Int
     public let laneCount: Int
+    public let goldCount: Int
+    public let greenCount: Int
     public let healthyCount: Int
     public let attentionCount: Int
     public let criticalCount: Int
@@ -25,7 +27,9 @@ public struct EstateGroupSummary: Equatable, Sendable {
         )
         symbolCount = Set(lanes.map(\.symbol)).count
         laneCount = lanes.count
-        healthyCount = lanes.filter { $0.truthState.authorityState == "GREEN" }.count
+        goldCount = lanes.filter { $0.truthState.authorityState == "GOLD" }.count
+        greenCount = lanes.filter { $0.truthState.authorityState == "GREEN" }.count
+        healthyCount = goldCount + greenCount
         attentionCount = lanes.filter { $0.truthState.authorityState == "AMBER" }.count
         criticalCount = lanes.filter { $0.truthState.authorityState == "RED" }.count
         coveragePercent = Self.average(lanes.compactMap(\.truthState.coverageScore))
@@ -44,6 +48,7 @@ public struct EstateGroupSummary: Equatable, Sendable {
 
     public static func aggregateAuthorityState(_ states: [String], score: Int? = nil) -> String {
         if let score {
+            if !states.contains("GREEN") && !states.contains("AMBER") && !states.contains("RED") { return "GOLD" }
             if !states.contains("AMBER") && !states.contains("RED") { return "GREEN" }
             if score >= 90 { return "GREEN" }
             if score >= 50 { return "AMBER" }
@@ -51,7 +56,8 @@ public struct EstateGroupSummary: Equatable, Sendable {
         } else {
             if states.contains("RED") { return "RED" }
             if states.contains("AMBER") { return "AMBER" }
-            return states.contains("GREEN") ? "GREEN" : "NOT_MEASURED"
+            if states.contains("GREEN") { return "GREEN" }
+            return states.contains("GOLD") ? "GOLD" : "NOT_MEASURED"
         }
     }
 }
