@@ -276,7 +276,7 @@ def bridge_health_status(
         nodes = [_effective_status(item, observed=observed) for item in _node_reports(support)]
     except (MT5BridgeQueueError, AttributeError, TypeError):
         nodes = []
-    from .mt5_catalogue import current_catalogue
+    from .mt5_catalogue import authorised_routes, current_catalogue
     from .mt5_route_manifest import bridge_node
     for item in nodes:
         node_id = str(item["node"].get("node_id") or "")
@@ -290,6 +290,13 @@ def bridge_health_status(
             "symbol_count": int(catalogue.get("symbol_count") or 0) if catalogue else 0,
             "authorised_count": int(catalogue.get("bridge_authorized_count") or 0) if catalogue else 0,
         }
+        try:
+            routes = authorised_routes(support, database=authority)
+            item["authorised_current_estate_routes"] = sum(
+                route.get("node_id") == node_id for route in routes.values()
+            )
+        except (OSError, ValueError, RuntimeError):
+            item["authorised_current_estate_routes"] = 0
     if not nodes:
         return {
             "contract": "fragarach_ii.mt5_bridge_monitor.v1",

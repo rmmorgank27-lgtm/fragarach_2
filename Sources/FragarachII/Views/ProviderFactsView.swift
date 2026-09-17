@@ -59,6 +59,7 @@ struct ProviderFactsView: View {
                     if let revision=store.providerFacts?.revision { Text("Current provider facts revision \(revision)").font(.caption.monospaced()).foregroundStyle(.secondary) }
                 }
                 Spacer()
+                Button("Open Routing & Providers") { store.manageDataSection = .routing }
                 credentialBadge
                 Button("Configure Twelve Data…") { showingCredential = true }
                 Button("Resolve Twelve Data Facts") { Task { await store.refreshProviderFacts(resolve: true) } }

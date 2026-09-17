@@ -5,6 +5,7 @@ import unittest
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from fragarach_ii.freshness import authority_revision_for_lane
 from fragarach_ii.authority_service import serve_historical_authority
@@ -37,6 +38,17 @@ def _add_intraday_bar(database: Path, symbol: str, timeframe: str, opened: str, 
 
 
 class Spec041SchedulerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # These tests use a synthetic credential. Give each case a private
+        # credit window so repeated runs cannot consume another case's budget.
+        credits = tempfile.TemporaryDirectory()
+        self.addCleanup(credits.cleanup)
+        environment = patch.dict(
+            "os.environ", {"FRAGARACH_TWELVE_DATA_CREDIT_ROOT": credits.name},
+        )
+        environment.start()
+        self.addCleanup(environment.stop)
+
     def test_startup_snapshot_loads_every_lane_immediately(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "authority.sqlite3"

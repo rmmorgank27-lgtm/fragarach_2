@@ -15,6 +15,7 @@ struct ManageDataWorkspaceView: View {
             Group {
                 switch store.manageDataSection {
                 case .discover: DiscoverMarketView()
+                case .routing: RoutingProvidersView()
                 case .operations: DataOperationsView()
                 case .system: SystemWorkspaceView()
                 }

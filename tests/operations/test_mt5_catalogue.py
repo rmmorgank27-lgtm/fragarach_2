@@ -12,11 +12,12 @@ from pathlib import Path
 import pytest
 
 from fragarach_ii.mt5_bridge_queue import (
-    MT5BridgeQueueError, bridge_paths, checksum, drain_received_responses, enqueue_request,
-    poll_request,
+    FUSION_NON_INDEX_AUTHORITY_REFERENCE, MT5BridgeQueueError, _validate_response,
+    bridge_paths, checksum, drain_received_responses, enqueue_request, poll_request,
 )
 from fragarach_ii.mt5_bridge_requests import (
     MINIMUM_SECONDS,
+    active_fallback_grants,
     archive_expired_requests,
     enqueue_operator_request,
     grant_mt5_fallback,
@@ -27,10 +28,20 @@ from fragarach_ii.mt5_route_manifest import (
     approved_route, is_mt5_primary_lane, provider_order, reviewed_primary_routes,
 )
 from fragarach_ii.mt5_bridge_requests import enqueue_due_requests
+from fragarach_ii.provider_attempt_ledger import ProviderAttemptLedger
+from fragarach_ii.lane_update_register import LaneUpdateRegister
 from fragarach_ii.estate_truth_service import _mt5_bridge_capability_rows
 from fragarach_ii.replica_publication import add_client, set_publisher_enabled
 from fragarach_ii.replica_publisher_service import _handler
 from tests.operations.test_read_only_clients import _fixture
+
+
+def test_explicit_xom_intraday_overlay_is_a_reviewed_route() -> None:
+    route = approved_route("XOM", "US_EQUITIES", "M5")
+    assert route is not None
+    assert route["provider_symbol"] == "ExxonMobil.r"
+    assert route["authority_source"] == "XOM_FUSION_INTRADAY_OVERLAY_OPERATOR_APPROVED_2026-09-14"
+    assert approved_route("XOM", "US_EQUITIES", "D1") is None
 
 
 def _catalogue(*, xom_authorised: bool = True) -> dict:
@@ -161,8 +172,8 @@ def test_mt5_primary_manifest_makes_reviewed_index_daily_routes_broker_primary()
     assert is_mt5_primary_lane(
         "USOIL", "D1", provider_symbol="XTIUSD.r", asset_class="ENERGY",
     )
-    assert provider_order("FX", "D1")[:2] == ("MT5_BRIDGE", "TWELVE_DATA")
-    assert provider_order("US_EQUITIES", "D1")[:2] == ("TWELVE_DATA", "MT5_BRIDGE")
+    assert provider_order("FX", "D1") == ("MT5_BRIDGE", "YAHOO_FINANCE", "TWELVE_DATA")
+    assert provider_order("US_EQUITIES", "D1") == ("MT5_BRIDGE", "YAHOO_FINANCE", "TWELVE_DATA")
 
 
 def test_eightcap_crypto_uses_its_own_queue_and_exact_symbols_on_every_lane(tmp_path: Path) -> None:
@@ -186,8 +197,11 @@ def test_eightcap_crypto_uses_its_own_queue_and_exact_symbols_on_every_lane(tmp_
     assert not any(symbol == "HYPEUSD" for symbol, _ in routes)
     assert routes[("BTCUSD", "M5")] == "BTCUSD"
     assert approved_route("BTCUSD", "CRYPTO", "M5")["node_id"] == "eightcap-mt5-bridge"
-    assert provider_order("CRYPTO", "M5") == ("MT5_BRIDGE", "BINANCE", "COINGECKO")
-    assert "TWELVE_DATA" not in provider_order("CRYPTO", "D1")
+    assert provider_order("CRYPTO", "M5") == (
+        "MT5_BRIDGE", "BINANCE", "COINGECKO_DEX", "COINGECKO",
+        "YAHOO_FINANCE", "TWELVE_DATA",
+    )
+    assert provider_order("CRYPTO", "D1")[-1] == "TWELVE_DATA"
 
     request = enqueue_request(
         support, database=database, symbol="BTCUSD", timeframe="M5",
@@ -198,6 +212,31 @@ def test_eightcap_crypto_uses_its_own_queue_and_exact_symbols_on_every_lane(tmp_
     assert request["source_route"] == "eightcap_standard_data_primary"
     assert request["provider_symbol"] == "BTCUSD"
     assert not bridge_paths(support)["pending"].joinpath(f"{request['request_id']}.json").exists()
+
+
+def test_unhealthy_fusion_does_not_prevent_eightcap_queueing(tmp_path: Path) -> None:
+    database = tmp_path / "authority.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE bars (asset TEXT, timeframe TEXT, open_time_utc INTEGER)")
+        connection.execute(
+            "CREATE TABLE instrument_registrations "
+            "(asset TEXT, timeframe TEXT, asset_class TEXT)"
+        )
+        connection.execute("INSERT INTO instrument_registrations VALUES('BTCUSD','D1','CRYPTO')")
+    support = tmp_path / "support"
+    accept_catalogue(support, _catalogue())
+    accept_catalogue(support, _eightcap_catalogue(), node_id="eightcap-mt5-bridge")
+
+    report = enqueue_due_requests(
+        database, support, tmp_path / "state.json",
+        at=datetime(2026, 9, 16, 12, tzinfo=UTC),
+        eligible_node_ids={"eightcap-mt5-bridge"},
+    )
+
+    assert report["queued"]
+    assert all(item["lane"].startswith("BTCUSD:") for item in report["queued"])
+    assert not list(bridge_paths(support)["pending"].glob("*.json"))
+    assert list(bridge_paths(support, "eightcap-mt5-bridge")["pending"].glob("*.json"))
 
 
 def test_catalogue_confirmed_bridge_route_is_visible_to_estate_capability_truth(tmp_path: Path) -> None:
@@ -238,6 +277,83 @@ def test_mt5_scheduler_emits_only_reviewed_primary_lanes(tmp_path: Path) -> None
         bridge_paths(support)["pending"].joinpath(f"{xom_m5['request_id']}.json").read_text()
     )
     assert request["start_utc"] == datetime.fromtimestamp(1700000300, UTC).isoformat().replace("+00:00", "Z")
+
+
+def test_mt5_d1_request_includes_next_broker_midnight(tmp_path: Path) -> None:
+    support = tmp_path / "support"
+    accept_catalogue(support, _catalogue())
+    database = tmp_path / "authority.sqlite3"
+    latest = datetime(2026, 9, 14, tzinfo=UTC)
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE bars (asset TEXT, timeframe TEXT, open_time_utc INTEGER)")
+        connection.execute(
+            "INSERT INTO bars VALUES(?,?,?)", ("US30", "D1", int(latest.timestamp())),
+        )
+    report = enqueue_due_requests(
+        database, support, tmp_path / "state.json",
+        at=datetime(2026, 9, 16, 12, tzinfo=UTC),
+    )
+    item = next(row for row in report["queued"] if row["lane"] == "US30:D1")
+    request = json.loads(
+        (bridge_paths(support)["pending"] / f"{item['request_id']}.json").read_text()
+    )
+    assert request["start_utc"] == "2026-09-14T20:00:00Z"
+
+
+def test_fusion_authority_cutover_preserves_index_and_legacy_receipts(tmp_path: Path) -> None:
+    support = tmp_path / "support"
+    accept_catalogue(support, _catalogue())
+    database = tmp_path / "authority.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE bars (asset TEXT, timeframe TEXT, open_time_utc INTEGER)")
+    bounds = {
+        "start_utc": "2026-09-15T00:00:00Z",
+        "end_utc": "2026-09-15T01:00:00Z",
+    }
+    non_index = enqueue_request(
+        support, database=database, symbol="XOM", timeframe="M5", **bounds,
+    )
+    index = enqueue_request(
+        support, database=database, symbol="US30", timeframe="M5", **bounds,
+    )
+    old_index_reference = (
+        "MT5_BROKER_FAMILY_INDEX_CFD_AUTHORITY_V1:"
+        "2c5dc7e112b1a3ca761efb2bcb467a862e477fe74a3d9b69601c588b72b0da09"
+    )
+    assert non_index["authority_reference"] == FUSION_NON_INDEX_AUTHORITY_REFERENCE
+    assert index["authority_reference"] == old_index_reference
+
+    def response_for(request: dict) -> dict:
+        response = {
+            "contract": "fragarach.mt5_evidence_response.v0.4",
+            "request_id": request["request_id"], "request_sha256": checksum(request),
+            "status": "FULFILLED", "captured_at_utc": "2026-09-15T01:00:01Z",
+            **{key: request[key] for key in (
+                "authority_reference", "operation", "canonical_symbol", "provider_symbol",
+                "timeframe", "start_utc", "end_utc", "completed_bars_only",
+                "timestamp_semantics", "source_route",
+            )},
+            "terminal_route": "verified-live-terminal",
+            "broker_family": "approved-index-data-broker-family-v1",
+            "account_profile": "STANDARD_NON_TRADING_DATA", "trading_permitted": False,
+            "broker": "FMGP Trading Group Pty Ltd", "server": "FusionMarketsAU-Live",
+            "fingerprint_sha256": "a" * 64, "terminal_capabilities": {},
+            "completion_evidence": {"timestamp_semantics": request["timestamp_semantics"], "bars": []},
+            "evidence": [],
+        }
+        response["response_sha256"] = checksum(response)
+        return response
+
+    assert _validate_response(response_for(non_index), non_index)[1] == []
+    assert _validate_response(response_for(index), index)[1] == []
+    legacy = {**non_index, "authority_reference": old_index_reference}
+    assert _validate_response(response_for(legacy), legacy)[1] == []
+    with pytest.raises(MT5BridgeQueueError, match="REQUEST_AUTHORITY_SCOPE_MISMATCH"):
+        crossed = {**index, "authority_reference": FUSION_NON_INDEX_AUTHORITY_REFERENCE}
+        _validate_response(response_for(crossed), crossed)
+    with pytest.raises(MT5BridgeQueueError, match="REQUEST_AUTHORITY_SCOPE_MISMATCH"):
+        arbitrary = {**non_index, "authority_reference": "UNREVIEWED:arbitrary"}
+        _validate_response(response_for(arbitrary), arbitrary)
 
 
 def test_mt5_request_cadence_matches_closed_bar_cadence() -> None:
@@ -362,6 +478,38 @@ def test_pending_primary_is_not_requeued_and_index_without_equivalent_fails_clos
     assert "US30:M5" in {item["lane"] for item in expired["queued"]}
 
 
+def test_mt5_only_lane_stops_before_automatic_request_four(tmp_path: Path) -> None:
+    support = tmp_path / "support"
+    accept_catalogue(support, _catalogue())
+    database = tmp_path / "authority.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE bars (asset TEXT, timeframe TEXT, open_time_utc INTEGER)")
+    state = tmp_path / "state.json"
+    observed = datetime.now(UTC).replace(hour=12, minute=0, second=0, microsecond=0)
+    for index in range(3):
+        report = enqueue_due_requests(
+            database, support, state, at=observed + timedelta(seconds=301 * index),
+        )
+        request = next(item for item in report["queued"] if item["lane"] == "US30:M5")
+        pending = bridge_paths(support)["pending"] / f"{request['request_id']}.json"
+        payload = json.loads(pending.read_text(encoding="utf-8"))
+        payload["expires_at_utc"] = "2000-01-01T00:00:00Z"
+        pending.write_text(json.dumps(payload), encoding="utf-8")
+    fourth = enqueue_due_requests(
+        database, support, state, at=observed + timedelta(seconds=903),
+    )
+    assert "US30:M5" not in {item["lane"] for item in fourth["queued"]}
+    assert any(
+        item["lane"] == "US30:M5" and item["reason"] == "PROVIDER_ATTEMPT_LIMIT_REACHED"
+        for item in fourth["attention"]
+    )
+    sample = request
+    assert len(ProviderAttemptLedger(database).attempts(
+        lane="US30:M5", expected_boundary=str(sample["expected_boundary"]),
+        routing_revision=str(sample["routing_revision"]),
+    )) == 3
+
+
 def test_fallback_grant_requires_reviewed_exact_twelve_data_lane(tmp_path: Path) -> None:
     database = tmp_path / "authority.sqlite3"
     connection = sqlite3.connect(database)
@@ -436,6 +584,21 @@ def test_fallback_grant_requires_reviewed_exact_twelve_data_lane(tmp_path: Path)
         timeframe="M5",
         reason="MT5_BRIDGE_REQUEST_EXPIRED",
     ) is None
+
+    assert "AUDUSD:M5" in active_fallback_grants(database, support)
+    register = LaneUpdateRegister(database)
+    attempted = datetime.now(UTC) + timedelta(seconds=2)
+    with sqlite3.connect(register.path) as connection:
+        connection.execute(
+            "INSERT INTO lane_update_register "
+            "(asset,timeframe,state,last_attempted_at_utc,last_outcome,updated_at_utc) "
+            "VALUES(?,?,?,?,?,?)",
+            (
+                "AUDUSD", "M5", "RETRY", attempted.isoformat(),
+                "AUTO_PROVIDER_CYCLE:ALL_PROVIDERS_EXHAUSTED", attempted.isoformat(),
+            ),
+        )
+    assert "AUDUSD:M5" not in active_fallback_grants(database, support)
 
 
 def test_bridge_dispatch_is_fifo_by_issuance_not_random_request_uuid(tmp_path: Path) -> None:
@@ -556,6 +719,13 @@ def test_mt5_response_endpoint_accepts_a_catalogue_authorised_empty_completion(t
         paths.support, database=database, symbol="US30", timeframe="M5",
         start_utc="2026-09-01T00:00:00Z", end_utc="2026-09-08T00:00:00Z",
     )
+    attempts = ProviderAttemptLedger(database)
+    attempts.reserve(
+        request_id=queued["request_id"], lane="US30:M5",
+        expected_boundary="2026-09-08T00:00:00Z", routing_revision="test-revision",
+        provider="MT5_BRIDGE",
+    )
+    attempts.mark_dispatched(queued["request_id"])
     body = {
         "contract": "fragarach.mt5_evidence_response.v0.4",
         "request_id": queued["request_id"], "request_sha256": checksum(queued),
@@ -591,6 +761,10 @@ def test_mt5_response_endpoint_accepts_a_catalogue_authorised_empty_completion(t
         drained = drain_received_responses(database, paths["root"].parent)
         assert drained == {"received": 1, "accepted": 1, "rejected": 0}
         assert paths["completed"].joinpath(f"{queued['request_id']}.json").is_file()
+        assert attempts.attempts(
+            lane="US30:M5", expected_boundary="2026-09-08T00:00:00Z",
+            routing_revision="test-revision",
+        )[0]["outcome"] == "MT5_BRIDGE_EMPTY_RESPONSE"
     finally:
         server.shutdown()
         server.server_close()

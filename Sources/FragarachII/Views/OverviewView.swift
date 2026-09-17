@@ -29,7 +29,7 @@ struct OverviewView: View {
                     let scheduled=status.register?.readyCount ?? 0
                     HStack(spacing:12) {
                         SchedulerMetricCard(title:"Scheduler Service",value:operationalState,detail:"Process \(store.schedulerServiceRunning ? "running":"unavailable") · Heartbeat: \(SchedulerFormatting.timestamp(status.heartbeatTime))",state:store.schedulerServiceRunning ? "HEALTHY":"CRITICAL")
-                        SchedulerMetricCard(title:"Due now",value:"\(dueNow)",detail:dueNow == 0 ? "No overdue checks · \(scheduled) scheduled" : "Overdue checks awaiting dispatch · \(scheduled) scheduled",state:dueNow == 0 ? "CURRENT":"WAITING")
+                        SchedulerMetricCard(title:"Due now",value:"\(dueNow)",detail:dueNow == 0 ? "No overdue checks · \(scheduled) scheduled" : "Overdue checks awaiting dispatch · \(scheduled) scheduled",state:dueNow == 0 ? "CURRENT":"WAITING",action:{store.section = .scheduler})
                         SchedulerMetricCard(title:"Retrying",value:"\(status.register?.retryingCount ?? 0)",detail:"Lane-specific retry backoff",state:(status.register?.retryingCount ?? 0) == 0 ? "CURRENT":"WAITING")
                         SchedulerMetricCard(title:"Blocked",value:"\(status.register?.blockedCount ?? 0)",detail:"Click to inspect affected lanes",state:(status.register?.blockedCount ?? 0) == 0 ? "CURRENT":"FAILED",action:{store.showBlockedSchedulerLanes()})
                     }

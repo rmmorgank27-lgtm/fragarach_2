@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import sqlite3
 import tempfile
@@ -13,7 +14,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-from .index_cfd_mt5 import AUTHORITY_PATH, _authority, _ensure_authority
+from .index_cfd_mt5 import AUTHORITY_PATH, UNDERLYINGS, _authority, _ensure_authority
 from .ingestion.pipeline import RawEvidence, ingest_staged_batch
 from .mt5_broker_time import POLICY_ID, broker_server_to_utc
 from .publication_service import enqueue_publication, resume_pending_publications
@@ -22,6 +23,12 @@ from .lane_update_register import LaneUpdateRegister
 
 
 ACK_CONTRACT = "fragarach.mt5_evidence_ack.v0.4"
+FUSION_ROUTE_ID = "registered_standard_data_primary"
+FUSION_NON_INDEX_AUTHORITY_REFERENCE = (
+    "MT5_FUSION_MARKET_DATA_NON_INDEX_AUTHORITY_V1:"
+    "110b82bfb8154b75e3916b3e102e8682d768353cf44a5aed3c8287244ac3ec92"
+)
+_LOG = logging.getLogger(__name__)
 _MIRRORED = (
     "authority_reference", "operation", "canonical_symbol", "provider_symbol",
     "timeframe", "start_utc", "end_utc", "completed_bars_only",
@@ -44,6 +51,18 @@ _DURATION = {"H1": 3600, "M30": 1800, "M5": 300}
 
 class MT5BridgeQueueError(RuntimeError):
     pass
+
+
+def _mark_attempt_outcome(database: str | Path, request_id: str, outcome: str) -> None:
+    """Retain the operational result without risking an admitted receipt."""
+    from .provider_attempt_ledger import ProviderAttemptLedger, ledger_path
+
+    if not request_id or not ledger_path(database).is_file():
+        return
+    try:
+        ProviderAttemptLedger(database).mark_outcome(request_id, outcome)
+    except (OSError, sqlite3.Error) as error:
+        _LOG.warning("MT5 attempt outcome could not be recorded for %s: %s", request_id, error)
 
 
 def canonical_json(value: Any) -> bytes:
@@ -92,14 +111,50 @@ def authorised_client_id(node_id: str | None = None) -> str:
     return str(node["transport_client_id"])
 
 
-def _authority_reference(authority: dict[str, Any], route: dict[str, Any]) -> str:
-    if route.get("authority_reference"):
-        return str(route["authority_reference"])
+def _index_authority_reference(authority: dict[str, Any]) -> str:
+    """Keep the published index identity revision byte-for-byte unchanged."""
+
     try:
         declared = json.loads(AUTHORITY_PATH.read_text(encoding="utf-8"))["authority_checksum"]
     except (OSError, KeyError, json.JSONDecodeError) as error:
         raise MT5BridgeQueueError("AUTHORITY_REFERENCE_UNAVAILABLE") from error
     return f"{authority['authority_id']}:{declared}"
+
+
+def _authority_reference(
+    authority: dict[str, Any], route: dict[str, Any], canonical_symbol: str,
+) -> str:
+    if route.get("authority_reference"):
+        return str(route["authority_reference"])
+    if route.get("route_id") != FUSION_ROUTE_ID:
+        raise MT5BridgeQueueError("AUTHORITY_REFERENCE_UNAVAILABLE")
+    return (
+        _index_authority_reference(authority)
+        if canonical_symbol in UNDERLYINGS
+        else FUSION_NON_INDEX_AUTHORITY_REFERENCE
+    )
+
+
+def _validate_authority_reference(
+    authority: dict[str, Any], route: dict[str, Any], request: dict[str, Any],
+) -> None:
+    """Admit only the scoped new pin or an already-issued legacy Fusion pin."""
+
+    symbol = str(request.get("canonical_symbol") or "").upper()
+    reference = request.get("authority_reference")
+    required = _authority_reference(authority, route, symbol)
+    if reference == required:
+        return
+    # The Windows bridge temporarily accepts this exact old reference for
+    # non-index requests already in flight. New Mac requests always use the
+    # non-index pin; arbitrary references and index cross-use fail closed.
+    if (
+        route.get("route_id") == FUSION_ROUTE_ID
+        and symbol not in UNDERLYINGS
+        and reference == _index_authority_reference(authority)
+    ):
+        return
+    raise MT5BridgeQueueError("REQUEST_AUTHORITY_SCOPE_MISMATCH")
 
 
 def bridge_paths(support: str | Path, node_id: str | None = None) -> dict[str, Path]:
@@ -135,6 +190,7 @@ def bridge_namespaces(support: str | Path) -> tuple[tuple[str | None, dict[str, 
 def enqueue_request(
     support: str | Path, *, symbol: str, timeframe: str, start_utc: str,
     end_utc: str, expires_in_seconds: int = 900, database: str | Path | None = None,
+    request_id: str | None = None,
 ) -> dict[str, Any]:
     authority = _authority()
     bridge = authority["bridge"]
@@ -161,12 +217,13 @@ def enqueue_request(
     provider_symbol = str(published_route["provider_symbol"])
     route = _route(authority, str(published_route["source_route"]))
     now = datetime.now(UTC).replace(microsecond=0)
+    identifier = str(uuid.UUID(request_id)) if request_id else str(uuid.uuid4())
     request = {
         "contract": bridge["request_contract"],
-        "request_id": str(uuid.uuid4()),
+        "request_id": identifier,
         "issued_at_utc": now.isoformat().replace("+00:00", "Z"),
         "expires_at_utc": (now + timedelta(seconds=expires_in_seconds)).isoformat().replace("+00:00", "Z"),
-        "authority_reference": _authority_reference(authority, route),
+        "authority_reference": _authority_reference(authority, route, canonical_symbol),
         "operation": "bars", "canonical_symbol": canonical_symbol,
         "provider_symbol": provider_symbol, "timeframe": native_timeframe,
         "start_utc": start.isoformat().replace("+00:00", "Z"),
@@ -176,6 +233,8 @@ def enqueue_request(
     }
     node_id = str(published_route["node_id"])
     paths = bridge_paths(support, None if published_route.get("queue_namespace") == "default" else node_id)
+    if any((paths[name] / f"{identifier}.json").exists() for name in ("pending", "completed", "expired", "failed")):
+        raise MT5BridgeQueueError("REQUEST_ID_ALREADY_USED")
     _atomic_json(paths["pending"] / f"{request['request_id']}.json", request)
     return request
 
@@ -299,6 +358,7 @@ def drain_received_responses(
             except (NameError, AttributeError):
                 pass
             if request_id:
+                _mark_attempt_outcome(database, request_id, f"MT5_BRIDGE_RESPONSE_REJECTED:{error}")
                 from .mt5_tick_activity import fail_activity_request, is_activity_only_request
                 activity_only = is_activity_only_request(support, request_id)
                 fail_activity_request(support, request_id, str(error))
@@ -369,6 +429,7 @@ def _validate_response(response: dict[str, Any], request: dict[str, Any]) -> tup
     if response["trading_permitted"] is not False or response["account_profile"] != "STANDARD_NON_TRADING_DATA":
         raise MT5BridgeQueueError("INELIGIBLE_TERMINAL_PROFILE")
     route = _route(authority, str(response["source_route"]))
+    _validate_authority_reference(authority, route, request)
     if response["broker_family"] != route["broker_family"]:
         raise MT5BridgeQueueError("BROKER_FAMILY_MISMATCH")
     bars = response["evidence"]
@@ -559,6 +620,11 @@ def accept_response(
     if pending.is_file():
         completed.parent.mkdir(parents=True, exist_ok=True)
         os.replace(pending, completed)
+    if fallback_grant is None:
+        _mark_attempt_outcome(
+            database, request_id,
+            "MT5_BRIDGE_RESPONSE_ACCEPTED" if staged else "MT5_BRIDGE_EMPTY_RESPONSE",
+        )
     from .mt5_tick_activity import complete_activity_request
     complete_activity_request(support, request_id, activity_result)
     return {

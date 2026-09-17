@@ -40,10 +40,16 @@ def register_path(database_path: str | Path) -> Path:
 class LaneUpdateRegister:
     """Small SQLite work index with one row per active commissioned lane."""
 
-    def __init__(self, database_path: str | Path, *, path: str | Path | None = None) -> None:
+    def __init__(
+        self, database_path: str | Path, *, path: str | Path | None = None,
+        read_only: bool = False, connection_timeout_seconds: float = 5.0,
+    ) -> None:
         self.database_path = Path(database_path).expanduser().resolve()
         self.path = Path(path).expanduser().resolve() if path else register_path(database_path)
-        self._initialize()
+        self._read_only = read_only
+        self._connection_timeout_seconds = connection_timeout_seconds
+        if not read_only:
+            self._initialize()
 
     def is_seeded(self) -> bool:
         with self._connection() as connection:
@@ -515,6 +521,32 @@ class LaneUpdateRegister:
         )
         return {"state": "READY", "next_check_at_utc": str(next_check)}
 
+    def reconcile_canonical_edge(
+        self, *, asset: str, timeframe: str, canonical_edge: str,
+        next_expected_boundary: str, at: datetime | None = None,
+    ) -> bool:
+        """Advance stale operational metadata after an independently admitted bar.
+
+        Only an already-claimed row may be reconciled. Canonical bars remain
+        untouched; the next provider attempt receives a new boundary identity
+        instead of inheriting an exhausted attempt from an older edge.
+        """
+
+        observed = normalized_utc(at).isoformat()
+        with self._connection() as connection:
+            cursor = connection.execute(
+                """UPDATE lane_update_register
+                   SET last_successful_bar_utc=?,next_expected_boundary_utc=?,
+                       last_outcome='EXTERNAL_CANONICAL_ADVANCED',retry_count=0,
+                       retry_not_before_utc=NULL,updated_at_utc=?,
+                       lane_state_version=lane_state_version+1
+                   WHERE asset=? AND timeframe=? AND state='RUNNING'
+                     AND (last_successful_bar_utc IS NULL OR last_successful_bar_utc < ?)""",
+                (canonical_edge, next_expected_boundary, observed,
+                 asset, timeframe, canonical_edge),
+            )
+        return cursor.rowcount == 1
+
     def retry(self, *, asset: str, timeframe: str, reason: str, at: datetime | None = None, not_before: datetime | None = None) -> dict[str, object]:
         observed = normalized_utc(at)
         with self._connection() as connection:
@@ -568,16 +600,29 @@ class LaneUpdateRegister:
         """Make the governed fallback executable after primary failure."""
 
         observed = normalized_utc(at)
-        self._update(
-            asset,
-            timeframe,
-            state="RETRY",
-            next_check_at_utc=observed.isoformat(),
-            last_outcome=reason,
-            retry_not_before_utc=observed.isoformat(),
-            updated_at_utc=observed.isoformat(),
-        )
-        return {"state": "RETRY", "next_check_at_utc": observed.isoformat()}
+        with self._connection() as connection:
+            cursor = connection.execute(
+                """UPDATE lane_update_register
+                   SET state='RETRY',next_check_at_utc=?,last_outcome=?,
+                       retry_not_before_utc=?,updated_at_utc=?,
+                       lane_state_version=lane_state_version+1
+                   WHERE asset=? AND timeframe=?
+                     AND last_outcome LIKE 'MT5_BRIDGE_PRIMARY_PENDING:%'""",
+                (observed.isoformat(), reason, observed.isoformat(),
+                 observed.isoformat(), asset, timeframe),
+            )
+            if cursor.rowcount:
+                return {"state": "RETRY", "next_check_at_utc": observed.isoformat(), "released": True}
+            row = connection.execute(
+                "SELECT state,next_check_at_utc FROM lane_update_register WHERE asset=? AND timeframe=?",
+                (asset, timeframe),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown lane update register row: {asset}:{timeframe}")
+        # The same durable grant is reported on every scheduler wake. Once a
+        # fallback attempt has established its own retry/backoff, replaying the
+        # grant must not pull that lane forward again and starve other cadences.
+        return {"state": str(row[0]), "next_check_at_utc": row[1], "released": False}
 
     def release_automation_restored_blocks(
         self, lanes: list[tuple[str, str]], *, at: datetime | None = None,
@@ -802,11 +847,17 @@ class LaneUpdateRegister:
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self.path, timeout=5, isolation_level=None)
+        target = f"file:{self.path}?mode=ro" if self._read_only else self.path
+        connection = sqlite3.connect(
+            target, uri=self._read_only,
+            timeout=self._connection_timeout_seconds, isolation_level=None,
+        )
         connection.row_factory = sqlite3.Row
         try:
             connection.execute("PRAGMA foreign_keys=ON")
-            connection.execute("PRAGMA busy_timeout=5000")
+            connection.execute(
+                f"PRAGMA busy_timeout={max(0, int(self._connection_timeout_seconds * 1000))}"
+            )
             yield connection
         finally:
             connection.close()

@@ -1,6 +1,6 @@
 {
   "contract": "fragarach_ii.mt5_route_manifest.v1",
-  "revision": 6,
+  "revision": 7,
   "purpose": "Reviewed MT5 acquisition authority and staged broker-node topology",
   "receipt_retention_hours": 72,
   "nodes": [
@@ -41,20 +41,20 @@
     {
       "asset_classes": ["FX", "METALS", "ENERGY", "INDICES", "BROKER_INDEX_CFDS"],
       "timeframes": ["D1", "H1", "M30", "M5"],
-      "provider_order": ["MT5_BRIDGE", "TWELVE_DATA", "YAHOO_FINANCE"],
-      "activation": "ACTIVE_OPERATOR_APPROVED_2026-09-11"
+      "provider_order": ["MT5_BRIDGE", "YAHOO_FINANCE", "TWELVE_DATA"],
+      "activation": "SPEC_067_ESTATE_DEFAULT_2026-09-16"
     },
     {
       "asset_classes": ["US_EQUITIES", "UK_EQUITIES", "GERMAN_EQUITIES", "AUSTRALIAN_EQUITIES"],
       "timeframes": ["D1"],
-      "provider_order": ["TWELVE_DATA", "MT5_BRIDGE", "YAHOO_FINANCE"],
-      "activation": "ACTIVE_OPERATOR_APPROVED_2026-09-15"
+      "provider_order": ["MT5_BRIDGE", "YAHOO_FINANCE", "TWELVE_DATA"],
+      "activation": "SPEC_067_ESTATE_DEFAULT_2026-09-16"
     },
     {
       "asset_classes": ["CRYPTO"],
       "timeframes": ["D1", "H1", "M30", "M5"],
-      "provider_order": ["MT5_BRIDGE", "BINANCE", "COINGECKO"],
-      "activation": "ACTIVE_OPERATOR_APPROVED_2026-09-15_EIGHTCAP_EXACT_USD"
+      "provider_order": ["MT5_BRIDGE", "BINANCE", "COINGECKO_DEX", "COINGECKO", "YAHOO_FINANCE", "TWELVE_DATA"],
+      "activation": "SPEC_067_ESTATE_DEFAULT_2026-09-16"
     }
   ],
   "approved_aliases": {

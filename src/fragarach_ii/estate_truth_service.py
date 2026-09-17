@@ -525,7 +525,11 @@ def _capability(row,lane_facts,capability_rows,journal=None):
         # a normal lane.  The Scheduler keeps provider cycling on the normal
         # cadence; only an explicit operator decision can create a runtime
         # BLOCKED row.
-        route_pending=not deferred and not supported and not provider_setup_required and not mapping_discovery_pending
+        route_pending=(
+            not deferred and not supported and not provider_setup_required
+            and not mapping_discovery_pending
+            and reason != "PROVIDER_SYMBOL_MAPPING_REQUIRED"
+        )
         blocked=False
         state=_registration_transaction_state(
             registration_status=registration_status,
@@ -541,7 +545,7 @@ def _capability(row,lane_facts,capability_rows,journal=None):
                 else _lane_journal_state(journal,asset,timeframe)
             ),
         )
-        reasons=["POLICY_INTENTIONALLY_DEFERRED"] if deferred else ["MAPPING_DISCOVERY_PENDING"] if mapping_discovery_pending else ["PROVIDER_SETUP_REQUIRED"] if provider_setup_required else ["PROVIDER_ROUTE_PENDING",reason] if route_pending else []
+        reasons=["POLICY_INTENTIONALLY_DEFERRED"] if deferred else ["MAPPING_DISCOVERY_PENDING"] if mapping_discovery_pending else ["PROVIDER_SETUP_REQUIRED"] if provider_setup_required else ["PROVIDER_ROUTE_PENDING",reason] if route_pending else [reason] if reason else []
         consumption_available=bool(count) and not blocked
         automation_eligible=bool(eligible)
         # A bridge-scheduled provider is intentionally excluded from the HTTP

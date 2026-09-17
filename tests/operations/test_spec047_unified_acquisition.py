@@ -228,7 +228,7 @@ def test_operator_fetch_uses_scheduler_failover_and_skips_ineligible_provider() 
 
         def acquire(_database, **kwargs):
             calls.append(kwargs["provider"])
-            if kwargs["provider"] == "TWELVE_DATA":
+            if kwargs["provider"] == "BINANCE":
                 raise AcquisitionError("PROVIDER_TIMEOUT", "forced timeout")
             edge=int(datetime(2026,7,12,tzinfo=UTC).timestamp())
             with registered_writer(database) as connection:
@@ -253,12 +253,12 @@ def test_operator_fetch_uses_scheduler_failover_and_skips_ineligible_provider() 
         )
         assert result["work_class"] == "OPERATOR_FETCH"
         assert result["outcome"] == "SUCCESS"
-        assert calls == ["TWELVE_DATA", "BINANCE"]
-        assert result["providers_attempted"] == ["BINANCE", "TWELVE_DATA"]
+        assert calls == ["BINANCE", "COINGECKO"]
+        assert result["providers_attempted"] == ["BINANCE", "COINGECKO"]
         considered = {row["provider"]: row for row in result["providers_considered"]}
         assert considered["YAHOO_FINANCE"]["reason"] == "ASSET_CLASS_UNSUPPORTED"
         assert result["provider_results"][0]["result"] == "TRANSIENT_PROVIDER_FAILURE"
-        assert result["provider_results"][-1]["mapping_class"] == "EXACT_REPRESENTATION"
+        assert result["provider_results"][-1]["mapping_class"] == "APPROVED_PROVIDER_ALIAS"
 
 
 def test_initial_fx_intraday_plan_does_not_require_canonical_edge() -> None:

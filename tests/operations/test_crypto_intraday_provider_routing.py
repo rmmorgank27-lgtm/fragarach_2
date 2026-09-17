@@ -134,15 +134,15 @@ def _insert_canonical_bar(database: Path, *, symbol: str, timeframe: str, opened
         )
 
 
-def test_crypto_intraday_prefers_binance_over_twelve_data_and_keeps_d1_independent() -> None:
+def test_crypto_routes_binance_before_twelve_data_across_direct_lanes() -> None:
     with tempfile.TemporaryDirectory() as directory:
         database = Path(directory) / "authority.sqlite3"
         _register(database, "ETHUSD")
         _twelve_data_eth_fact(database)
 
         d1 = _plan(database, "ETHUSD", "D1")
-        assert d1["selected_provider"] == "TWELVE_DATA"
-        assert d1["selected_provider_symbol"] == "ETH/USD"
+        assert d1["selected_provider"] == "BINANCE"
+        assert d1["selected_provider_symbol"] == "ETHUSDT"
 
         for timeframe in ("H1", "M30", "M5"):
             plan = _plan(database, "ETHUSD", timeframe)
@@ -151,7 +151,7 @@ def test_crypto_intraday_prefers_binance_over_twelve_data_and_keeps_d1_independe
             assert plan["selected_provider_symbol"] == "ETHUSDT"
             assert plan["selected_mapping_class"] == "APPROVED_EQUIVALENT_REPRESENTATION"
             assert plan["selected_fallback_rank"] == 1
-            assert plan["routing_policy"] == "CRYPTO_INTRADAY_V1"
+            assert plan["routing_policy"] == "ROUTING_SNAPSHOT_V2"
             assert considered["BINANCE"]["provider_representation"] == "ETH/USDT"
             assert considered["BINANCE"]["representation_type"] == "APPROVED_EQUIVALENT_REPRESENTATION"
             assert considered["BINANCE"]["quote_equivalence"] == "USD_USDT_CRYPTO"
@@ -347,7 +347,7 @@ def test_fx_routing_and_stock_required_set_are_unchanged() -> None:
 
         fx = _plan(fx_database, "GBPAUD", "H1")
         assert fx["selected_provider"] == "TWELVE_DATA"
-        assert fx["routing_policy"] == "DEFAULT_PROVIDER_PRIORITY_V1"
+        assert fx["routing_policy"] == "ROUTING_SNAPSHOT_V2"
 
         stocks = required_set_acquisition_plan(stock_database, symbol="AAPL", at=NOW)
         assert stocks["required_timeframes"] == ["D1"]

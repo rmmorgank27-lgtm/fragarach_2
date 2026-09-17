@@ -75,6 +75,10 @@ struct MarketHistoryView: View {
                 ForEach(lane.notes ?? [], id: \.self) { note in
                     Text(note).font(.caption).foregroundStyle(.secondary)
                 }
+                Button("View current routing") {
+                    selectedLane=nil
+                    store.openRouting(symbol:store.marketHistorySymbol,timeframe:lane.timeframe)
+                }.buttonStyle(.borderedProminent)
                 if lane.derived && lane.timeframe != "M15" { Text("Only complete periods supported by the daily calendar are counted.").font(.caption) }
             }.padding().frame(width: 350, alignment: .leading)
         }

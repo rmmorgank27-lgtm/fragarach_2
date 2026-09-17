@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sqlite3
+import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -104,10 +105,62 @@ def has_reviewed_twelve_data_fallback(
     )
 
 
+def reviewed_fallback_route(
+    database: str | Path, *, symbol: str, timeframe: str,
+) -> dict[str, object] | None:
+    """Return the first reviewed provider after MT5 in the effective lane route."""
+
+    from .acquisition_orchestrator import load_provider_profiles, mapping_authority
+    from .provider_facts import load_provider_facts
+    from .routing_service import current_revision, effective_provider_order
+
+    canonical = symbol.strip().upper()
+    lane = timeframe.strip().upper()
+    try:
+        order = list(effective_provider_order(database, symbol=canonical, timeframe=lane))
+        revision = current_revision(database)["routing_revision"]
+        facts = load_provider_facts(database).get("mappings", {})
+        profiles = {item.provider: item for item in load_provider_profiles() if item.enabled}
+    except (OSError, ValueError, RuntimeError, sqlite3.Error):
+        return None
+    if not order or order[0] != "MT5_BRIDGE":
+        return None
+    for provider in order[1:]:
+        profile = profiles.get(provider)
+        if profile is None:
+            continue
+        resolved = facts.get(f"{provider}:{canonical}") if isinstance(facts, dict) else None
+        mapping = mapping_authority(
+            profile, symbol=canonical, timeframe=lane,
+            primary_provider=None, primary_symbol=None,
+            resolved_mapping=(dict(resolved) if isinstance(resolved, dict) else None),
+        )
+        if (
+            not mapping.get("direct_real_eligible")
+            or not mapping.get("provider_symbol")
+            or mapping.get("timeframe_supported") is False
+        ):
+            continue
+        if (
+            provider == "TWELVE_DATA"
+            and _registered_asset_class(database, canonical) == "CRYPTO"
+            and lane != "D1"
+            and not mapping.get("crypto_intraday_approved")
+        ):
+            continue
+        return {
+            "provider": provider,
+            "provider_symbol": mapping.get("provider_symbol"),
+            "provider_order": order,
+            "routing_revision": revision,
+        }
+    return None
+
+
 def active_fallback_grants(
     database: str | Path, support: str | Path,
 ) -> dict[str, dict[str, object]]:
-    """Return grants whose failed MT5 boundary has not yet been replaced."""
+    """Return grants still awaiting their one governed fallback cycle."""
 
     path = failover_state_path(support)
     state = _read_json(path)
@@ -125,12 +178,13 @@ def active_fallback_grants(
             changed = True
             continue
         symbol, timeframe = lane.split(":", 1)
-        if not has_reviewed_twelve_data_fallback(
-            database, symbol=symbol, timeframe=timeframe,
-        ):
+        if reviewed_fallback_route(database, symbol=symbol, timeframe=timeframe) is None:
             changed = True
             continue
         if _lane_token(database, symbol, timeframe) != grant.get("baseline_lane_token"):
+            changed = True
+            continue
+        if _fallback_cycle_finished(database, symbol, timeframe, grant):
             changed = True
             continue
         active[lane] = grant
@@ -141,6 +195,34 @@ def active_fallback_grants(
             "grants": active,
         })
     return active
+
+
+def _fallback_cycle_finished(
+    database: str | Path, symbol: str, timeframe: str, grant: dict[str, object],
+) -> bool:
+    """Do not pin MT5 behind a fallback that already failed to advance."""
+
+    from .lane_update_register import register_path
+
+    path = register_path(database)
+    if not path.is_file():
+        return False
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.2) as connection:
+            row = connection.execute(
+                "SELECT last_attempted_at_utc,last_outcome FROM lane_update_register "
+                "WHERE asset=? AND timeframe=?", (symbol, timeframe),
+            ).fetchone()
+    except sqlite3.Error:
+        return False
+    if row is None or not str(row[1] or "").startswith("AUTO_PROVIDER_CYCLE:"):
+        return False
+    try:
+        attempted = datetime.fromisoformat(str(row[0]).replace("Z", "+00:00"))
+        granted = datetime.fromisoformat(str(grant["granted_at_utc"]).replace("Z", "+00:00"))
+    except (KeyError, TypeError, ValueError):
+        return False
+    return attempted > granted
 
 
 def grant_mt5_fallback(
@@ -157,9 +239,10 @@ def grant_mt5_fallback(
 
     canonical = symbol.strip().upper()
     lane = timeframe.strip().upper()
-    if not has_reviewed_twelve_data_fallback(
+    fallback = reviewed_fallback_route(
         database, symbol=canonical, timeframe=lane,
-    ):
+    )
+    if fallback is None:
         return None
     provider_symbol = authorised_lanes(support, database=database).get((canonical, lane))
     if not provider_symbol or not is_mt5_primary_lane(
@@ -180,7 +263,10 @@ def grant_mt5_fallback(
         "request_id": request_id,
         "granted_at_utc": observed.isoformat(),
         "baseline_lane_token": _lane_token(database, canonical, lane),
-        "provider_order": ["MT5_BRIDGE", "TWELVE_DATA"],
+        "provider_order": fallback["provider_order"],
+        "next_provider": fallback["provider"],
+        "next_provider_symbol": fallback.get("provider_symbol"),
+        "routing_revision": fallback.get("routing_revision"),
         "policy_revision": FAILOVER_POLICY_REVISION,
     }
     grants[grant["lane"]] = grant
@@ -189,6 +275,9 @@ def grant_mt5_fallback(
         "updated_at_utc": observed.isoformat(),
         "grants": grants,
     })
+    if request_id:
+        from .provider_attempt_ledger import ProviderAttemptLedger
+        ProviderAttemptLedger(database).mark_outcome(request_id, reason)
     return grant
 
 
@@ -198,15 +287,23 @@ def fail_pending_primary_requests(
     *,
     reason: str,
     at: datetime,
+    node_ids: set[str] | None = None,
 ) -> list[dict[str, object]]:
-    """Retire pending primary requests when bridge health is classified failed."""
+    """Retire only the failed nodes' pending primary requests."""
 
     from .mt5_tick_activity import is_activity_only_request
+    from .mt5_route_manifest import active_bridge_nodes
 
+    namespace_ids = {
+        None if node.get("queue_namespace") == "default" else str(node["node_id"]):
+            str(node["node_id"])
+        for node in active_bridge_nodes()
+    }
     released: list[dict[str, object]] = []
     pending = [
         (paths, path)
-        for _, paths in bridge_namespaces(support)
+        for namespace, paths in bridge_namespaces(support)
+        if node_ids is None or namespace_ids.get(namespace) in node_ids
         for path in paths["pending"].glob("*.json")
     ]
     for paths, path in sorted(pending, key=lambda item: item[1].name):
@@ -239,6 +336,11 @@ def operator_bridge_route(
 
     canonical_symbol = symbol.strip().upper()
     canonical_timeframe = timeframe.strip().upper()
+    from .routing_service import effective_provider_order
+    if effective_provider_order(
+        database, symbol=canonical_symbol, timeframe=canonical_timeframe,
+    )[:1] != ("MT5_BRIDGE",):
+        return None
     try:
         provider_symbol = authorised_lanes(
             support, database=Path(database).expanduser().resolve(),
@@ -403,12 +505,20 @@ def enqueue_due_requests(
     state_path: str | Path,
     *,
     at: datetime | None = None,
+    eligible_node_ids: set[str] | None = None,
 ) -> dict:
     db = Path(database).expanduser().resolve()
+    from .provider_attempt_ledger import ProviderAttemptLedger
+    from .routing_service import current_revision
+    attempts = ProviderAttemptLedger(db)
+    routing_revision = str(current_revision(db)["routing_revision"])
     state_file = Path(state_path).expanduser().resolve()
     state = _read_json(state_file)
     now = (at or datetime.now(UTC)).astimezone(UTC).replace(microsecond=0)
     expired = archive_expired_requests(support, at=now)
+    for item in expired:
+        if item.get("request_id"):
+            attempts.mark_outcome(str(item["request_id"]), "MT5_BRIDGE_REQUEST_EXPIRED")
     from .mt5_tick_activity import is_activity_only_request
     for item in expired:
         request_id = str(item.get("request_id") or "")
@@ -430,9 +540,16 @@ def enqueue_due_requests(
         )
     fallback_grants = active_fallback_grants(db, support)
     pending_lanes: dict[tuple[str, str], dict[str, object]] = {}
+    from .mt5_route_manifest import active_bridge_nodes
+    namespace_ids = {
+        None if node.get("queue_namespace") == "default" else str(node["node_id"]):
+            str(node["node_id"])
+        for node in active_bridge_nodes()
+    }
     all_pending = [
         path
-        for _, paths in bridge_namespaces(support)
+        for namespace, paths in bridge_namespaces(support)
+        if eligible_node_ids is None or namespace_ids.get(namespace) in eligible_node_ids
         for path in paths["pending"].glob("*.json")
     ]
     for path in all_pending:
@@ -451,9 +568,18 @@ def enqueue_due_requests(
         }
     connection = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     queued = []
+    attention = []
     try:
-        for (symbol, timeframe), provider_symbol in sorted(authorised_lanes(support, database=db).items()):
+        for (symbol, timeframe), approved in sorted(authorised_routes(support, database=db).items()):
+            if eligible_node_ids is not None and approved.get("node_id") not in eligible_node_ids:
+                continue
+            provider_symbol = str(approved["provider_symbol"])
             if timeframe not in MINIMUM_SECONDS:
+                continue
+            from .routing_service import effective_provider_order
+            if effective_provider_order(
+                db, symbol=symbol, timeframe=timeframe,
+            )[:1] != ("MT5_BRIDGE",):
                 continue
             # Terminal capability is necessary but never sufficient.  The
             # class policy decides whether that approved mapping is primary.
@@ -494,25 +620,61 @@ def enqueue_due_requests(
             ).fetchone()[0]
             # The MT5 range is inclusive. Start after the canonical edge so a
             # closed market returns an empty receipt rather than re-admitting
-            # and republishing the same bar every cadence.
+            # and republishing the same bar every cadence. D1 is stamped at
+            # broker-server midnight (UTC+2/+3), while the canonical date is
+            # stored at UTC midnight. Include the next broker midnight in the
+            # query window; starting at the next UTC midnight excludes that
+            # D1 bar and leaves only its unproven successor in the response.
             start = (
                 datetime.fromtimestamp(int(latest) + TIMEFRAME_SECONDS[timeframe], UTC)
+                - (timedelta(hours=4) if timeframe == "D1" else timedelta(0))
                 if latest else now - timedelta(days=7)
             )
             if start >= now:
                 continue
-            request = enqueue_request(
-                support, symbol=symbol, timeframe=timeframe,
-                start_utc=start.isoformat().replace("+00:00", "Z"),
-                end_utc=now.isoformat().replace("+00:00", "Z"),
-                expires_in_seconds=1800,
-                database=db,
+            expected_boundary = (
+                str(freshness.get("expected_latest"))
+                if isinstance(freshness, dict) and freshness.get("expected_latest")
+                else f"LEGACY_UNRESOLVED:{now.date().isoformat()}"
             )
+            request_id = str(uuid.uuid4())
+            attempt = attempts.reserve(
+                request_id=request_id, lane=lane,
+                expected_boundary=expected_boundary,
+                routing_revision=routing_revision, provider="MT5_BRIDGE", at=now,
+            )
+            if attempt is None:
+                attention.append({
+                    "lane": lane, "expected_boundary": expected_boundary,
+                    "routing_revision": routing_revision,
+                    "reason": "PROVIDER_ATTEMPT_LIMIT_REACHED",
+                })
+                continue
+            try:
+                request = enqueue_request(
+                    support, symbol=symbol, timeframe=timeframe,
+                    start_utc=start.isoformat().replace("+00:00", "Z"),
+                    end_utc=now.isoformat().replace("+00:00", "Z"),
+                    expires_in_seconds=1800, database=db, request_id=request_id,
+                )
+                attempts.mark_dispatched(request_id, at=now)
+            except BaseException:
+                if not any(
+                    (paths["pending"] / f"{request_id}.json").is_file()
+                    for _, paths in bridge_namespaces(support)
+                ):
+                    attempts.release_undispatched(
+                        request_id, reason="MT5_BRIDGE_REQUEST_NOT_QUEUED",
+                    )
+                raise
             state.setdefault("last_enqueued_at", {})[lane] = now.isoformat()
             queued.append({
                 "request_id": request["request_id"],
                 "lane": lane,
                 "expires_at_utc": request["expires_at_utc"],
+                "expected_boundary": expected_boundary,
+                "routing_revision": routing_revision,
+                "attempt_ordinal": attempt["ordinal"],
             })
     finally:
         connection.close()
@@ -525,6 +687,7 @@ def enqueue_due_requests(
         "pending": list(pending_lanes.values()),
         "fallback_grants": list(fallback_grants.values()),
         "queued": queued,
+        "attention": attention,
     }
 
 

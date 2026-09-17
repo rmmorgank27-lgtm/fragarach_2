@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -12,12 +13,15 @@ from fragarach_ii.acquisition_orchestrator import (
 from fragarach_ii.lane_commissioning import ensure_commissioned_lane
 from fragarach_ii.lane_update_register import LaneUpdateRegister
 from fragarach_ii.scheduler_service import (
+    SchedulerService,
     SchedulerJournal,
     _authority_change_token,
     _credit_window_recovery_required,
     _credit_window_register_recovery_required,
+    _due_lanes_from_register,
     _fair_bounded_selection,
     _pending_operator_fetches,
+    _provider_dispatch_allowed,
     _release_terminal_operator_fetches,
     _retry_delay_seconds,
     _time_triggered_runtime_snapshot,
@@ -36,6 +40,68 @@ from tests.validation.test_d1_session_validation import _create_lane
 
 
 NOW = datetime(2026, 7, 14, 0, 10, tzinfo=UTC)
+
+
+def test_mt5_queue_uses_node_health_not_healthy_aggregate(tmp_path: Path, monkeypatch) -> None:
+    database = tmp_path / "authority.sqlite3"
+    sqlite3.connect(database).close()
+    observed: dict[str, object] = {}
+
+    def health(_database, *, now):
+        return {
+            "effective_status": "HEALTHY",
+            "nodes": [
+                {"node": {"node_id": "eightcap-mt5-bridge"}, "effective_status": "HEALTHY"},
+                {"node": {"node_id": "tradewinds-mt5-bridge"}, "effective_status": "CRITICAL"},
+            ],
+        }
+
+    def fail(_database, _support, *, reason, at, node_ids):
+        observed["failed_nodes"] = node_ids
+        return []
+
+    def enqueue(_database, _support, _state, *, at, eligible_node_ids):
+        observed["eligible_nodes"] = eligible_node_ids
+        return {"pending": [], "queued": [], "fallback_grants": []}
+
+    monkeypatch.setattr("fragarach_ii.mt5_bridge_health.bridge_health_status", health)
+    monkeypatch.setattr("fragarach_ii.mt5_bridge_requests.fail_pending_primary_requests", fail)
+    monkeypatch.setattr("fragarach_ii.mt5_bridge_requests.enqueue_due_requests", enqueue)
+
+    report = SchedulerService(database, credential=None)._queue_mt5_primary_lanes(at=NOW)
+
+    assert observed["failed_nodes"] == {"tradewinds-mt5-bridge"}
+    assert observed["eligible_nodes"] == {"eightcap-mt5-bridge"}
+    assert report["unhealthy_nodes"] == ["tradewinds-mt5-bridge"]
+
+
+def test_fusion_activity_requests_pause_while_only_eightcap_is_healthy(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    database = tmp_path / "authority.sqlite3"
+    sqlite3.connect(database).close()
+    monkeypatch.setattr(
+        "fragarach_ii.mt5_bridge_health.bridge_health_status",
+        lambda *_args, **_kwargs: {
+            "effective_status": "HEALTHY",
+            "nodes": [
+                {"node": {"node_id": "eightcap-mt5-bridge"}, "effective_status": "HEALTHY"},
+                {"node": {"node_id": "tradewinds-mt5-bridge"}, "effective_status": "CRITICAL"},
+            ],
+        },
+    )
+    service = SchedulerService(database, credential=None)
+
+    assert service._queue_mt5_activity_backfill()["status"] == "FUSION_BRIDGE_UNAVAILABLE"
+    assert service._queue_mt5_continuous_activity(at=NOW)["status"] == "FUSION_BRIDGE_UNAVAILABLE"
+
+
+def test_provider_dispatch_budget_never_allows_automatic_attempt_four() -> None:
+    assert _provider_dispatch_allowed(0)
+    assert _provider_dispatch_allowed(1)
+    assert _provider_dispatch_allowed(2)
+    assert not _provider_dispatch_allowed(3)
+    assert not _provider_dispatch_allowed(4)
 
 
 def _m5_lane(tmp_path: Path) -> Path:
@@ -78,16 +144,62 @@ def test_primary_handoff_defers_generic_claim_until_fallback_release(tmp_path: P
         item["asset"] == "AUDUSD" and item["timeframe"] == "M5"
         for item in register.claim_due(at=NOW + timedelta(minutes=5), limit=10)
     )
-    register.release_provider_handoff(
+    released = register.release_provider_handoff(
         asset="AUDUSD",
         timeframe="M5",
         reason="MT5_BRIDGE_REQUEST_EXPIRED",
         at=NOW + timedelta(minutes=6),
     )
+    assert released["released"] is True
     assert any(
         item["asset"] == "AUDUSD" and item["timeframe"] == "M5"
         for item in register.claim_due(at=NOW + timedelta(minutes=6), limit=10)
     )
+    retry_at = NOW + timedelta(hours=1)
+    register.retry(
+        asset="AUDUSD", timeframe="M5", reason="PROVIDER_RETRY_BACKOFF",
+        at=NOW + timedelta(minutes=7), not_before=retry_at,
+    )
+    replayed = register.release_provider_handoff(
+        asset="AUDUSD", timeframe="M5", reason="MT5_BRIDGE_REQUEST_EXPIRED",
+        at=NOW + timedelta(minutes=8),
+    )
+    assert replayed == {
+        "state": "RETRY", "next_check_at_utc": retry_at.isoformat(), "released": False,
+    }
+    assert register.claim_due(at=NOW + timedelta(minutes=8), limit=10) == []
+
+
+def test_monitor_register_reads_without_writer_initialization(tmp_path: Path) -> None:
+    database = _m5_lane(tmp_path)
+    writer = LaneUpdateRegister(database)
+    writer.audit_estate(at=NOW, reason="TEST")
+    monitor = LaneUpdateRegister(
+        database, read_only=True, connection_timeout_seconds=0.05,
+    )
+    assert monitor.summary() == writer.summary()
+    assert monitor.due_count(at=NOW) == writer.due_count(at=NOW)
+
+
+def test_due_claim_reconciles_newer_canonical_edge_before_provider_attempt(tmp_path: Path) -> None:
+    database = _m5_lane(tmp_path)
+    register = LaneUpdateRegister(database)
+    register.audit_estate(at=NOW, reason="TEST")
+    _add_intraday_bar(
+        database, "AUDUSD", "M5",
+        "2026-07-14T00:05:00+00:00", "2026-07-14T00:10:00+00:00",
+    )
+
+    due = _due_lanes_from_register(
+        database, NOW + timedelta(minutes=10), register, max_tasks=10,
+    )
+
+    assert [(item["symbol"], item["scheduled_boundary"]) for item in due] == [
+        ("AUDUSD", "2026-07-14T00:15:00+00:00"),
+    ]
+    row = next(item for item in register.rows() if item["asset"] == "AUDUSD" and item["timeframe"] == "M5")
+    assert row["last_successful_bar_utc"] == "2026-07-14T00:10:00+00:00"
+    assert row["next_expected_boundary_utc"] == "2026-07-14T00:15:00+00:00"
 
 
 def test_daily_priority_zero_is_preserved_and_due_count_is_indexed(tmp_path: Path) -> None:
@@ -497,13 +609,13 @@ def test_credit_window_deferral_retries_instead_of_blocking_a_normal_lane(tmp_pa
     journal = tmp_path / "scheduler.json"
     LaneUpdateRegister(database).audit_estate(at=NOW, reason="TEST")
     profile = ProviderProfile(
-        provider="TEST_PROVIDER", enabled=True,
+        provider="TWELVE_DATA", enabled=True,
         supported_asset_classes=("FX",), supported_timeframes=("M5",),
         credential_environment=None, entitlement_state="AVAILABLE",
         request_limit=1, request_window_seconds=60, maximum_rows_per_request=4_000,
         history_limit_days=None, cost_class=0, priority=1, cooldown_seconds=30,
         mappings=({
-            "asset": "AUDUSD", "symbol": "AUDUSD", "timeframes": ["M5"],
+            "asset": "AUDUSD", "symbol": "AUD/USD", "timeframes": ["M5"],
             "mapping_class": "EXACT_REPRESENTATION", "reviewed_status": "REVIEWED",
             "authority_source": "TEST",
         },),
@@ -589,7 +701,7 @@ def test_daily_provider_not_ready_retries_after_a_bounded_delay(tmp_path: Path) 
     assert _retry_delay_seconds(2, "PROVIDER_D1_NOT_READY") == 600
 
 
-def test_daily_provider_not_ready_fails_over_to_an_approved_provider(tmp_path: Path) -> None:
+def test_daily_provider_not_ready_fails_over_in_estate_route_order(tmp_path: Path) -> None:
     database = tmp_path / "authority.sqlite3"
     journal = tmp_path / "scheduler.json"
     observed = datetime(2026, 7, 14, 22, 10, tzinfo=UTC)
@@ -623,7 +735,7 @@ def test_daily_provider_not_ready_fails_over_to_an_approved_provider(tmp_path: P
     def acquire(_database, **kwargs):
         provider = str(kwargs["provider"])
         calls.append(provider)
-        if provider == "TWELVE_DATA":
+        if provider == "YAHOO_FINANCE":
             raise AcquisitionError("PROVIDER_D1_NOT_READY", "daily aggregate still rolling")
         edge = int(datetime(2026, 7, 14, tzinfo=UTC).timestamp())
         with registered_writer(database) as connection:
@@ -647,16 +759,16 @@ def test_daily_provider_not_ready_fails_over_to_an_approved_provider(tmp_path: P
         database, at=observed, credential=None, journal_path=journal,
         acquirer=acquire,
         provider_profiles=(
-            profile("TWELVE_DATA", 1, "AUD/USD"),
-            profile("YAHOO_FINANCE", 2, "AUDUSD=X"),
+            profile("TWELVE_DATA", 2, "AUD/USD"),
+            profile("YAHOO_FINANCE", 1, "AUDUSD=X"),
         ),
         time_triggered=True,
     )
 
     lane = SchedulerJournal(database, journal).lane("AUDUSD", "D1")
-    assert calls == ["TWELVE_DATA", "YAHOO_FINANCE"]
+    assert calls == ["YAHOO_FINANCE", "TWELVE_DATA"]
     assert lane["result"] == "SUCCESS"
-    assert lane["current_provider"] == "YAHOO_FINANCE"
+    assert lane["current_provider"] == "TWELVE_DATA"
     assert snapshot["register"]["blocked_count"] == 0
 
 

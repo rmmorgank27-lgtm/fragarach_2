@@ -12,6 +12,7 @@ struct TruthDetailView:View {
             HStack(alignment:.firstTextBaseline){VStack(alignment:.leading){Text(lane.symbol).font(.largeTitle);Text(lane.timeframe).foregroundStyle(.secondary);Text(lane.operationalStateLabel ?? lane.truthState.authorityState).font(.headline)};Spacer();VStack(alignment:.trailing){Text("\(lane.truthState.truthScore)").font(.system(size:36,weight:.semibold,design:.rounded));HStack(spacing:5){TruthStateMark(state:visualState,size:14);Text(lane.freshnessDimension?.label ?? lane.overallOperationalState ?? lane.truthState.authorityState)}.foregroundStyle(TruthPresentation.color(visualState))}}
             HStack{
                 Button("Manage Data"){store.openManageData(symbol:lane.symbol,timeframe:lane.timeframe)}.buttonStyle(.borderedProminent)
+                Button("View Route"){store.openRouting(symbol:lane.symbol,timeframe:lane.timeframe)}
                 Button("Price History"){showPriceHistory=true}
                 if lane.timeframe == "M5", lane.freshnessDimension?.label != "Current" {
                     Button("Queue M5 update now",systemImage:"play.fill"){Task{await store.queueLaneUpdate(lane.id)}}

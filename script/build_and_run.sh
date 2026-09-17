@@ -20,11 +20,16 @@ if [[ -n "$(git -C "$ROOT_DIR" status --porcelain)" ]]; then
 fi
 ICON_SOURCE="$ROOT_DIR/assets/macos/FragarachII.icns"
 
-pkill -x "$APP_NAME" >/dev/null 2>&1 || true
+# SwiftUI macros require the full Xcode toolchain. Build before stopping the
+# installed app so a compiler failure leaves the last usable bundle alone.
+if [[ -d /Applications/Xcode.app/Contents/Developer ]]; then
+  export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+fi
 cd "$ROOT_DIR"
 ./script/generate_app_icon.sh
 swift build -c release
 BUILD_BINARY="$(swift build -c release --show-bin-path)/$APP_NAME"
+pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_MACOS"
 mkdir -p "$APP_CONTENTS/Resources"

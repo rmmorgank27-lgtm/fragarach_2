@@ -204,7 +204,17 @@ def approved_route(
     canonical = symbol.strip().upper()
     market = asset_class.strip().upper()
     lane = timeframe.strip().upper()
-    provider_symbol = approved_provider_symbol(canonical, market)
+    explicit = next((
+        route for route in load_manifest().get("reviewed_mt5_primary_lanes", [])
+        if isinstance(route, dict)
+        and str(route.get("canonical_symbol") or "").upper() == canonical
+        and str(route.get("asset_class") or "").upper() == market
+        and lane in {str(value).upper() for value in route.get("timeframes", [])}
+    ), None)
+    provider_symbol = (
+        str(explicit["provider_symbol"]) if explicit
+        else approved_provider_symbol(canonical, market)
+    )
     if provider_symbol is None or lane not in REVIEWABLE_TIMEFRAMES:
         return None
     node = bridge_node_for_asset_class(market)
@@ -216,7 +226,10 @@ def approved_route(
         "asset_class": market,
         "timeframe": lane,
         "mapping_class": "APPROVED_PROVIDER_ALIAS",
-        "authority_source": "MT5_ROUTE_MANIFEST_V6_OPERATOR_APPROVED",
+        "authority_source": (
+            str(explicit.get("authority_source")) if explicit
+            else "MT5_ROUTE_MANIFEST_V6_OPERATOR_APPROVED"
+        ),
         "node_id": str(node["node_id"]),
         "source_route": str(node["source_route"]),
         "transport_client_id": str(node["transport_client_id"]),

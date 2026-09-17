@@ -550,8 +550,12 @@ def acquisition_plan(
             reason = quote_equivalence_rejection
         route_rank, routing_policy, routing_rejection = _routing_policy(
             asset_class=asset_class, timeframe=timeframe, profile=profile, mapping=mapping,
+            database_path=database_path, symbol=symbol,
         )
-        if routing_rejection and mapping.get("direct_real_eligible"):
+        if (
+            routing_rejection and mapping.get("direct_real_eligible")
+            and reason not in {"ASSET_CLASS_UNSUPPORTED", "TIMEFRAME_UNSUPPORTED"}
+        ):
             reason = routing_rejection
         if profile.provider in attempted:
             reason = "PROVIDER_ALREADY_ATTEMPTED"
@@ -596,6 +600,8 @@ def acquisition_plan(
             f"health={score}; estimated_requests={requests}; provider={profile.provider}"
         )
     temporary = [item for item in considered if item["reason"] in TEMPORARY_INELIGIBILITY]
+    from .routing_service import current_revision
+    routing_revision = current_revision(database_path)["routing_revision"]
     return {
         "id": f"{symbol}:{timeframe}:{scheduled_boundary}",
         "lane": f"{symbol}:{timeframe}",
@@ -614,6 +620,7 @@ def acquisition_plan(
         "selected_provider_api_base_url": selected[1].get("api_base_url") if selected else None,
         "selected_fallback_rank": fallback_ranks.get(selected[0].provider) if selected else None,
         "routing_policy": selected[5] if selected else _routing_policy_name(asset_class, timeframe),
+        "routing_revision": routing_revision,
         "selection_reason": selection_reason,
         "estimated_request_count": selected[2] if selected else 0,
         "rate_budget_eligibility": bool(selected),
@@ -626,6 +633,7 @@ def acquisition_plan(
 
 def _routing_policy(
     *, asset_class: str, timeframe: str, profile: ProviderProfile, mapping: dict[str, object],
+    database_path: str | Path | None = None, symbol: str | None = None,
 ) -> tuple[int, str, str | None]:
     """Return deterministic market/timeframe routing rank and a policy rejection.
 
@@ -634,21 +642,29 @@ def _routing_policy(
     Twelve Data representation fact.
     """
     policy = _routing_policy_name(asset_class, timeframe)
-    if policy != "CRYPTO_INTRADAY_V1":
-        return 100, policy, None
-    if profile.provider == "COINGECKO_DEX" and mapping.get("intraday_quality_preferred") is True:
-        return 0, policy, None
-    if profile.provider == "BINANCE":
-        return (1 if mapping.get("quote_equivalence") == "USD_USDT_CRYPTO" else 0), policy, None
-    if profile.provider == "TWELVE_DATA":
+    legacy_rank = 100
+    legacy_rejection = None
+    if policy == "CRYPTO_INTRADAY_V1" and profile.provider == "COINGECKO_DEX" and mapping.get("intraday_quality_preferred") is True:
+        legacy_rank = 0
+    elif policy == "CRYPTO_INTRADAY_V1" and profile.provider == "BINANCE":
+        legacy_rank = 1 if mapping.get("quote_equivalence") == "USD_USDT_CRYPTO" else 0
+    elif policy == "CRYPTO_INTRADAY_V1" and profile.provider == "TWELVE_DATA":
         explicit_approval = bool(mapping.get("crypto_intraday_approved"))
         proven_capability = bool((mapping.get("timeframe_capability") or {}).get("supported"))
         if not (explicit_approval and proven_capability):
-            return 90, policy, "CRYPTO_INTRADAY_NOT_APPROVED"
-        return 3, policy, None
-    if "CRYPTO" in profile.supported_asset_classes:
-        return (1 if mapping.get("quote_equivalence") == "USD_USDT_CRYPTO" else 2), policy, None
-    return 100, policy, None
+            legacy_rank, legacy_rejection = 90, "CRYPTO_INTRADAY_NOT_APPROVED"
+        else:
+            legacy_rank = 3
+    elif policy == "CRYPTO_INTRADAY_V1" and "CRYPTO" in profile.supported_asset_classes:
+        legacy_rank = 1 if mapping.get("quote_equivalence") == "USD_USDT_CRYPTO" else 2
+    if database_path is not None and symbol:
+        from .routing_service import effective_provider_order
+        order = effective_provider_order(database_path, symbol=symbol, timeframe=timeframe)
+        provider = profile.provider.upper()
+        if provider not in order:
+            return 999, "ROUTING_SNAPSHOT_V2", "PROVIDER_DISABLED_BY_LANE_ROUTE"
+        return order.index(provider), "ROUTING_SNAPSHOT_V2", legacy_rejection
+    return legacy_rank, policy, legacy_rejection
 
 
 def _routing_policy_name(asset_class: str, timeframe: str) -> str:
@@ -1010,8 +1026,12 @@ def acquisition_capability_projection(
                 route_rank, routing_policy, routing_rejection = _routing_policy(
                     asset_class=str(asset_class), timeframe=lane_timeframe,
                     profile=profile, mapping=mapping,
+                    database_path=database_path, symbol=str(canonical),
                 )
-                if routing_rejection and mapping.get("direct_real_eligible"):
+                if (
+                    routing_rejection and mapping.get("direct_real_eligible")
+                    and reason not in {"ASSET_CLASS_UNSUPPORTED", "TIMEFRAME_UNSUPPORTED"}
+                ):
                     reason = routing_rejection
                 capability_state = _controlled_capability_state(profile, mapping, reason)
                 rows.append({

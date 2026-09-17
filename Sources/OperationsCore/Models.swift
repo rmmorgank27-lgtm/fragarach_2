@@ -555,6 +555,10 @@ public struct SchedulerLane: Codable, Equatable, Sendable, Identifiable {
     public let result: String?
     public let reason: String?
     public let routingDecision: String?
+    public let routingRevision:String?
+    public let attemptCount:Int
+    public let attemptCap:Int
+    public let attemptBoundary:String?
     public let providersConsidered: [SchedulerProviderDecision]
     public let acquisitionPlan: SchedulerLaneAcquisitionPlan?
     public let providersRejected: [SchedulerProviderDecision]
@@ -580,7 +584,7 @@ public struct SchedulerLane: Codable, Equatable, Sendable, Identifiable {
         case nextScheduledAcquisition = "next_scheduled_acquisition"
         case lastAcquisition = "last_acquisition"
         case durationSeconds = "duration_seconds"
-        case routingDecision = "routing_decision", providersConsidered = "providers_considered", acquisitionPlan = "acquisition_plan"
+        case routingDecision = "routing_decision", routingRevision="routing_revision",attemptCount="attempt_count",attemptCap="attempt_cap",attemptBoundary="attempt_boundary",providersConsidered = "providers_considered", acquisitionPlan = "acquisition_plan"
         case providersRejected = "providers_rejected", currentProvider = "current_provider"
         case attemptHistory = "attempt_history", publicationResult = "publication_result", publicationState = "publication_state", publicationJobID = "publication_job_id"
         case manualRequest = "manual_request"
@@ -590,7 +594,7 @@ public struct SchedulerLane: Codable, Equatable, Sendable, Identifiable {
         let c=try decoder.container(keyedBy:CodingKeys.self)
         id=try c.decode(String.self,forKey:.id);symbol=try c.decode(String.self,forKey:.symbol);timeframe=try c.decode(String.self,forKey:.timeframe);schedulerState=try c.decode(String.self,forKey:.schedulerState)
         latestCanonicalObservation=try c.decodeIfPresent(String.self,forKey:.latestCanonicalObservation);expectedLatest=try c.decodeIfPresent(String.self,forKey:.expectedLatest);expectedEdgeStatus=try c.decodeIfPresent(String.self,forKey:.expectedEdgeStatus);lag=try c.decode(SchedulerLag.self,forKey:.lag);nextScheduledAcquisition=try c.decodeIfPresent(String.self,forKey:.nextScheduledAcquisition);lastAcquisition=try c.decodeIfPresent(String.self,forKey:.lastAcquisition);durationSeconds=try c.decodeIfPresent(Double.self,forKey:.durationSeconds);result=try c.decodeIfPresent(String.self,forKey:.result);reason=try c.decodeIfPresent(String.self,forKey:.reason)
-        routingDecision=try c.decodeIfPresent(String.self,forKey:.routingDecision);providersConsidered=try c.decodeIfPresent([SchedulerProviderDecision].self,forKey:.providersConsidered) ?? [];acquisitionPlan=try c.decodeIfPresent(SchedulerLaneAcquisitionPlan.self,forKey:.acquisitionPlan);providersRejected=try c.decodeIfPresent([SchedulerProviderDecision].self,forKey:.providersRejected) ?? [];currentProvider=try c.decodeIfPresent(String.self,forKey:.currentProvider);attemptHistory=try c.decodeIfPresent([SchedulerProviderAttempt].self,forKey:.attemptHistory) ?? [];publicationResult=try c.decodeIfPresent(SchedulerPublicationResult.self,forKey:.publicationResult);publicationState=try c.decodeIfPresent(String.self,forKey:.publicationState);publicationJobID=try c.decodeIfPresent(String.self,forKey:.publicationJobID);manualRequest=try c.decodeIfPresent(String.self,forKey:.manualRequest);market=try c.decodeIfPresent(String.self,forKey:.market);lifecycleState=try c.decodeIfPresent(String.self,forKey:.lifecycleState);pauseState=try c.decodeIfPresent(String.self,forKey:.pauseState);pauseEffectiveSources=try c.decodeIfPresent([String].self,forKey:.pauseEffectiveSources) ?? [];providerCapabilities=try c.decodeIfPresent([AcquisitionCapabilityRow].self,forKey:.providerCapabilities) ?? [];freshnessSeverity=try c.decodeIfPresent(String.self,forKey:.freshnessSeverity);operationalState=try c.decodeIfPresent(String.self,forKey:.operationalState)
+        routingDecision=try c.decodeIfPresent(String.self,forKey:.routingDecision);routingRevision=try c.decodeIfPresent(String.self,forKey:.routingRevision);attemptCount=try c.decodeIfPresent(Int.self,forKey:.attemptCount) ?? 0;attemptCap=try c.decodeIfPresent(Int.self,forKey:.attemptCap) ?? 3;attemptBoundary=try c.decodeIfPresent(String.self,forKey:.attemptBoundary);providersConsidered=try c.decodeIfPresent([SchedulerProviderDecision].self,forKey:.providersConsidered) ?? [];acquisitionPlan=try c.decodeIfPresent(SchedulerLaneAcquisitionPlan.self,forKey:.acquisitionPlan);providersRejected=try c.decodeIfPresent([SchedulerProviderDecision].self,forKey:.providersRejected) ?? [];currentProvider=try c.decodeIfPresent(String.self,forKey:.currentProvider);attemptHistory=try c.decodeIfPresent([SchedulerProviderAttempt].self,forKey:.attemptHistory) ?? [];publicationResult=try c.decodeIfPresent(SchedulerPublicationResult.self,forKey:.publicationResult);publicationState=try c.decodeIfPresent(String.self,forKey:.publicationState);publicationJobID=try c.decodeIfPresent(String.self,forKey:.publicationJobID);manualRequest=try c.decodeIfPresent(String.self,forKey:.manualRequest);market=try c.decodeIfPresent(String.self,forKey:.market);lifecycleState=try c.decodeIfPresent(String.self,forKey:.lifecycleState);pauseState=try c.decodeIfPresent(String.self,forKey:.pauseState);pauseEffectiveSources=try c.decodeIfPresent([String].self,forKey:.pauseEffectiveSources) ?? [];providerCapabilities=try c.decodeIfPresent([AcquisitionCapabilityRow].self,forKey:.providerCapabilities) ?? [];freshnessSeverity=try c.decodeIfPresent(String.self,forKey:.freshnessSeverity);operationalState=try c.decodeIfPresent(String.self,forKey:.operationalState)
     }
 }
 
@@ -1035,7 +1039,8 @@ public struct MT5BridgeNodeStatus:Codable,Equatable,Sendable,Identifiable {
     public let recovery:MT5BridgeRecoveryStatus?
     public let queue:MT5BridgeQueueStatus?
     public let catalogue:MT5BridgeCatalogueStatus?
-    enum CodingKeys:String,CodingKey {case node,bridge,watchdog,recovery,queue,catalogue;case effectiveStatus="effective_status",freshnessState="freshness_state",receivedAtUTC="received_at_utc",reportedAtUTC="reported_at_utc",ageSeconds="age_seconds"}
+    public let authorisedCurrentEstateRoutes:Int?
+    enum CodingKeys:String,CodingKey {case node,bridge,watchdog,recovery,queue,catalogue;case effectiveStatus="effective_status",freshnessState="freshness_state",receivedAtUTC="received_at_utc",reportedAtUTC="reported_at_utc",ageSeconds="age_seconds",authorisedCurrentEstateRoutes="authorised_current_estate_routes"}
 }
 
 public struct MT5BridgeMonitorStatus:Codable,Equatable,Sendable {
@@ -1240,7 +1245,7 @@ public struct ReadOnlyClientsSnapshot:Codable,Equatable,Sendable {
 
 public enum DataOperationsMode: String, CaseIterable, Identifiable, Hashable, Sendable { case fetch="Fetch / Update",importFile="Import File",retire="Retire",history="History";public var id:String{rawValue} }
 public enum SystemSection: String, CaseIterable, Identifiable, Hashable, Sendable { case status="Status",providerFacts="Provider Facts",backups="Backups",settings="Settings",audit="Audit";public var id:String{rawValue} }
-public enum ManageDataSection: String, CaseIterable, Identifiable, Hashable, Sendable { case discover="Discover",operations="Acquire & Import",system="System";public var id:String{rawValue} }
+public enum ManageDataSection: String, CaseIterable, Identifiable, Hashable, Sendable { case discover="Discover",routing="Routing & Providers",operations="Acquire & Import",system="System";public var id:String{rawValue} }
 public enum LegacyRoute: String, Sendable { case lanes,authorityLedger,operations,integrityBackup,settings,acquire,importEvidence }
 public struct NavigationDestination:Equatable,Sendable { public let workspace:ConsoleSection;public let dataMode:DataOperationsMode?;public let systemSection:SystemSection?;public let manageDataSection:ManageDataSection?;public init(workspace:ConsoleSection,dataMode:DataOperationsMode?,systemSection:SystemSection?,manageDataSection:ManageDataSection?=nil){self.workspace=workspace;self.dataMode=dataMode;self.systemSection=systemSection;self.manageDataSection=manageDataSection} }
 public enum NavigationRedirect {
@@ -1331,6 +1336,11 @@ public enum OperationIntent: Equatable, Sendable {
     case recordProviderMappingDecision(symbol:String,decision:String,candidate:String)
     case configureProvider(provider:String,enabled:Bool,operationalLimit:Int,concurrencyLimit:Int)
     case configureProviderRoute(provider:String,asset:String,providerSymbol:String,timeframe:String,mappingClass:String,calendarID:String)
+    case readRouting
+    case saveRoutingDraft(symbol:String,timeframe:String,providers:[String],disabled:[String],reason:String,restoreDefault:Bool)
+    case validateRoutingDraft(id:String)
+    case activateRoutingDraft(id:String)
+    case restoreRoutingDefaults(symbol:String,timeframe:String,reason:String)
     case registerInstrument(candidate: String)
     case retirementPlan(asset:String,scope:String,lanes:[String])
     case retireInstrument(asset:String,scope:String,lanes:[String],reason:String,note:String,confirmation:String)

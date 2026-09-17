@@ -1401,7 +1401,10 @@ class PersistentSchedulerRuntime:
             from .lane_update_register import LaneUpdateRegister
 
             observed = datetime.now(UTC)
-            register = LaneUpdateRegister(self.paths.database)
+            register = LaneUpdateRegister(
+                self.paths.database, read_only=True,
+                connection_timeout_seconds=0.2,
+            )
             summary = {
                 **register.summary(),
                 "due_now_count": register.due_count(at=observed),

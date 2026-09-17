@@ -320,7 +320,7 @@ func checkSpec043DiscoverWorkspace() throws {
     let dia=try dow.representations.first{$0.symbol=="DIA"} ?? {throw CheckFailure.failed("DIA missing")}()
     try check(MarketDiscoveryPresentation.primaryAction(for:dia) == .addToEstate,"available representation review action")
     try check(MarketAssetFilter.metals.includes(assetClass:"METALS") && !MarketAssetFilter.metals.includes(assetClass:"FX"),"asset filters")
-    try check(ManageDataSection.allCases.map(\.rawValue)==["Discover","Acquire & Import","System"],"Manage Data section labels")
+    try check(ManageDataSection.allCases.map(\.rawValue)==["Discover","Routing & Providers","Acquire & Import","System"],"Manage Data section labels")
 }
 func cfdID(_ market:DiscoveredMarket)->String?{market.representations.first{$0.symbol=="US30"}?.id}
 

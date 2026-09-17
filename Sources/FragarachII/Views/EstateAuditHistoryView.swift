@@ -104,6 +104,9 @@ struct EstateAuditHistoryView: View {
                                 Text("\(finding.severity) · \(finding.findingClass.replacingOccurrences(of: "_", with: " "))").font(.subheadline.bold())
                                 Text(finding.authorityIdentifier).font(.caption.monospaced()).foregroundStyle(.secondary)
                                 Text(finding.recommendedAction).font(.caption)
+                                if let lane=routingLane(finding.authorityIdentifier) {
+                                    Button("Open affected route") { store.openRouting(symbol:lane.0,timeframe:lane.1) }
+                                }
                             }
                         }
                     }
@@ -130,5 +133,11 @@ struct EstateAuditHistoryView: View {
     }
     private func resultColor(_ result: String) -> Color {
         switch result { case "HEALTHY", "REPAIRED": .green; case "BLOCKING", "INTEGRITY": .red; default: .orange }
+    }
+    private func routingLane(_ value:String)->(String,String)? {
+        let timeframes=Set(["D1","H1","M30","M15","M5"])
+        let parts=value.uppercased().split(whereSeparator:{ $0 == ":" || $0 == "/" || $0 == " " }).map(String.init)
+        guard let index=parts.firstIndex(where:{timeframes.contains($0)}),index>0 else{return nil}
+        return (parts[index-1],parts[index])
     }
 }

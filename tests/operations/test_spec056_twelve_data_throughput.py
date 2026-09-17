@@ -4,6 +4,7 @@ import json
 import sqlite3
 import threading
 import time
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -169,13 +170,19 @@ def test_retry_retains_queue_item_trace_and_boundary_identity(tmp_path: Path, mo
     monkeypatch.setenv("FRAGARACH_TWELVE_DATA_CREDIT_ROOT", str(tmp_path / "credits"))
     database, journal_path = tmp_path / "authority.sqlite3", tmp_path / "scheduler.json"
     _create_lane(database, "AUDUSD", ["2026-07-13"])
+    # This checks retry identity, not provider pacing. Real-time dispatch
+    # spacing makes the third immediate synthetic cycle timing-dependent.
+    profile = replace(
+        next(item for item in load_provider_profiles() if item.provider == "TWELVE_DATA"),
+        dispatch_interval_seconds=0.0,
+    )
 
     def upstream_failure(_database, **_kwargs):
         raise AcquisitionError("TWELVEDATA_UPSTREAM_5XX", "Twelve Data HTTP 503", http_status=503)
 
     first = run_due_acquisitions(
         database, at=AT, credential="fixture", journal_path=journal_path,
-        acquirer=upstream_failure,
+        acquirer=upstream_failure, provider_profiles=(profile,),
     )
     item = next(row for row in first["acquisition_queue"] if row["lane"] == "AUDUSD:D1")
     original = (item["id"], item["trace_id"], item["requested_through"])
@@ -187,6 +194,7 @@ def test_retry_retains_queue_item_trace_and_boundary_identity(tmp_path: Path, mo
     second = run_due_acquisitions(
         database, at=AT + timedelta(days=1), credential="fixture",
         journal_path=journal_path, acquirer=upstream_failure, catch_up=True,
+        provider_profiles=(profile,),
     )
     retried = next(row for row in second["acquisition_queue"] if row["lane"] == "AUDUSD:D1")
     assert (retried["id"], retried["trace_id"]) == original[:2]
@@ -221,6 +229,7 @@ def test_retry_retains_queue_item_trace_and_boundary_identity(tmp_path: Path, mo
     completed = run_due_acquisitions(
         database, at=AT + timedelta(days=1, seconds=5), credential="fixture",
         journal_path=journal_path, acquirer=advancing, catch_up=True,
+        provider_profiles=(profile,),
     )
     assert not any(row["lane"] == "AUDUSD:D1" for row in completed["acquisition_queue"])
     trace = trace_for_lane(SchedulerJournal(database, journal_path).data, "AUDUSD", "D1")

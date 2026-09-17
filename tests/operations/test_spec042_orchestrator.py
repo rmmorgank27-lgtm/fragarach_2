@@ -55,8 +55,8 @@ class Spec042OrchestratorTests(unittest.TestCase):
             _create_lane(database, "AUDUSD", ["2026-07-13"])
             profiles = (
                 profile("UNSUPPORTED", priority=1, timeframes=("H1",)),
-                profile("EXPENSIVE", priority=10, cost=3),
-                profile("CHEAP", priority=10, cost=0),
+                profile("TWELVE_DATA", priority=10, cost=3),
+                profile("YAHOO_FINANCE", priority=10, cost=0),
             )
             budgets = build_rate_budgets(profiles, {}, monotonic=lambda: 1.0, wall_clock=lambda: datetime(2026, 7, 14, tzinfo=UTC))
             kwargs = dict(
@@ -70,7 +70,7 @@ class Spec042OrchestratorTests(unittest.TestCase):
             )
             first = acquisition_plan(**kwargs); second = acquisition_plan(**kwargs)
             self.assertEqual(first, second)
-            self.assertEqual(first["selected_provider"], "CHEAP")
+            self.assertEqual(first["selected_provider"], "YAHOO_FINANCE")
             rejected = {item["provider"]: item["reason"] for item in first["providers_considered"]}
             self.assertEqual(rejected["UNSUPPORTED"], "TIMEFRAME_UNSUPPORTED")
 
@@ -121,13 +121,13 @@ class Spec042OrchestratorTests(unittest.TestCase):
             database = Path(directory) / "authority.sqlite3"; journal = Path(directory) / "scheduler.json"
             _create_lane(database, "AUDUSD", ["2026-07-13"])
             profiles = (
-                profile("TWELVE_DATA", priority=10, credential=True, mapping=False),
-                profile("YAHOO_FINANCE", priority=20),
+                profile("TWELVE_DATA", priority=20, credential=True, mapping=False),
+                profile("YAHOO_FINANCE", priority=10),
             )
             calls=[]
             def acquire(_database, **kwargs):
                 calls.append(kwargs["provider"])
-                if kwargs["provider"] == "TWELVE_DATA":
+                if kwargs["provider"] == "YAHOO_FINANCE":
                     raise AcquisitionError("PROVIDER_TIMEOUT", "timed out")
                 edge=int(datetime(2026,7,14,tzinfo=UTC).timestamp())
                 with registered_writer(database) as connection:
@@ -139,11 +139,11 @@ class Spec042OrchestratorTests(unittest.TestCase):
                 database, at=datetime(2026,7,14,21,tzinfo=UTC), credential="fixture",
                 journal_path=journal, acquirer=acquire, provider_profiles=profiles,
             )
-            self.assertEqual(calls,["TWELVE_DATA","YAHOO_FINANCE"])
+            self.assertEqual(calls,["YAHOO_FINANCE","TWELVE_DATA"])
             audusd=next(event for event in snapshot["events"] if event.get("symbol")=="AUDUSD" and event.get("id","").startswith("AUDUSD"))
             self.assertEqual(audusd["result"],"SUCCESS")
-            failover=next(event for event in snapshot["events"] if event.get("provider")=="TWELVE_DATA")
-            self.assertEqual(failover["next_provider"],"YAHOO_FINANCE")
+            failover=next(event for event in snapshot["events"] if event.get("provider")=="YAHOO_FINANCE")
+            self.assertEqual(failover["next_provider"],"TWELVE_DATA")
 
     def test_no_eligible_provider_creates_one_restart_safe_request(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

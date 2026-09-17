@@ -2,7 +2,10 @@
 
 ## Status
 
-Proposed for operator review. No implementation is authorised by this document.
+Implementation authorised by the operator on 2026-09-16. The routing core and
+native workspace are under acceptance review; the rollout and live acceptance
+gates in sections 9-11 remain controlling and are not implied complete by this
+status change.
 
 ## Objective
 
@@ -20,6 +23,14 @@ instructions. Requirements adopted from it are stated explicitly below.
 This specification extends SPEC-041, SPEC-048, SPEC-063, SPEC-064, SPEC-065,
 and SPEC-066. It does not alter immutable market evidence, canonical bar
 identity, or the single-writer boundary.
+
+Fragarach is not presently relied on as a live current-data system. Its
+unreliable current acquisition is the repair target; historical bars are
+preserved, not the primary optimisation target. The operator does not require
+the old Fragarach app and the replacement to run in parallel. MT5 terminal
+data is used by other critical applications, so this work must not change
+terminal trading functions, broker account state, or those applications'
+existing MT5 data path.
 
 ---
 
@@ -71,7 +82,9 @@ identity, or the single-writer boundary.
 ## 2. Current-estate baseline and target routing model
 
 The baseline was read from the live authority and provider/bridge projections
-on 2026-09-16. It contains 67 commissioned symbols and 191 commissioned lanes.
+on 2026-09-16. It contains 191 recorded lanes: 187 active routes and four
+retired or invalidated D1 lanes retained for historical visibility. The
+inactive lanes must remain visible but cannot be edited or acquired.
 This section records the starting point for migration; the implemented screen
 must always render the current effective snapshot rather than hard-code this
 table.
@@ -153,10 +166,13 @@ to explain the route.
    reviewed for current-estate crypto, but those candidates cannot currently
    participate after an MT5-primary failure unless the separate orchestration
    path is selected.
-3. The Fusion receiver authority is named as an index-CFD authority while it
-   is also used for FX, metals, energy, and XOM requests. The stale revision
-   pin was repaired on 2026-09-16, but the semantic authority scope remains
-   wrong.
+3. The Fusion receiver previously used the index-CFD authority for FX,
+   metals, energy, and XOM. On 2026-09-16 Windows staged the versioned
+   non-index market-data authority and Mac issuance/validation was cut over,
+   while the index reference remained unchanged. Live new-reference receipts
+   remain unverified because the Fusion terminal is absent; old non-index
+   receipts remain accepted during the compatibility window. Route activation
+   stays gated until both remote receipt classes are proven.
 4. Several lane retry counters are lifetime-like totals in the hundreds. They
    do not express bounded attempts for the current expected boundary.
 5. Provider Facts, MT5 terminal catalogues, class policy, operator D1
@@ -435,6 +451,14 @@ Switching to a fallback counts as another attempt. Scheduler evaluation,
 credit-window waiting, node-capacity waiting, and provider cooldown waiting do
 not increment the attempt count because no provider request was sent.
 
+MT5 queue and HTTP Scheduler dispatch must debit the same Fragarach-owned
+operational attempt ledger. The ledger is separate from the signed MT5 request
+and response payloads so that routing metadata cannot weaken receipt checksum
+validation or alter the Windows terminal contract. An MT5 request counts once
+when it is handed to the bridge transport; expiry, repeated polling, and
+receipt admission must not count it again. The HTTP fallback planner consumes
+that recorded attempt before selecting its first HTTP provider.
+
 After attempt 3 fails, the lane enters `ATTENTION_REQUIRED` with:
 
 * last provider/node and outcome;
@@ -657,6 +681,14 @@ Before editable routes can activate:
 This is an authority naming/scope repair, not permission to broaden terminal
 access, weaken receipt validation, or enable trading.
 
+Staged cutover references (2026-09-16): non-index Fusion requests use
+`MT5_FUSION_MARKET_DATA_NON_INDEX_AUTHORITY_V1:110b82bfb8154b75e3916b3e102e8682d768353cf44a5aed3c8287244ac3ec92`;
+NAS100/US30/US500 retain
+`MT5_BROKER_FAMILY_INDEX_CFD_AUTHORITY_V1:2c5dc7e112b1a3ca761efb2bcb467a862e477fe74a3d9b69601c588b72b0da09`.
+The Mac validator still accepts already-issued legacy non-index requests.
+Do not disable Windows `legacy_non_index_accepted` until the old pending queue
+has cleared and fresh remote receipts under both current references pass.
+
 ---
 
 ## 10. Migration and rollout
@@ -695,12 +727,14 @@ access, weaken receipt validation, or enable trading.
 
 ### Phase E - acceptance and release
 
-* run shadow routing comparison against the existing production decision path;
-* require zero unexplained lane decisions before cutover;
+* replay recorded lane decisions offline against the proposed routing policy;
+  do not run an unreliable old Fragarach app in parallel as an acceptance gate;
+* require zero unexplained lane decisions before enabling the replacement;
 * package the native app and services from an identified release;
 * retain a one-click restore to the previous routing revision; and
-* monitor fourteen continuous days for unbounded retries, silent source
-  changes, duplicate admissions, and stale catalogue presentation.
+* monitor fourteen continuous days of replacement operation for current-bar
+  freshness, unbounded retries, silent source changes, duplicate admissions,
+  and stale catalogue presentation.
 
 ---
 
@@ -708,8 +742,9 @@ access, weaken receipt validation, or enable trading.
 
 The update is accepted only when automated and live evidence proves:
 
-1. all 191 commissioned lanes appear once in the routing matrix, including
-   explicit derived and no-route states;
+1. all 191 recorded lanes appear once in the routing matrix, including the
+   187 active routes, four non-editable inactive lanes, and explicit derived
+   and no-route states;
 2. every Scheduler route decision cites the same active routing revision shown
    by the app;
 3. current MT5 primary lanes retain exact broker symbols and node identity;

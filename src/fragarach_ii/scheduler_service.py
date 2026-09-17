@@ -78,6 +78,7 @@ from .lane_commissioning import (
     resolved_calendar_id,
 )
 from .provider_facts import load_provider_facts, provider_facts_path
+from .provider_attempt_ledger import ProviderAttemptLedger, latest_attempts_by_lane
 from .credentials import CredentialAuthority, CredentialState
 from .adaptive_scheduler import (
     POLICIES,
@@ -112,6 +113,18 @@ SCHEDULER_JOURNAL_V3_CONTRACT = "fragarach_ii.scheduler_journal.v3"
 SCHEDULER_JOURNAL_V2_CONTRACT = "fragarach_ii.scheduler_journal.v2"
 SCHEDULER_JOURNAL_V1_CONTRACT = "fragarach_ii.scheduler_journal.v1"
 _EVENT_LIMIT = 200
+MAX_PROVIDER_DISPATCH_ATTEMPTS_PER_BOUNDARY = 3
+
+
+def _provider_dispatch_allowed(attempt_count: int) -> bool:
+    """Return whether another automatic provider request may be dispatched."""
+    return int(attempt_count) < MAX_PROVIDER_DISPATCH_ATTEMPTS_PER_BOUNDARY
+
+
+class _AutomaticAttemptLimitReached(RuntimeError):
+    pass
+
+
 MANUAL_RECONCILIATION_CONTRACT = "fragarach_ii.manual_request_reconciliation.v1"
 MANUAL_RECONCILIATION_OUTCOMES = {
     "AUTOMATION_RESTORED", "REQUEST_ALREADY_SATISFIED",
@@ -1307,6 +1320,11 @@ def scheduler_snapshot(
     commissioning_matrix = _scheduler_commissioning_projection(
         database_path, freshness_report, universe
     )
+    from .routing_service import current_revision
+    active_routing_revision = str(current_revision(database_path)["routing_revision"])
+    ledger_lanes = latest_attempts_by_lane(
+        database_path, routing_revision=active_routing_revision,
+    )
     rows: list[dict[str, object]] = []
     with open_read_only(database_path) as connection:
         for audited in freshness_report["lanes"]:
@@ -1360,6 +1378,19 @@ def scheduler_snapshot(
                 if scheduler_owned else "Not Commissioned"
             )
             publication_entry = publication.get("lanes", {}).get(f"{symbol}:{timeframe}", {})
+            attempts_by_boundary = recorded.get("provider_attempts_by_boundary", {})
+            attempt_boundary = (
+                next(reversed(attempts_by_boundary))
+                if isinstance(attempts_by_boundary, dict) and attempts_by_boundary else None
+            )
+            boundary_attempts = (
+                list(attempts_by_boundary.get(attempt_boundary, []))
+                if attempt_boundary is not None else []
+            )
+            ledger_attempts = ledger_lanes.get(lane_id, [])
+            if ledger_attempts:
+                attempt_boundary = str(ledger_attempts[0]["expected_boundary"])
+                boundary_attempts = [str(item["provider"]) for item in ledger_attempts]
             publication_status = _normalized_publication_state(publication_entry)
             if (
                 scheduler_owned
@@ -1395,6 +1426,13 @@ def scheduler_snapshot(
                     or freshness.get("reason_code")
                     or schedule.get("reason_code"),
                     "routing_decision": recorded.get("routing_decision"),
+                    "routing_revision": (
+                        ledger_attempts[0]["routing_revision"]
+                        if ledger_attempts else recorded.get("routing_revision")
+                    ),
+                    "attempt_count": len(boundary_attempts),
+                    "attempt_cap": MAX_PROVIDER_DISPATCH_ATTEMPTS_PER_BOUNDARY,
+                    "attempt_boundary": attempt_boundary,
                     "providers_considered": recorded.get("providers_considered", []),
                     "acquisition_plan": lane_acquisition_plans.get(lane_id),
                     "provider_capabilities": lane_capabilities,
@@ -2179,7 +2217,24 @@ def _run_due_acquisitions_unlocked(
         observations = 0
         final_reason: str | None = None
         failures: list[dict[str, object]] = []
-        attempted: set[str] = set()
+        recorded.setdefault("provider_attempts_by_boundary", {})
+        prior_attempts = recorded["provider_attempts_by_boundary"].get(scheduled_for, [])
+        attempted_order = [str(item) for item in prior_attempts if item]
+        automatic_work = work["work_class"] in {"NORMAL", "QUEUE"}
+        attempt_ledger = ProviderAttemptLedger(database_path) if automatic_work else None
+        attempt_revision = None
+        if attempt_ledger is not None:
+            from .routing_service import current_revision
+            attempt_revision = str(current_revision(database_path)["routing_revision"])
+            for attempt in attempt_ledger.attempts(
+                lane=f"{symbol}:{timeframe}",
+                expected_boundary=str(work.get("expected_edge") or "UNRESOLVED"),
+                routing_revision=attempt_revision,
+            ):
+                provider_name = str(attempt["provider"])
+                if provider_name not in attempted_order:
+                    attempted_order.append(provider_name)
+        attempted: set[str] = set(attempted_order)
         provider_started_at: datetime | None = None
         provider_finished_at: datetime | None = None
         canonical_commit_started_at: datetime | None = None
@@ -2188,7 +2243,6 @@ def _run_due_acquisitions_unlocked(
         locked_before_provider_ms = 0.0
         locked_after_provider_started: float | None = None
         reservation_wait_ms = 0.0
-        recorded.setdefault("provider_attempts_by_boundary", {})
         requested_bounds = work.get("requested_bounds")
         diagnostic_bounds = _diagnostic_request_bounds(requested_bounds)
         bounds = diagnostic_bounds
@@ -2244,6 +2298,7 @@ def _run_due_acquisitions_unlocked(
                 journal.record_routing(plan)
                 recorded.update(
                     routing_decision=plan.get("selection_reason"),
+                    routing_revision=plan.get("routing_revision"),
                     providers_considered=plan["providers_considered"],
                     providers_rejected=[item for item in plan["providers_considered"] if not item["eligible"]],
                     current_provider=plan.get("selected_provider"),
@@ -2251,6 +2306,7 @@ def _run_due_acquisitions_unlocked(
                 queued = queue_by_id[queue_id]
                 queued.update(
                     selected_provider=plan.get("selected_provider"),
+                    routing_revision=plan.get("routing_revision"),
                     estimated_requests=plan.get("estimated_request_count", 0),
                     fallback_position=len(attempted) + 1,
                 )
@@ -2345,13 +2401,24 @@ def _run_due_acquisitions_unlocked(
                         )
                         cycle["deferred_count"] = int(cycle["deferred_count"]) + 1
                         break
-                    reason = "ALL_PROVIDERS_EXHAUSTED" if attempted else "NO_ELIGIBLE_PROVIDER"
+                    exhausted = (
+                        attempt_ledger is not None and attempt_revision is not None
+                        and len(attempt_ledger.attempts(
+                            lane=f"{symbol}:{timeframe}",
+                            expected_boundary=str(work.get("expected_edge") or "UNRESOLVED"),
+                            routing_revision=attempt_revision,
+                        )) >= MAX_PROVIDER_DISPATCH_ATTEMPTS_PER_BOUNDARY
+                    )
+                    reason = (
+                        "PROVIDER_ATTEMPT_LIMIT_REACHED" if exhausted else
+                        "ALL_PROVIDERS_EXHAUSTED" if attempted else "NO_ELIGIBLE_PROVIDER"
+                    )
                     request = create_manual_request(
                         journal.manual_requests,
                         symbol=symbol, timeframe=timeframe,
                         missing_start=bounds[0], missing_end=bounds[1],
                         expected_edge=expected_edge, reason=reason,
-                        providers_attempted=sorted(attempted), failures=failures,
+                        providers_attempted=list(attempted_order), failures=failures,
                         providers_considered=list(recorded.get("providers_considered", [])),
                         provider_fact_revision=int(journal.data.get("current_provider_fact_revision", 0) or 0),
                         capability_projection_revision=journal.data.get("current_capability_projection_revision"),
@@ -2374,6 +2441,40 @@ def _run_due_acquisitions_unlocked(
                     queue_by_id.pop(queue_id, None)
                     break
                 provider = str(provider)
+                actual_attempt_count = len(attempted)
+                if attempt_ledger is not None and attempt_revision is not None:
+                    actual_attempt_count = max(actual_attempt_count, len(attempt_ledger.attempts(
+                        lane=f"{symbol}:{timeframe}",
+                        expected_boundary=str(work.get("expected_edge") or "UNRESOLVED"),
+                        routing_revision=attempt_revision,
+                    )))
+                if not _provider_dispatch_allowed(actual_attempt_count):
+                    reason = "PROVIDER_ATTEMPT_LIMIT_REACHED"
+                    request = create_manual_request(
+                        journal.manual_requests,
+                        symbol=symbol, timeframe=timeframe,
+                        missing_start=bounds[0], missing_end=bounds[1],
+                        expected_edge=expected_edge, reason=reason,
+                        providers_attempted=list(attempted_order), failures=failures,
+                        providers_considered=list(recorded.get("providers_considered", [])),
+                        provider_fact_revision=int(journal.data.get("current_provider_fact_revision", 0) or 0),
+                        capability_projection_revision=journal.data.get("current_capability_projection_revision"),
+                        now=observed,
+                    )
+                    recorded.update(
+                        queue_state=None, result="FAILED", reason=reason,
+                        manual_request=request["id"], current_provider=None,
+                    )
+                    record_stop(
+                        journal.data, queued, cycle_id=cycle_id,
+                        current_stage="ELIGIBILITY_EVALUATED",
+                        reason_code="PROVIDER_UNAVAILABLE", retryable=False,
+                        detail=reason,
+                    )
+                    outcome, final_reason = "FAILED", reason
+                    cycle["failed_count"] = int(cycle["failed_count"]) + 1
+                    queue_by_id.pop(queue_id, None)
+                    break
                 activity["provider"] = provider
                 profile = profiles_by_id[provider]
                 request_count = int(plan["estimated_request_count"])
@@ -2442,7 +2543,10 @@ def _run_due_acquisitions_unlocked(
                     ended_at=attempt_started_at,
                 )
                 attempted.add(provider)
-                recorded["provider_attempts_by_boundary"][scheduled_for] = sorted(attempted)
+                if provider not in attempted_order:
+                    attempted_order.append(provider)
+                recorded["provider_attempts_by_boundary"][scheduled_for] = list(attempted_order)
+                http_attempt_id = f"http:{cycle_id}:{queue_id}:{provider}"
                 try:
                     asset_class = _asset_class(database_path, symbol)
                     def dispatched(index: int) -> None:
@@ -2456,6 +2560,19 @@ def _run_due_acquisitions_unlocked(
                         ):
                             journal.data["pause_records"] = latest.data.get("pause_records", [])
                             raise _DispatchPaused("OPERATOR_PAUSED")
+                        if attempt_ledger is not None and attempt_revision is not None:
+                            reserved = attempt_ledger.reserve(
+                                request_id=http_attempt_id,
+                                lane=f"{symbol}:{timeframe}",
+                                expected_boundary=str(work.get("expected_edge") or "UNRESOLVED"),
+                                routing_revision=attempt_revision,
+                                provider=provider, at=datetime.now(UTC),
+                            )
+                            if reserved is None:
+                                raise _AutomaticAttemptLimitReached(
+                                    "PROVIDER_ATTEMPT_LIMIT_REACHED"
+                                )
+                            attempt_ledger.mark_dispatched(http_attempt_id)
                         budgets[provider].dispatch(reservation_id, 1)
                         with state_lock:
                             cycle["request_started_count"] = int(cycle["request_started_count"]) + 1
@@ -2471,6 +2588,11 @@ def _run_due_acquisitions_unlocked(
                             journal.save()
 
                     def responded(index: int, succeeded: bool) -> None:
+                        if attempt_ledger is not None:
+                            attempt_ledger.mark_outcome(
+                                http_attempt_id,
+                                "RESPONSE_RECEIVED" if succeeded else "PROVIDER_FAILURE",
+                            )
                         with state_lock:
                             lifecycle[index].update(
                                 state="RESPONSE_RECEIVED" if succeeded else "FAILED_AFTER_DISPATCH",
@@ -2701,6 +2823,34 @@ def _run_due_acquisitions_unlocked(
                             next_eligible_at=next_attempt, detail=detail,
                         )
                         cycle["deferred_count"] = int(cycle["deferred_count"]) + 1
+                    break
+                except _AutomaticAttemptLimitReached:
+                    budgets[provider].release(reservation_id)
+                    reason = "PROVIDER_ATTEMPT_LIMIT_REACHED"
+                    request = create_manual_request(
+                        journal.manual_requests,
+                        symbol=symbol, timeframe=timeframe,
+                        missing_start=bounds[0], missing_end=bounds[1],
+                        expected_edge=expected_edge, reason=reason,
+                        providers_attempted=list(attempted_order), failures=failures,
+                        providers_considered=list(recorded.get("providers_considered", [])),
+                        provider_fact_revision=int(journal.data.get("current_provider_fact_revision", 0) or 0),
+                        capability_projection_revision=journal.data.get("current_capability_projection_revision"),
+                        now=observed,
+                    )
+                    recorded.update(
+                        queue_state=None, result="FAILED", reason=reason,
+                        manual_request=request["id"], current_provider=None,
+                    )
+                    record_stop(
+                        journal.data, queued, cycle_id=cycle_id,
+                        current_stage="ELIGIBILITY_EVALUATED",
+                        reason_code="PROVIDER_UNAVAILABLE", retryable=False,
+                        detail=reason,
+                    )
+                    outcome, final_reason = "FAILED", reason
+                    cycle["failed_count"] = int(cycle["failed_count"]) + 1
+                    queue_by_id.pop(queue_id, None)
                     break
                 except BaseException as error:
                     classification, _ = classify_failure(error)
@@ -3173,47 +3323,54 @@ class SchedulerService:
 
         from .mt5_bridge_health import bridge_health_status
         from .mt5_bridge_requests import enqueue_due_requests, fail_pending_primary_requests
+        from .mt5_route_manifest import active_bridge_nodes
 
         health = bridge_health_status(self.database_path, now=at)
-        if health.get("effective_status") != "HEALTHY":
-            support = Path(f"{Path(self.database_path).expanduser().resolve()}.read-only-clients")
-            failed = fail_pending_primary_requests(
-                self.database_path,
-                support,
-                reason=f"MT5_BRIDGE_HEALTH_{health.get('effective_status')}",
-                at=at,
-            )
-            register = LaneUpdateRegister(self.database_path)
-            for grant in failed:
-                symbol, _, timeframe = str(grant.get("lane") or "").partition(":")
-                if not symbol or not timeframe:
-                    continue
-                try:
-                    register.release_provider_handoff(
-                        asset=symbol,
-                        timeframe=timeframe,
-                        reason=str(grant.get("reason") or "MT5_BRIDGE_FAILURE_FALLBACK"),
-                        at=at,
-                    )
-                except (KeyError, ValueError, sqlite3.Error):
-                    continue
+        support = Path(f"{Path(self.database_path).expanduser().resolve()}.read-only-clients")
+        active_nodes = {str(node["node_id"]) for node in active_bridge_nodes()}
+        healthy_nodes = {
+            str(item.get("node", {}).get("node_id") or "")
+            for item in health.get("nodes", [])
+            if isinstance(item, dict) and item.get("effective_status") == "HEALTHY"
+        } & active_nodes
+        unhealthy_nodes = active_nodes - healthy_nodes
+        failed = fail_pending_primary_requests(
+            self.database_path, support,
+            reason="MT5_BRIDGE_NODE_UNHEALTHY",
+            at=at, node_ids=unhealthy_nodes,
+        ) if unhealthy_nodes else []
+        register = LaneUpdateRegister(self.database_path)
+        for grant in failed:
+            symbol, separator, timeframe = str(grant.get("lane") or "").partition(":")
+            if not separator:
+                continue
+            try:
+                register.release_provider_handoff(
+                    asset=symbol, timeframe=timeframe,
+                    reason=str(grant.get("reason") or "MT5_BRIDGE_FAILURE_FALLBACK"), at=at,
+                )
+            except (KeyError, ValueError, sqlite3.Error):
+                continue
+        if not healthy_nodes:
             return {
                 "status": "FALLBACK_AVAILABLE",
                 "bridge": health.get("effective_status"),
+                "unhealthy_nodes": sorted(unhealthy_nodes),
                 "failed": failed,
                 "queued": [],
             }
-        support = Path(f"{Path(self.database_path).expanduser().resolve()}.read-only-clients")
         try:
             report = enqueue_due_requests(
                 self.database_path,
                 support,
                 support / "mt5-bridge" / "scheduler-state.json",
                 at=at,
+                eligible_node_ids=healthy_nodes,
             )
         except (OSError, RuntimeError, ValueError, sqlite3.Error) as error:
             return {"status": "FALLBACK_AVAILABLE", "bridge": "QUEUE_ERROR", "detail": str(error), "queued": []}
-        register = LaneUpdateRegister(self.database_path)
+        report["unhealthy_nodes"] = sorted(unhealthy_nodes)
+        report["failed"] = failed
         for item in [*report.get("pending", []), *report.get("queued", [])]:
             if not isinstance(item, dict) or not isinstance(item.get("lane"), str):
                 continue
@@ -3251,8 +3408,17 @@ class SchedulerService:
     def _queue_mt5_activity_backfill(self) -> dict[str, object]:
         """Offer one history chunk only after ordinary MT5 work is queued."""
 
+        from .mt5_bridge_health import bridge_health_status
         from .mt5_tick_activity import queue_activity_backfill_requests
 
+        fusion = next(
+            (
+                item for item in bridge_health_status(self.database_path).get("nodes", [])
+                if item.get("node", {}).get("node_id") == "tradewinds-mt5-bridge"
+            ), None,
+        )
+        if fusion is None or fusion.get("effective_status") != "HEALTHY":
+            return {"status": "FUSION_BRIDGE_UNAVAILABLE", "queued": []}
         support = Path(f"{Path(self.database_path).expanduser().resolve()}.read-only-clients")
         try:
             return queue_activity_backfill_requests(
@@ -3262,8 +3428,17 @@ class SchedulerService:
             return {"status": "BACKFILL_QUEUE_ERROR", "detail": str(error), "queued": []}
 
     def _queue_mt5_continuous_activity(self, *, at: datetime) -> dict[str, object]:
+        from .mt5_bridge_health import bridge_health_status
         from .mt5_tick_activity import queue_continuous_activity_requests
 
+        fusion = next(
+            (
+                item for item in bridge_health_status(self.database_path, now=at).get("nodes", [])
+                if item.get("node", {}).get("node_id") == "tradewinds-mt5-bridge"
+            ), None,
+        )
+        if fusion is None or fusion.get("effective_status") != "HEALTHY":
+            return {"status": "FUSION_BRIDGE_UNAVAILABLE", "queued": []}
         support = Path(f"{Path(self.database_path).expanduser().resolve()}.read-only-clients")
         try:
             return queue_continuous_activity_requests(
@@ -3459,6 +3634,36 @@ def _due_lanes_from_register(
                 )
                 continue
             boundary = str(entry.get("next_expected_boundary_utc") or entry["next_check_at_utc"])
+            canonical_edge = freshness.get("latest_canonical_observation")
+            stored_edge = entry.get("last_successful_bar_utc")
+            try:
+                canonical_time = datetime.fromisoformat(str(canonical_edge)) if canonical_edge else None
+                stored_time = datetime.fromisoformat(str(stored_edge)) if stored_edge else None
+            except ValueError:
+                canonical_time, stored_time = None, None
+            if canonical_time is not None and (stored_time is None or canonical_time > stored_time):
+                # A bridge or another governed writer can advance canonical
+                # evidence independently of this register. Reconcile only the
+                # claimed lane, so an obsolete attempt boundary cannot exhaust
+                # providers forever while its bars are already newer.
+                schedule = schedule_for_lane(
+                    connection, symbol=symbol, timeframe=timeframe,
+                    after=canonical_time,
+                )
+                next_boundary = schedule.get("next_scheduled_acquisition")
+                if next_boundary and register.reconcile_canonical_edge(
+                    asset=symbol, timeframe=timeframe,
+                    canonical_edge=str(canonical_edge),
+                    next_expected_boundary=str(next_boundary), at=observed,
+                ):
+                    boundary = str(next_boundary)
+                    if freshness.get("state") == "Current":
+                        register.record_checked(
+                            asset=symbol, timeframe=timeframe,
+                            checked_boundary=boundary, at=observed,
+                            outcome="EXTERNAL_CANONICAL_ADVANCED",
+                        )
+                        continue
             result.append({
                 "symbol": symbol,
                 "timeframe": timeframe,
@@ -3708,6 +3913,8 @@ def _time_triggered_runtime_snapshot(
 
 
 def _due_lanes(database_path, observed, journal, *, catch_up):
+    from .routing_service import current_revision
+    routing_revision = str(current_revision(database_path)["routing_revision"])
     result = []
     prior = observed - timedelta(microseconds=1)
     with open_read_only(database_path) as connection:
@@ -3755,6 +3962,7 @@ def _due_lanes(database_path, observed, journal, *, catch_up):
                 attempt_key = f"OPERATOR_RETRY:{freshness['expected_latest']}"
             if operator_fetch:
                 attempt_key = f"OPERATOR_FETCH:{operator_fetch['id']}"
+            attempt_key = f"{attempt_key}@{routing_revision}"
             if (
                 recorded.get("last_scheduled_acquisition") == attempt_key
                 and recorded.get("result") != "WAITING"

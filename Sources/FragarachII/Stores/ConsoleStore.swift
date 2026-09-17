@@ -79,6 +79,12 @@ struct EstateAdmissionProgress: Equatable {
     @Published var providerFactsResolving=false
     @Published var providerCredentialRepairRequested=false
     @Published var latestProviderProbe:ProviderCapabilityProbe?
+    @Published var routingSnapshot:RoutingSnapshot?
+    @Published var routingLoading=false
+    @Published var routingError:String?
+    @Published var routingValidation:RoutingDraftValidation?
+    @Published var routingActivation:RoutingActivationReceipt?
+    @Published var routingRequestedLaneID:String?
     @Published var readOnlyClientsSnapshot:ReadOnlyClientsSnapshot?
     @Published var readOnlyClientsError:String?
     @Published var readOnlyClientsBusy=false
@@ -94,6 +100,7 @@ struct EstateAdmissionProgress: Equatable {
     private let schedulerLifecycleBridge=ProcessBridge()
     private let schedulerDiagnosticsBridge=ProcessBridge()
     private let providerFactsBridge=ProcessBridge()
+    private let routingBridge=ProcessBridge()
     private let readOnlyClientsBridge=ProcessBridge()
     private let readOnlyClientsStatusBridge=ProcessBridge()
     private var schedulerMonitorTask:Task<Void,Never>?
@@ -712,6 +719,79 @@ struct EstateAdmissionProgress: Equatable {
             guard result.exitCode==0 else { throw MarketDiscoveryReadError.serviceFailure(result.stderr.isEmpty ? result.stdout:result.stderr) }
             await refreshProviderFacts();await refreshSchedulerStatus();await runSchedulerQueue();return true
         } catch { providerFactsError=error.localizedDescription;return false }
+    }
+
+    func openRouting(symbol:String,timeframe:String) {
+        routingRequestedLaneID="\(symbol.uppercased()):\(timeframe.uppercased())"
+        section = .manageData
+        manageDataSection = .routing
+    }
+
+    func refreshRouting() async {
+        guard !routingLoading else{return};routingLoading=true;routingError=nil;defer{routingLoading=false}
+        let config=configuration,bridge=routingBridge
+        do {
+            let result=try await Task.detached{try bridge.run(.readRouting,config:config)}.value
+            guard result.exitCode==0 else{throw MarketDiscoveryReadError.serviceFailure(result.stderr.isEmpty ? result.stdout:result.stderr)}
+            routingSnapshot=try JSONDecoder().decode(RoutingSnapshot.self,from:Data(result.stdout.utf8))
+        } catch { routingError=error.localizedDescription }
+    }
+
+    func previewRouting(symbol:String,timeframe:String,providers:[String],disabled:[String],reason:String) async -> Bool {
+        guard !routingLoading else{return false};routingLoading=true;routingError=nil;routingValidation=nil;defer{routingLoading=false}
+        let config=configuration,bridge=routingBridge
+        do {
+            let draftResult=try await Task.detached{try bridge.run(.saveRoutingDraft(symbol:symbol,timeframe:timeframe,providers:providers,disabled:disabled,reason:reason,restoreDefault:false),config:config)}.value
+            guard draftResult.exitCode==0 else{throw MarketDiscoveryReadError.serviceFailure(draftResult.stderr.isEmpty ? draftResult.stdout:draftResult.stderr)}
+            let draft=try JSONDecoder().decode(RoutingDraft.self,from:Data(draftResult.stdout.utf8))
+            let validationResult=try await Task.detached{try bridge.run(.validateRoutingDraft(id:draft.draftID),config:config)}.value
+            guard validationResult.exitCode==0 else{throw MarketDiscoveryReadError.serviceFailure(validationResult.stderr.isEmpty ? validationResult.stdout:validationResult.stderr)}
+            routingValidation=try JSONDecoder().decode(RoutingDraftValidation.self,from:Data(validationResult.stdout.utf8))
+            return routingValidation?.valid==true
+        } catch { routingError=error.localizedDescription;return false }
+    }
+
+    func previewRoutingRestore(symbol:String,timeframe:String,reason:String) async -> Bool {
+        guard !routingLoading else{return false};routingLoading=true;routingError=nil;routingValidation=nil;defer{routingLoading=false}
+        let config=configuration,bridge=routingBridge
+        do {
+            let draftResult=try await Task.detached{try bridge.run(.saveRoutingDraft(symbol:symbol,timeframe:timeframe,providers:[],disabled:[],reason:reason,restoreDefault:true),config:config)}.value
+            guard draftResult.exitCode==0 else{throw MarketDiscoveryReadError.serviceFailure(draftResult.stderr.isEmpty ? draftResult.stdout:draftResult.stderr)}
+            let draft=try JSONDecoder().decode(RoutingDraft.self,from:Data(draftResult.stdout.utf8))
+            let validationResult=try await Task.detached{try bridge.run(.validateRoutingDraft(id:draft.draftID),config:config)}.value
+            guard validationResult.exitCode==0 else{throw MarketDiscoveryReadError.serviceFailure(validationResult.stderr.isEmpty ? validationResult.stdout:validationResult.stderr)}
+            routingValidation=try JSONDecoder().decode(RoutingDraftValidation.self,from:Data(validationResult.stdout.utf8))
+            return routingValidation?.valid==true
+        } catch { routingError=error.localizedDescription;return false }
+    }
+
+    func activateRoutingDraft() async -> Bool {
+        guard !routingLoading,let id=routingValidation?.draftID else{return false};routingLoading=true;routingError=nil;defer{routingLoading=false}
+        let config=configuration,bridge=routingBridge
+        do {
+            let result=try await Task.detached{try bridge.run(.activateRoutingDraft(id:id),config:config)}.value
+            guard result.exitCode==0 else{throw MarketDiscoveryReadError.serviceFailure(result.stderr.isEmpty ? result.stdout:result.stderr)}
+            routingActivation=try JSONDecoder().decode(RoutingActivationReceipt.self,from:Data(result.stdout.utf8))
+            routingValidation=nil
+            routingLoading=false
+            await refreshRouting();await refreshSchedulerStatus();await refreshProviderFacts()
+            routingLoading=true
+            return true
+        } catch { routingError=error.localizedDescription;return false }
+    }
+
+    func restoreRoutingDefaults(symbol:String,timeframe:String,reason:String) async -> Bool {
+        guard !routingLoading else{return false};routingLoading=true;routingError=nil;defer{routingLoading=false}
+        let config=configuration,bridge=routingBridge
+        do {
+            let result=try await Task.detached{try bridge.run(.restoreRoutingDefaults(symbol:symbol,timeframe:timeframe,reason:reason),config:config)}.value
+            guard result.exitCode==0 else{throw MarketDiscoveryReadError.serviceFailure(result.stderr.isEmpty ? result.stdout:result.stderr)}
+            routingActivation=try JSONDecoder().decode(RoutingActivationReceipt.self,from:Data(result.stdout.utf8))
+            routingLoading=false
+            await refreshRouting();await refreshSchedulerStatus()
+            routingLoading=true
+            return true
+        } catch { routingError=error.localizedDescription;return false }
     }
 
     @discardableResult private func performSchedulerControl(_ intent:OperationIntent) async -> Bool {

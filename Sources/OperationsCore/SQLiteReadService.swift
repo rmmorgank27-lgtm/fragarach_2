@@ -28,7 +28,7 @@ public final class SQLiteReadService: @unchecked Sendable {
         let tables = Set(try strings(db, "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'"))
         guard tables == foundationTables else { throw AuthorityReadError.incompatibleDatabase("current authority table identity failed") }
         let migrations = try int(db, "SELECT count(*) FROM schema_migrations")
-        guard migrations == 13 else { throw AuthorityReadError.incompatibleDatabase("expected thirteen recognized migrations") }
+        guard migrations == 14 else { throw AuthorityReadError.incompatibleDatabase("expected fourteen recognized migrations") }
         let registrations = try queryRegistrations(db)
         let coverageByLane = estateTruth.map { state in
             Dictionary(uniqueKeysWithValues: state.truthMatrix.map { ($0.id, $0.truthState.coverage) })

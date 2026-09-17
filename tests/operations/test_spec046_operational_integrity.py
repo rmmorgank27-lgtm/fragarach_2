@@ -156,7 +156,10 @@ class Spec046OperationalIntegrityTests(unittest.TestCase):
                 )
             register = LaneUpdateRegister(database)
             register.initialize_if_needed(at=now)
-            register.block(asset="XAUUSD", timeframe="D1", reason="PROVIDER_REPAIR_REQUIRED", at=now)
+            register.block(
+                asset="XAUUSD", timeframe="D1", reason="PROVIDER_REPAIR_REQUIRED",
+                at=now, approved=True,
+            )
 
             pause = pause_acquisition(
                 database, scope_type="SYMBOL", scope_identifier="AUDUSD",
