@@ -12,7 +12,7 @@ from pathlib import Path
 from .calendars import CalendarRegistry, ConfigurationError, expected_session_dates
 from .lane_commissioning import resolved_calendar_id
 from .operational_schedule import latest_closed_session_date
-from .validation.intraday_profiles import expected_opens, profile_for
+from .validation.intraday_profiles import expected_opens, operational_profile_for
 
 
 FRESHNESS_CONTRACT = "fragarach_ii.lane_freshness.v1"
@@ -342,7 +342,7 @@ def _assess_intraday(
     config_root: str | Path | None,
 ) -> dict[str, object]:
     try:
-        profile = profile_for(asset_class, timeframe)
+        profile = operational_profile_for(symbol, asset_class, timeframe)
     except ValueError as error:
         return _unavailable(
             symbol,
