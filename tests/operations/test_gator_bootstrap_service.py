@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from fragarach_ii.commands.get_gator_bootstrap import main
 from fragarach_ii.gator_bootstrap_service import (
@@ -16,6 +17,7 @@ from fragarach_ii.gator_bootstrap_service import (
 )
 from fragarach_ii.calendars import CalendarRegistry
 from tests.validation.test_d1_session_validation import _create_lane
+from fragarach_ii.storage import registered_writer
 
 
 class GatorBootstrapServiceTests(unittest.TestCase):
@@ -72,6 +74,41 @@ class GatorBootstrapServiceTests(unittest.TestCase):
         self.assertIn(audusd["market_session"]["state"], {"OPEN", "CLOSED"})
         self.assertEqual(audusd["market_session"]["calendar_id"], "FX_24X5_NEW_YORK_ROLLOVER_V1")
         self.assertGreaterEqual(len(payload["lanes"]), 3)
+
+    def test_M30_uses_native_completed_bars_and_public_admission_policy(self) -> None:
+        with registered_writer(self.database) as connection:
+            connection.execute("""INSERT INTO evidence_lanes
+                (asset,timeframe,registration_timeframe,lane_contract,lane_contract_version,created_at_utc)
+                VALUES ('AUDUSD','M30','D1','EVIDENCE_LANE_V1',1,'2026-07-06T00:00:00+00:00')""")
+            for index in range(5):
+                start = 1783296000 + index * 1800
+                connection.execute(
+                    """INSERT INTO bars (asset,timeframe,open_time_utc,close_time_utc,
+                       open,high,low,close,created_by_ingest_run_id,updated_by_ingest_run_id)
+                       VALUES ('AUDUSD','M30',?,?, '1','2','0','1','run-1','run-1')""",
+                    (start, start + 1800),
+                )
+            # A stored future/forming candle must not enter the completed tail.
+            connection.execute(
+                """INSERT INTO bars (asset,timeframe,open_time_utc,close_time_utc,
+                   open,high,low,close,created_by_ingest_run_id,updated_by_ingest_run_id)
+                   VALUES ('AUDUSD','M30',4102444800,4102446600,'1','2','0','1','run-1','run-1')""",
+            )
+        before = self.database.read_bytes()
+        payload = GatorBootstrapService(self.database).build(bar_capacity=3)
+        lane = next(lane for lane in payload['lanes'] if lane['timeframe'] == 'M30')
+        self.assertEqual(lane['Status'], 'AVAILABLE')
+        self.assertEqual(lane['bar_count'], 3)
+        self.assertEqual(lane['OHLC'][-1]['timestamp'], '2026-07-06T02:00:00+00:00')
+        symbol = next(symbol for symbol in payload['symbols'] if symbol['symbol'] == 'AUDUSD')
+        self.assertIn('M30', [history['timeframe'] for history in symbol['histories']])
+        with patch('fragarach_ii.gator_bootstrap_service.market_policy', return_value='INTENTIONALLY_DEFERRED'):
+            deferred = GatorBootstrapService(self.database).build(bar_capacity=3)
+        rejected = next(lane for lane in deferred['lanes'] if lane['timeframe'] == 'M30')
+        self.assertEqual(rejected['Status'], 'UNAVAILABLE')
+        self.assertEqual(rejected['Warnings'], ['TIMEFRAME_INTENTIONALLY_DEFERRED'])
+        self.assertTrue(next(lane for lane in deferred['lanes'] if lane['timeframe'] == 'D1')['OHLC'])
+        self.assertEqual(self.database.read_bytes(), before)
 
     def test_market_sessions_are_calendar_backed_and_fail_closed(self) -> None:
         registry = CalendarRegistry(load_symbol_assignments=False)

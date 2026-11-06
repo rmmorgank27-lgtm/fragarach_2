@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 from .calendars import CalendarRegistry
 from .calendars.sessions import session_classification
 from .crypto_intraday_quality import assess_crypto_intraday_rows
-from .lane_commissioning import resolved_calendar_id
+from .lane_commissioning import market_policy, resolved_calendar_id
 from .market_history_service import _iso_utc, _roll_up_d1_rows
 from .scheduler_integrity import _lifecycle_projection
 from .storage import open_read_only
@@ -20,8 +20,8 @@ from .validation.intraday_profiles import is_expected_open, profile_for
 
 CONTRACT = "fragarach.gator_bootstrap.v1"
 PROFILE = "30x30x30"
-TIMEFRAMES = ("MN1", "W1", "D1", "H1", "M5")
-DIRECT_TIMEFRAMES = ("D1", "H1", "M5")
+TIMEFRAMES = ("MN1", "W1", "D1", "H1", "M30", "M5")
+DIRECT_TIMEFRAMES = ("D1", "H1", "M30", "M5")
 
 
 class GatorBootstrapError(RuntimeError):
@@ -62,7 +62,7 @@ class GatorBootstrapService:
                 """
                 SELECT asset,timeframe
                 FROM evidence_lanes
-                WHERE timeframe IN ('D1','H1','M5')
+                WHERE timeframe IN ('D1','H1','M30','M5')
                 ORDER BY asset,timeframe
                 """
             ).fetchall()
@@ -95,6 +95,16 @@ class GatorBootstrapService:
                 and _is_active_lane(str(asset), str(timeframe), lifecycle)
             ]
             for symbol, timeframe in direct_keys:
+                # Adding M30 must respect the same admission policy as public
+                # Market History, including stored but intentionally deferred
+                # stock intraday rows. Existing timeframe behaviour is retained.
+                if timeframe == "M30" and market_policy(
+                    str(registered_by_symbol[symbol][1]), timeframe
+                ) == "INTENTIONALLY_DEFERRED":
+                    lanes.append(_unavailable_lane(
+                        symbol, timeframe, "TIMEFRAME_INTENTIONALLY_DEFERRED",
+                    ))
+                    continue
                 rows = _direct_tail(
                     connection,
                     symbol=symbol,
